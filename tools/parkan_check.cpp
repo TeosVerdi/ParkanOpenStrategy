@@ -289,12 +289,12 @@ int check_effects(const fs::path& game) {
                 try {
                     const ExplosionDef x = decode_expl(e.data);
                     ++expl;
-                    if (!x.effect.empty() && !lib.find(x.effect.archive, x.effect.name)) {
+                    if (!x.fx[0].second.empty() && !lib.find(x.fx[0].first, x.fx[0].second)) {
                         ++bad;
-                        std::printf("  FAIL %s:%s: effect %s not found\n", a, e.name.c_str(), x.effect.name.c_str());
+                        std::printf("  FAIL %s:%s: effect %s not found\n", a, e.name.c_str(), x.fx[0].second.c_str());
                     }
-                    for (std::size_t k = 0; k < x.surface.size(); ++k)
-                        surfaces += x.surface_valid[k] && lib.find(x.surface[k].archive, x.surface[k].name);
+                    for (std::size_t k = 1; k < x.fx.size(); ++k)
+                        surfaces += x.fx_valid[k] && lib.find(x.fx[k].first, x.fx[k].second);
                 } catch (const std::exception& ex) {
                     ++bad;
                     std::printf("  FAIL %s:%s: %s\n", a, e.name.c_str(), ex.what());

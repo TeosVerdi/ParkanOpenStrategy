@@ -192,14 +192,15 @@ ExplosionDef decode_expl(std::span<const std::uint8_t> data) {
     Reader r(data);
     ExplosionDef x;
     x.kind = r.u32();
-    if (x.kind < 1 || x.kind > 3) throw FormatError("EXPL: kind " + std::to_string(x.kind));
+    if (x.kind < 1 || x.kind > 4) throw FormatError("EXPL: kind " + std::to_string(x.kind));
     x.damage = r.f32(), x.radius = r.f32();
-    x.unknown0c = r.f32(), x.unknown10 = r.f32();
-    x.orient_mode = r.u32();
-    x.effect = resource(r); // empty in 2 entries (ba_b_04_part / ba_b_05_part): surface slots only
-    for (std::size_t k = 0; k < x.surface.size(); ++k) {
-        x.surface[k] = resource(r);
-        x.surface_valid[k] = printable(x.surface[k].archive) && printable(x.surface[k].name);
+    x.c = r.f32(), x.d = r.f32();
+    x.orient = r.u32();
+    // fx[0] is empty in ba_b_04_part / ba_b_05_part (surface slots only).
+    for (std::size_t k = 0; k < x.fx.size(); ++k) {
+        x.fx[k].first = fixed_str(r, 32);
+        x.fx[k].second = fixed_str(r, 32);
+        x.fx_valid[k] = printable(x.fx[k].first) && printable(x.fx[k].second);
     }
     if (!r.at_end()) throw FormatError("EXPL: trailing bytes");
     return x;

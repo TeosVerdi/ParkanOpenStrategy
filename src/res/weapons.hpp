@@ -5,6 +5,7 @@
 #pragma once
 
 #include "res/ctld.hpp"
+#include "res/fx.hpp"
 #include "res/library.hpp"
 
 #include <array>
@@ -13,7 +14,6 @@
 
 namespace parkan {
 
-using ResName = std::pair<std::string, std::string>; // {library, entry}
 
 // CDevice::Load (10021d50) for a weapon device (CGunDevice::Load 10029650): the 0xb0-byte header.
 struct GunDeviceSpec {
@@ -41,14 +41,8 @@ struct NdprPart {
 };
 std::vector<NdprPart> decode_ndpr(std::span<const std::uint8_t> data);
 
-// EXPL (792 bytes, strict): read by UpdatePartStage (10011220).
-struct Expl {
-    std::uint32_t kind = 1;  // 1 effect only, 2 direct hit, 3 splash (cubic falloff), 4 splash with 0 part damage
-    float damage = 0, radius = 0, c = 1, d = 1;
-    std::uint32_t orient = 0;
-    std::array<ResName, 12> fx; // [0] default effect, [1 + s] impact effect for surface type s
-};
-Expl decode_explosion(std::span<const std::uint8_t> data);
+// EXPL: decode_expl / ExplosionDef in res/fx.hpp (the one EXPL decoder).
+using Expl = ExplosionDef;
 
 // objects.rlb BULL: 5 × (lib[32], entry[32]) = msh, wea, cpt, ndp, ctl.
 struct BullRecord {
@@ -74,6 +68,13 @@ struct BulletProto {
     // type 4: tracer, engine, muzzle flash; their sound commands are the gun's sound), situation 4 (range
     // exhausted) may name a substitute explosion (event 0x1b).
     std::vector<ResName> spawn_effects;
+    // Per spawn effect: its event's three CTPT points (raw +0x10/+0x14/+0x18, the bullet's own .cpt,
+    // space 1 = the point's part frame at scale 1). fx::contact_frame turns them into the effect's
+    // local frame (bullets: ×0.03, X backwards).
+    struct SpawnPoints {
+        std::array<Vec3, 3> pos{}, vec{};
+    };
+    std::vector<SpawnPoints> spawn_points;
     std::optional<Expl> range_expl;
     ResName range_expl_name;
     std::optional<std::array<float, 3>> seeker; // device 0x11 params: cone half-angle (rad), range (m), lock (ms)

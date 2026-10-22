@@ -1,5 +1,7 @@
 #include "res/weapons.hpp"
 
+#include "control/motion_graph.hpp"
+
 #include <algorithm>
 #include <bit>
 #include <cstring>
@@ -70,23 +72,6 @@ std::vector<NdprPart> decode_ndpr(std::span<const std::uint8_t> data) {
     return out;
 }
 
-Expl decode_explosion(std::span<const std::uint8_t> data) {
-    if (data.size() != 792) throw FormatError("EXPL size " + std::to_string(data.size()) + " != 792");
-    Reader r(data);
-    Expl e;
-    e.kind = r.u32();
-    e.damage = r.f32();
-    e.radius = r.f32();
-    e.c = r.f32();
-    e.d = r.f32();
-    e.orient = r.u32();
-    for (auto& fx : e.fx) {
-        fx.first = fixed(r.bytes(32));
-        fx.second = fixed(r.bytes(32));
-    }
-    return e;
-}
-
 BullRecord decode_bull(std::span<const std::uint8_t> data) {
     if (data.size() != 320) throw FormatError("BULL size " + std::to_string(data.size()) + " != 320");
     BullRecord b;
@@ -106,21 +91,33 @@ BulletProto load_bullet(AssetLibrary& lib, std::string_view name) {
     b.physics = std::bit_cast<std::int32_t>(c.body[21]);
     b.parts = decode_ndpr(require(lib, b.record.ndpr(), "NDPR").data);
     if (b.parts.empty()) throw FormatError("bullet " + b.name + ": NDPR without parts");
-    if (b.parts[0].has_effect()) b.expl = decode_explosion(require(lib, b.parts[0].effect, "EXPL").data);
+    if (b.parts[0].has_effect()) b.expl = decode_expl(require(lib, b.parts[0].effect, "EXPL").data);
     for (const auto& d : c.devices)
         if (d.type == 0x11 && !b.seeker) b.seeker = std::array{at<float>(d.header, 0x2c), at<float>(d.header, 0x30), at<float>(d.header, 0x34)};
     auto list = [&](std::size_t situation) -> const std::vector<CtldEvent>* {
         const std::int32_t i = c.situations[situation];
         return i >= 0 && std::size_t(i) < c.event_lists.size() ? &c.event_lists[std::size_t(i)] : nullptr;
     };
+    std::vector<ContactPoint> points;
+    if (const NResEntry* pe = lib.find(b.record.pairs[2].first, b.record.pairs[2].second)) points = decode_ctpt(pe->data);
     if (const auto* l = list(0))
         for (const auto& e : *l)
-            if (e.type == 4 && !e.entry.empty()) b.spawn_effects.push_back({e.lib, e.entry});
+            if (e.type == 4 && !e.entry.empty()) {
+                b.spawn_effects.push_back({e.lib, e.entry});
+                BulletProto::SpawnPoints sp;
+                for (std::size_t k = 0; k < 3; ++k) {
+                    std::uint32_t i = 0;
+                    std::memcpy(&i, e.raw.data() + 0x10 + 4 * k, 4);
+                    if (i >= points.size()) throw FormatError("bullet " + b.name + ": effect point " + std::to_string(i) + " out of range");
+                    sp.pos[k] = points[i].pos, sp.vec[k] = points[i].vec;
+                }
+                b.spawn_points.push_back(sp);
+            }
     if (const auto* l = list(4))
         for (const auto& e : *l)
             if (e.type == 0x1b && !e.lib.empty() && !e.entry.empty()) {
                 b.range_expl_name = {e.lib, e.entry};
-                b.range_expl = decode_explosion(require(lib, b.range_expl_name, "EXPL").data);
+                b.range_expl = decode_expl(require(lib, b.range_expl_name, "EXPL").data);
             }
     return b;
 }
@@ -165,7 +162,7 @@ WeaponCorpus scan_weapon_corpus(AssetLibrary& lib) {
     w.bullets = bullets.size();
     for (const auto& en : lib.archive("weapon.rlb").entries())
         if (en.type == fourcc("EXPL")) {
-            decode_explosion(en.data);
+            decode_expl(en.data);
             ++w.expl_entries;
         }
     return w;

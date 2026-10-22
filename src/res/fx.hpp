@@ -11,6 +11,7 @@
 #include "core/math.hpp"
 
 #include <array>
+#include <utility>
 #include <variant>
 
 namespace parkan {
@@ -166,19 +167,21 @@ FxEffect decode_fx(std::span<const std::uint8_t> data);
 // The sound commands of effects.rlb entry `name`; empty when the effect does not exist.
 std::vector<FxSound> load_fx_sounds(AssetLibrary& lib, std::string_view name);
 
-// EXPL (792 bytes): what a destroyed part or an exploding bullet spawns. Read by Control
-// (CControlBase::UpdatePartStage 10011220) through the NDPR / bullet definitions.
+// EXPL (792 bytes): what a destroyed part or an exploding bullet spawns and deals. Read by Control
+// (CControlBase::UpdatePartStage 10011220) through the NDPR / bullet definitions; the damage semantics
+// are in notes/weapons-damage.md, the layout in notes/effects.md §8. The one decoder for EXPL.
+using ResName = std::pair<std::string, std::string>; // {library, entry}
+
 struct ExplosionDef {
-    std::uint32_t kind = 0;      // +0x00: 1 (26), 2 (54), 3 (64) [meaning inferred: damage class]
-    float damage = 0;            // +0x04: × the object's hit-point multiplier
-    float radius = 0;            // +0x08: damage radius (× object scale except for bullets)
-    float unknown0c = 1, unknown10 = 1; // +0x0c, +0x10: always 1
-    std::uint32_t orient_mode = 0;      // +0x14: 0 or 7 in the data (switch in UpdatePartStage)
-    FxResourceRef effect;               // +0x18: default effect
-    // +0x58 + 64·k: per ground-surface effect (k = surface index 0..10); falls back to `effect` when
-    // the slot does not resolve. Slots past the authored ones hold editor garbage.
-    std::array<FxResourceRef, 11> surface;
-    std::array<bool, 11> surface_valid{}; // printable, non-empty strings (authored)
+    std::uint32_t kind = 1;  // +0x00: 1 effect only, 2 direct hit, 3 splash (cubic falloff), 4 splash with 0 part damage
+    float damage = 0;        // +0x04: × the object's hit-point multiplier
+    float radius = 0;        // +0x08: damage radius (× object scale except for bullets)
+    float c = 1, d = 1;      // +0x0c, +0x10: always 1 in the data (meaning open)
+    std::uint32_t orient = 0; // +0x14: spawn-frame mode (switch in UpdatePartStage); 0 or 7 in the data
+    // +0x18 + 64·i: [0] default effect, [1 + s] impact effect for ground surface s (0..10); a slot that
+    // does not resolve falls back to [0]. Slots past the authored ones hold editor garbage.
+    std::array<ResName, 12> fx;
+    std::array<bool, 12> fx_valid{}; // printable, non-empty strings (authored)
 };
 
 ExplosionDef decode_expl(std::span<const std::uint8_t> data);

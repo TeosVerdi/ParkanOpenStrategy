@@ -84,6 +84,14 @@ struct FxContext {
 // effects.rlb entry `name` (case-insensitive); nullptr when it does not exist. Throws FormatError.
 std::shared_ptr<const FxEffect> load_effect(AssetLibrary& lib, std::string_view name);
 
+// The local frame a CTLD "start effect at points" event (type 4, Control RunMotionEvents 10002800)
+// gives its effect: three CTPT points (pos, vec in their part's frame × object scale, space 1).
+// Distinct vectors become the columns as they are (bullets: Dir/Width/Height, each 0.03 long, so the
+// effect is scaled ×0.03 with X along −forward); two equal vectors build an orthogonal frame
+// (FUN_10004070); three equal ones a frame along that vector scaled by its length (FUN_10003ef0).
+// The origin is the points' centroid.
+Mat4 contact_frame(const std::array<Vec3, 3>& pos, const std::array<Vec3, 3>& vec);
+
 class EffectInstance {
 public:
     // CreateEffect: the instance starts at `now` (unless header flag 0x40) and sits at `world`.
@@ -98,6 +106,9 @@ public:
     void set_scale(Vec3 s);
     // The owner's (or its part's) world matrix: world = owner × local. Identity when unattached.
     void set_owner(const Mat4& owner);
+    // The spawn frame under every later set_transform: local = transform × frame (contact_frame of the
+    // spawning event). Identity by default.
+    void set_spawn_frame(const Mat4& frame);
     // StartEffect(handle, mode): restart now with time mode `mode` (default: the template's).
     void start(double now, std::optional<std::uint32_t> mode = std::nullopt);
     // StopEffect: let it reach its end, then restart in the template's mode (CFxInstance_Update).
@@ -129,6 +140,7 @@ private:
     float start_ms_ = 0, end_ms_ = 0, param_ = 0, last_value_ = 0;
     std::uint32_t mode_ = 0;
     bool enabled_ = true, stop_pending_ = false, attached_ = false, drawable_ = false;
+    Mat4 frame_ = Mat4::identity(), placed_ = Mat4::identity();
     Mat4 base_ = Mat4::identity(), owner_ = Mat4::identity(), local_ = Mat4::identity(), world_ = Mat4::identity();
     Vec3 pos_{}, scale_{1, 1, 1};
     float t_ = 0, age_ = 0;

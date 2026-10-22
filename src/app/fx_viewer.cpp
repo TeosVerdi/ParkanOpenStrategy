@@ -3,6 +3,7 @@
 #include "app/fx_draw.hpp"
 
 #include "fx/effect.hpp"
+#include "fx/spawn_frames.hpp"
 #include "res/library.hpp"
 
 #include <algorithm>
@@ -43,7 +44,23 @@ int run_effect_viewer(SDL_Window* window, AssetLibrary& lib, const EffectViewerO
     if (!fx) throw std::runtime_error("effect not found in effects.rlb: " + opt.effect);
     FxContext ctx(lib);
     const Mat4 placement = Mat4::identity();
-    std::optional<EffectInstance> inst(std::in_place, fx, ctx, placement, 0.0);
+    // Effects are authored in their spawner's CTPT frame (tracers ×0.03, gun flashes ×0.3): use the
+    // largest one found for this effect.
+    std::string key = opt.effect;
+    for (auto& c : key) c = char(std::tolower(static_cast<unsigned char>(c)));
+    const auto frames = collect_spawn_frames(lib);
+    const auto frame_it = frames.find(key);
+    const Mat4 spawn_frame = frame_it != frames.end() ? frame_it->second : Mat4::identity();
+    if (frame_it != frames.end())
+        SDL_Log("spawn frame: X (%.3f %.3f %.3f) Y (%.3f %.3f %.3f) Z (%.3f %.3f %.3f)", spawn_frame.at(0, 0),
+                spawn_frame.at(1, 0), spawn_frame.at(2, 0), spawn_frame.at(0, 1), spawn_frame.at(1, 1), spawn_frame.at(2, 1),
+                spawn_frame.at(0, 2), spawn_frame.at(1, 2), spawn_frame.at(2, 2));
+    auto make = [&](std::optional<EffectInstance>& slot, FxContext& c) {
+        slot.emplace(fx, c, placement, 0.0);
+        slot->set_spawn_frame(spawn_frame);
+    };
+    std::optional<EffectInstance> inst;
+    make(inst, ctx);
     std::vector<FxSoundEvent> sounds;
     // Count what the template holds, for the title.
     int counts[11] = {};
@@ -64,7 +81,11 @@ int run_effect_viewer(SDL_Window* window, AssetLibrary& lib, const EffectViewerO
     auto place = [&](EffectInstance& e, double t) {
         if (!e.enabled()) e.set_enabled(true, t); // header flag 0x40: the owner enables it later
         if (owner_driven) e.set_param(float(t - std::floor(t)));
-        if (moving) e.set_transform(Mat4::translation({float(-10 + 20 * t), 0, 3}));
+        if (moving) { // a bullet's frame: model +Y (forward) along world +X
+            Mat4 m = Mat4::translation({float(-10 + 20 * t), 0, 3});
+            m.at(0, 0) = 0, m.at(1, 0) = -1, m.at(0, 1) = 1, m.at(1, 1) = 0;
+            e.set_transform(m);
+        }
     };
     auto step_to = [&](double target) {
         while (sim < target) {
@@ -79,7 +100,9 @@ int run_effect_viewer(SDL_Window* window, AssetLibrary& lib, const EffectViewerO
     float radius = 1.5f;
     if (opt.distance <= 0) {
         FxContext probe_ctx(lib);
-        EffectInstance probe(fx, probe_ctx, placement, 0.0);
+        std::optional<EffectInstance> probe_slot;
+        make(probe_slot, probe_ctx);
+        EffectInstance& probe = *probe_slot;
         FxFrame f;
         std::vector<Vec3> pts;
         const double until = std::clamp(std::max(opt.time, double(fx->header.duration)), 1.0, 4.0);
@@ -217,7 +240,7 @@ int run_effect_viewer(SDL_Window* window, AssetLibrary& lib, const EffectViewerO
             last = now;
             if (clock >= loop_after) { // restart the effect
                 clock = 0, sim = 0;
-                inst.emplace(fx, ctx, placement, 0.0);
+                make(inst, ctx);
             }
             step_to(clock);
             SDL_GPUCommandBuffer* cb = SDL_AcquireGPUCommandBuffer(dev);

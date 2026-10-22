@@ -681,6 +681,35 @@ struct TrailCmd : Cmd {
 
 } // namespace
 
+Mat4 contact_frame(const std::array<Vec3, 3>& pos, const std::array<Vec3, 3>& vec) {
+    auto same = [](Vec3 a, Vec3 b) { return a.x == b.x && a.y == b.y && a.z == b.z; }; // FUN_10003620
+    const Vec3 origin = (pos[0] + pos[1] + pos[2]) * (1.f / 3);
+    Mat4 m = Mat4::identity();
+    set_col(m, 3, origin);
+    // FUN_10004070: X = a, Y = unit(b × a), Z = a × Y.
+    auto two = [&](Vec3 a, Vec3 b) {
+        Vec3 side = cross(b, a);
+        side = dot(side, side) > 0 ? normalize(side) : perpendicular(a);
+        set_col(m, 0, a), set_col(m, 1, side), set_col(m, 2, cross(a, side));
+    };
+    const Vec3 a = vec[0], b = vec[1], c = vec[2];
+    if (same(a, b) && same(a, c)) { // FUN_10003ef0 on the unit vector, then × its length
+        const float len = length(a);
+        if (len == 0) return m;
+        const Vec3 d = a * (1 / len), t = perpendicular(d);
+        set_col(m, 0, d * len), set_col(m, 1, t * len), set_col(m, 2, cross(d, t) * len);
+    } else if (same(a, c)) {
+        two(a, b);
+    } else if (same(a, b)) {
+        two(a, c);
+    } else if (same(b, c)) {
+        two(a, b);
+    } else {
+        set_col(m, 0, a), set_col(m, 1, b), set_col(m, 2, c);
+    }
+    return m;
+}
+
 std::shared_ptr<const FxEffect> load_effect(AssetLibrary& lib, std::string_view name) {
     const NResEntry* e = lib.find("effects.rlb", name);
     if (!e) return nullptr;
@@ -727,7 +756,14 @@ void EffectInstance::compose_local() { // CFxInstance_ComposeLocalMatrix (10007c
     set_col(local_, 2, col(base_, 2) * scale_.z);
 }
 
-void EffectInstance::set_transform(const Mat4& m) {
+void EffectInstance::set_spawn_frame(const Mat4& frame) {
+    frame_ = frame;
+    set_transform(placed_);
+}
+
+void EffectInstance::set_transform(const Mat4& placed) {
+    placed_ = placed;
+    const Mat4 m = placed * frame_;
     base_ = m;
     pos_ = col(m, 3);
     compose_local();

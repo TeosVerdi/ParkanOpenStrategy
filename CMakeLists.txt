@@ -25,6 +25,7 @@ add_library(parkan_core STATIC
   src/res/fx.cpp
   src/fx/fx_material.cpp
   src/fx/effect.cpp
+  src/fx/spawn_frames.cpp
   src/control/motion_graph.cpp
   src/control/unit_motion.cpp
   src/control/turret.cpp
@@ -91,6 +92,7 @@ target_compile_options(parkan_audio PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(parkan MACOSX_BUNDLE src/app/main.cpp src/app/scene_viewer.cpp src/app/play.cpp src/app/fx_viewer.cpp src/app/fx_draw.cpp)
 target_link_libraries(parkan PRIVATE parkan_audio parkan_core SDL3::SDL3)
+target_compile_options(parkan PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(parkan PROPERTIES
   MACOSX_BUNDLE_GUI_IDENTIFIER org.parkan.port
   MACOSX_BUNDLE_BUNDLE_NAME "Parkan")

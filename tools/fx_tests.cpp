@@ -1,12 +1,14 @@
 // Visual effects tests (notes/effects.md): the Effect.dll LFSR, FXID / EXPL decoding of the whole
 // corpus, and a deterministic simulation of one explosion. Linked into parkan-tests.
 #include "fx/effect.hpp"
+#include "fx/spawn_frames.hpp"
 #include "res/library.hpp"
 
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <algorithm>
 #include <map>
 
 using namespace parkan;
@@ -120,9 +122,9 @@ void test_corpus_decode(AssetLibrary& lib) {
             try {
                 const ExplosionDef x = decode_expl(e.data);
                 ++expl;
-                if (!x.effect.empty() && !lib.find(x.effect.archive, x.effect.name)) ++unresolved;
-                for (std::size_t k = 0; k < x.surface.size(); ++k)
-                    if (x.surface_valid[k] && lib.find(x.surface[k].archive, x.surface[k].name)) ++surfaces;
+                if (!x.fx[0].second.empty() && !lib.find(x.fx[0].first, x.fx[0].second)) ++unresolved;
+                for (std::size_t k = 1; k < x.fx.size(); ++k)
+                    if (x.fx_valid[k] && lib.find(x.fx[k].first, x.fx[k].second)) ++surfaces;
             } catch (const std::exception& ex) {
                 if (expl_failed++ < 5) std::printf("  FAILED %s:%s: %s\n", a, e.name.c_str(), ex.what());
             }
@@ -207,6 +209,58 @@ void test_simulation(AssetLibrary& lib) {
     CHECK(!inst.update(3.0));
 }
 
+// Sizes: effects are authored in the units of the spawning event's CTPT frame (type-4 events,
+// fx::contact_frame — bullets ×0.02…0.2, gun flashes ×0.3). Every effect spawned by a type-4 event
+// whose points resolve (bullets through load_bullet, other objects through the .cpt of the same base
+// name) runs 2 s in its largest spawn frame and must stay below 60 m (except the bridge light beam); the rest run at scale 1 under
+// a looser bound, except the ones documented as scaled by other means (notes/effects.md §8, §9).
+void test_sizes(AssetLibrary& lib) {
+    auto lower = [](std::string s) {
+        for (auto& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+    const std::map<std::string, Mat4> frames = collect_spawn_frames(lib);
+    int bullets = 0;
+    for (const auto& e : lib.archive("objects.rlb").entries()) bullets += e.type == fourcc("BULL");
+    FxContext ctx(lib);
+    int framed = 0, too_big = 0;
+    float worst_framed = 0;
+    std::string worst_name;
+    for (const auto& e : lib.archive("effects.rlb").entries()) {
+        const std::string name = lower(e.name);
+        auto it = frames.find(name);
+        // Unit-scale exceptions: b_bullight_* are referenced by nothing; tree effects are scaled by
+        // their (shared-.cpt) trees, B_Sphere_* by event type 5, selfexp_* through EXPL part scaling.
+        const bool exempt = it == frames.end() &&
+                            (name.rfind("b_bullight", 0) == 0 || name.rfind("tree_", 0) == 0 || name.rfind("exp_tree", 0) == 0);
+        const bool big = name == "f_brige_ray"; // the bridge's 150 m light beam (radar/ray effects reach 40 m)
+        auto fx = load_effect(lib, e.name);
+        EffectInstance inst(fx, ctx, Mat4::identity(), 0.0);
+        if (it != frames.end()) inst.set_spawn_frame(it->second), ++framed;
+        inst.set_enabled(true, 0);
+        float mx = 0;
+        FxFrame f;
+        for (int i = 1; i <= 60; ++i) {
+            inst.set_param(float(i % 30) / 30);
+            inst.set_transform(Mat4::translation({float(i) * 0.5f, 0, 1}));
+            if (!inst.update(i / 30.0)) break;
+            f.clear();
+            inst.render(f, {0, -30, 5});
+            for (const auto& q : f.quads) mx = std::max(mx, std::sqrt(dot(q.p[2] - q.p[0], q.p[2] - q.p[0])));
+        }
+        const float bound = it != frames.end() ? 60.f : 120.f;
+        if (it != frames.end() && !big && mx > worst_framed) worst_framed = mx, worst_name = e.name;
+        if (mx > bound && !exempt && !big) {
+            ++too_big;
+            std::printf("  FAILED size: %s quad diagonal %.1f m (bound %.0f)\n", e.name.c_str(), mx, bound);
+        }
+    }
+    g_fail += too_big;
+    CHECK(bullets >= 60 && framed >= 150);
+    std::printf("  sizes: %zu effects with a spawn frame (of %d BULL records), largest %s %.1f m\n", frames.size(), bullets,
+                worst_name.c_str(), worst_framed);
+}
+
 } // namespace
 
 int fx_unit_tests() {
@@ -223,5 +277,6 @@ int fx_corpus_tests(const std::filesystem::path& game) {
     test_corpus_decode(lib);
     test_corpus_run(lib);
     test_simulation(lib);
+    test_sizes(lib);
     return g_fail;
 }

@@ -109,6 +109,7 @@ struct CombatEvent {
     std::uint32_t bullet = 0; // Effect: the bullet it rides on (situation 0 lists), 0 = placed once
     Vec3 axis{0, 1, 0};       // Effect: the frame's forward axis (bullet direction)
     float scale = 1;          // Effect: SetEffectScale (part explosions: the part's radius; inferred)
+    Mat4 frame = Mat4::identity(); // Effect: local spawn frame (fx::contact_frame of the event's CTPT points)
 };
 
 // A segment hit in the world.

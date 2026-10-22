@@ -43,8 +43,6 @@ bool contains_ci(std::string_view s, std::string_view part) {
            }) != s.end();
 }
 
-Vec3 translation(const Mat4& m) { return {m.at(0, 3), m.at(1, 3), m.at(2, 3)}; }
-
 // The hero: the player's unit whose design lives under UNITS\UNITS\HERO (iron3d finds it by type
 // 0x1020000 in the unit registry; the TMA has no such flag).
 std::optional<std::size_t> find_hero(const mission::Tma& t) {
@@ -309,7 +307,8 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             play_effect_sounds(e.effect, e.pos);
             return;
         }
-        effects.push_back({fx::EffectInstance(it->second, fx_ctx, combat::CombatWorld::bullet_matrix(e.pos, e.axis), now), e.bullet});
+        effects.push_back({fx::EffectInstance(it->second, fx_ctx, combat::CombatWorld::bullet_matrix(e.pos, e.axis), now), e.bullet, false, {}});
+        effects.back().inst.set_spawn_frame(e.frame); // bullet tracers: the CTPT frame (×0.03)
         if (e.scale != 1) effects.back().inst.set_scale({e.scale, e.scale, e.scale});
     };
     auto update_effects = [&](double now) {

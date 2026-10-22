@@ -1,6 +1,7 @@
 #include "combat/combat_world.hpp"
 
 #include "core/paths.hpp"
+#include "fx/effect.hpp"
 #include "mission/scheme.hpp"
 
 #include <algorithm>
@@ -244,7 +245,7 @@ std::size_t CombatWorld::add_unit(LiveUnit& u, std::uint32_t logic_id, std::uint
                     const std::string key = lower(r.effect.first + "/" + r.effect.second);
                     auto [it, fresh] = expl_cache_.try_emplace(key);
                     if (fresh) {
-                        if (const NResEntry* e = lib_.find(r.effect.first, r.effect.second); e && e->type == fourcc("EXPL")) it->second = decode_explosion(e->data);
+                        if (const NResEntry* e = lib_.find(r.effect.first, r.effect.second); e && e->type == fourcc("EXPL")) it->second = decode_expl(e->data);
                     }
                     if (it->second) {
                         for (std::size_t k = 0; k < d.effects.size() && p.effect < 0; ++k)
@@ -409,7 +410,11 @@ void CombatWorld::spawn(std::size_t u, std::size_t g, Vec3 pos, Vec3 dir) {
     bullets_.push_back(b);
     ++shots;
     events_.push_back({CombatEvent::Type::Shot, std::int32_t(u), std::int32_t(g), 0, pos, {}});
-    for (const auto& fx : p->spawn_effects) events_.push_back({CombatEvent::Type::Effect, std::int32_t(u), -1, 0, pos, fx, b.id, b.dir, 1});
+    for (std::size_t i = 0; i < p->spawn_effects.size(); ++i) {
+        const auto& sp = p->spawn_points[i];
+        events_.push_back({CombatEvent::Type::Effect, std::int32_t(u), -1, 0, pos, p->spawn_effects[i], b.id, b.dir, 1,
+                           fx::contact_frame(sp.pos, sp.vec)});
+    }
 }
 
 std::optional<WorldHit> CombatWorld::trace(Vec3 a, Vec3 b, std::int32_t skip) const {
