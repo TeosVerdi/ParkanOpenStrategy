@@ -5,6 +5,7 @@
 #include "scene/render_mesh.hpp"
 #include "scene/sky.hpp"
 #include "ui/overlay.hpp"
+#include "fx/effect.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -50,6 +51,11 @@ struct ViewerOptions {
     };
     std::function<bool(Camera&)> camera;
     bool relative_mouse = false; // capture the mouse (game mouse look)
+    // Optional effects (src/fx): world-space sprites, beams, trails and debris filled every frame and
+    // drawn after the scene with the effect blend presets (app/fx_draw). `effect_textures` may grow
+    // while running (effect materials load lazily); new entries are uploaded on the next frame.
+    std::function<void(Vec3 eye, fx::FxFrame& frame)> effects;
+    const std::vector<ModelTexture>* effect_textures = nullptr;
     // Optional 2D overlay, built every frame after the scene; textures are uploaded once.
     std::vector<ModelTexture> overlay_textures;
     std::function<void(OverlayFrame&)> overlay;

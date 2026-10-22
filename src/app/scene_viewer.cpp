@@ -1,7 +1,10 @@
 #include "app/scene_viewer.hpp"
 
+#include "app/fx_draw.hpp"
+
 #include <algorithm>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 
 namespace parkan {
@@ -271,6 +274,9 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
         const Uint32 white = 0xFFFFFFFF;
         g.white = make_texture(g.device, 1, 1, &white);
     }
+    std::optional<FxRenderer> fx_renderer;
+    fx::FxFrame fx_frame;
+    if (opt.effects && opt.effect_textures) fx_renderer.emplace(g.device, color_format, SDL_GPU_TEXTUREFORMAT_D32_FLOAT);
 
     upload_mesh(g, mesh);
     if (opt.relative_mouse && opt.shot_path.empty()) SDL_SetWindowRelativeMouseMode(window, true);
@@ -399,6 +405,11 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
                 upload(g.device, verts.data(), Uint32(verts.size() * sizeof(RenderVertex)), g.overlay_vbuf, nullptr);
             }
         }
+        if (fx_renderer) {
+            fx_frame.clear();
+            opt.effects(eye, fx_frame);
+            fx_renderer->prepare(fx_frame, eye, *opt.effect_textures);
+        }
         const SceneLighting& L = lighting;
         SDL_GPUColorTargetInfo color{};
         color.texture = target;
@@ -478,6 +489,7 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
                 SDL_DrawGPUIndexedPrimitives(rp, d.index_count, 1, d.index_start, d.base_vertex, 0);
             }
         }
+        if (fx_renderer) fx_renderer->draw(cb, rp, vp); // effects: after the opaque and vertex-alpha scene
         if (!overlay_runs.empty() && g.overlay_vbuf) {
             // Pixels → clip space, y down; unlit, unfogged, vertex colour × texture.
             Mat4 ortho = Mat4::identity();
@@ -614,6 +626,7 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
     if (g.sky_ibuf) SDL_ReleaseGPUBuffer(g.device, g.sky_ibuf);
     for (auto* t : g.sky_tex)
         if (t && t != g.white) SDL_ReleaseGPUTexture(g.device, t);
+    fx_renderer.reset(); // before the device goes
     SDL_ReleaseWindowFromGPUDevice(g.device, window);
     SDL_DestroyGPUDevice(g.device);
     return 0;
