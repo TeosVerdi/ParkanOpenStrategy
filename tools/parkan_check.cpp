@@ -18,6 +18,8 @@
 #include "res/nres.hpp"
 #include "res/swav.hpp"
 #include "res/terrain.hpp"
+#include "res/landmap.hpp"
+#include "ai/pathfind.hpp"
 #include "world/ground.hpp"
 #include "res/texm.hpp"
 
@@ -351,6 +353,39 @@ int check_schemes(const fs::path& game) {
 
 // Ground probes: on every map, a probe just above the centroid of every 7th LOD0 face lands on that
 // face's plane height (or on a higher face stacked over it).
+// Land.map on every map: areals, walkable ones, vertices, links, grid cells and entries, and the
+// areal graph's edges (expected totals from the reference parser, tools/landmap.py's layout).
+int check_landmaps(const fs::path& game) {
+    auto maps = resolve_path(game, "DATA/MAPS");
+    if (!maps) return 1;
+    int map_count = 0, bad_maps = 0;
+    std::size_t areals = 0, walkable = 0, verts = 0, links = 0, cells = 0, entries = 0, edges = 0;
+    for (const auto& e : fs::directory_iterator(*maps)) {
+        auto file = resolve_path(e.path(), "Land.map");
+        if (!file) continue;
+        ++map_count;
+        try {
+            const LandMap m = decode_landmap(read_file(*file));
+            areals += m.areals.size();
+            for (const auto& a : m.areals) {
+                walkable += a.walkable != 0;
+                verts += a.verts.size();
+                for (const auto& l : a.links) links += l[0] != -1;
+            }
+            cells += std::size_t(m.cells_x) * m.cells_y;
+            entries += m.cell_ids.size();
+            for (const auto& n : ai::ArealGraph::build(m).nodes) edges += n.edges.size();
+        } catch (const std::exception& ex) {
+            ++bad_maps;
+            std::printf("  FAIL %s: %s\n", e.path().filename().string().c_str(), ex.what());
+        }
+    }
+    std::printf("landmaps: %d maps, %d failed; %zu areals (%zu walkable), %zu vertices, %zu links, %zu grid cells, "
+                "%zu grid entries, %zu graph edges\n",
+                map_count, bad_maps, areals, walkable, verts, links, cells, entries, edges);
+    return bad_maps;
+}
+
 int check_ground(const fs::path& game) {
     auto maps = resolve_path(game, "DATA/MAPS");
     if (!maps) return 1;
@@ -421,7 +456,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     fs::path game = argv[1];
-    int bad = check_scripts(game) + check_research(game) + check_missions(game) + check_schemes(game) + check_bindings(game) + check_ground(game) +
+    int bad = check_scripts(game) + check_research(game) + check_missions(game) + check_schemes(game) + check_bindings(game) + check_ground(game) + check_landmaps(game) +
               check_assets(game) + check_audio(game);
     return bad ? 1 : 0;
 }

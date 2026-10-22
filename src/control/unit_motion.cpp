@@ -80,6 +80,7 @@ void UnitMotion::update(float now_ms) {
     }
     // Variable-step catch-up: one whole motion state per iteration, no iteration cap.
     while (clock_ <= now_ms) {
+        if (pilot) pilot(*this, clock_);
         select_next_motion();
         if (queue_.empty()) break; // stall: the clock stays <= now and the next Update retries
         cur_ = queue_.front();

@@ -60,6 +60,9 @@ public:
     // (so acceleration is not doubled and max speed / turn rate are not scaled by engines and HP);
     // the owner may overwrite it.
     std::array<float, 27> body{};
+    // The pilot (ctl+0x2c IWizard::Takt, unit-ai-runtime.md §0): Update calls it once per motion step
+    // with the motion clock, just before SelectNextMotion, so its IControl requests pick the next state.
+    std::function<void(UnitMotion&, float clock_ms)> pilot;
     // RunMotionEvents(list) for the entry event list of each state as it is popped (list >= 0).
     std::function<void(std::int32_t list)> on_enter_events;
     // Left / right drive health (m+0x1a0 / +0x1a4): their difference makes the yaw drift.
