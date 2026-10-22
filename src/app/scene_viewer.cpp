@@ -99,6 +99,9 @@ struct Gpu {
     SDL_GPUBuffer* sky_vbuf = nullptr;
     SDL_GPUBuffer* sky_ibuf = nullptr;
     SDL_GPUTexture* sky_tex[3] = {};
+    std::vector<SDL_GPUTexture*> overlay_tex;
+    SDL_GPUBuffer* overlay_vbuf = nullptr;
+    Uint32 overlay_capacity = 0; // vertices
     SDL_GPUBuffer* vbuf = nullptr;
     SDL_GPUBuffer* ibuf = nullptr;
     SDL_GPUSampler* sampler = nullptr;
@@ -280,6 +283,8 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
             g.sky_tex[i] = t && !t->rgba.empty() ? make_texture(g.device, t->width, t->height, t->rgba.data()) : g.white;
         }
     }
+    for (const auto& t : opt.overlay_textures)
+        g.overlay_tex.push_back(t.rgba.empty() ? g.white : make_texture(g.device, t.width, t.height, t.rgba.data()));
     SceneLighting lighting = opt.lighting;
     SkyFrame sky_frame;
     int state = 0, lod = 0;
@@ -352,6 +357,41 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
             opt.sky(anim_time, normalize(look - eye), dome, sky_frame);
             lighting = sky_frame.lighting;
             upload(g.device, dome.vertices.data(), Uint32(dome.vertices.size() * sizeof(RenderVertex)), g.sky_vbuf, nullptr);
+        }
+        // The overlay's vertices go up before the render pass (like the dome's).
+        OverlayFrame overlay;
+        std::vector<std::pair<std::int32_t, Uint32>> overlay_runs; // (texture, vertex count)
+        if (opt.overlay) {
+            overlay.width = w, overlay.height = h;
+            int ww = 0;
+            SDL_GetWindowSize(window, &ww, nullptr);
+            overlay.scale = ww > 0 ? float(w) / float(ww) : 1.f;
+            opt.overlay(overlay);
+            std::vector<RenderVertex> verts;
+            for (const auto& q : overlay.quads) {
+                auto v = [&](float x, float y, float u, float vv) {
+                    RenderVertex r{};
+                    r.pos[0] = x, r.pos[1] = y, r.pos[2] = 0;
+                    r.nrm[2] = 127;
+                    r.uv0[0] = u, r.uv0[1] = vv;
+                    std::memcpy(r.color, q.rgba, 4);
+                    verts.push_back(r);
+                };
+                v(q.x0, q.y0, q.u0, q.v0), v(q.x1, q.y0, q.u1, q.v0), v(q.x1, q.y1, q.u1, q.v1);
+                v(q.x0, q.y0, q.u0, q.v0), v(q.x1, q.y1, q.u1, q.v1), v(q.x0, q.y1, q.u0, q.v1);
+                if (!overlay_runs.empty() && overlay_runs.back().first == q.texture) overlay_runs.back().second += 6;
+                else overlay_runs.push_back({q.texture, 6});
+            }
+            if (!verts.empty()) {
+                if (verts.size() > g.overlay_capacity) {
+                    if (g.overlay_vbuf) SDL_ReleaseGPUBuffer(g.device, g.overlay_vbuf);
+                    g.overlay_capacity = Uint32(verts.size() * 2);
+                    SDL_GPUBufferCreateInfo bi{SDL_GPU_BUFFERUSAGE_VERTEX, Uint32(g.overlay_capacity * sizeof(RenderVertex)), 0};
+                    g.overlay_vbuf = SDL_CreateGPUBuffer(g.device, &bi);
+                    if (!g.overlay_vbuf) fail("SDL_CreateGPUBuffer (overlay)");
+                }
+                upload(g.device, verts.data(), Uint32(verts.size() * sizeof(RenderVertex)), g.overlay_vbuf, nullptr);
+            }
         }
         const SceneLighting& L = lighting;
         SDL_GPUColorTargetInfo color{};
@@ -430,6 +470,31 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
                 SDL_GPUTextureSamplerBinding tb[2] = {{tex(d.tex0), g.sampler}, {tex(d.tex1), g.sampler}};
                 SDL_BindGPUFragmentSamplers(rp, 0, tb, 2);
                 SDL_DrawGPUIndexedPrimitives(rp, d.index_count, 1, d.index_start, d.base_vertex, 0);
+            }
+        }
+        if (!overlay_runs.empty() && g.overlay_vbuf) {
+            // Pixels → clip space, y down; unlit, unfogged, vertex colour × texture.
+            Mat4 ortho = Mat4::identity();
+            ortho.at(0, 0) = 2.f / float(w), ortho.at(0, 3) = -1;
+            ortho.at(1, 1) = -2.f / float(h), ortho.at(1, 3) = 1;
+            SceneLighting flat;
+            flat.sun_color = flat.fill_color = {};
+            flat.ambient = {1, 1, 1};
+            flat.fog_end = 0;
+            const DrawUniforms vu = vertex_uniforms(ortho, Mat4::identity(), flat, {});
+            SDL_BindGPUGraphicsPipeline(rp, g.pipeline_sky_blend);
+            SDL_GPUBufferBinding ob{g.overlay_vbuf, 0};
+            SDL_BindGPUVertexBuffers(rp, 0, &ob, 1);
+            Uint32 first = 0;
+            for (auto [tex, count] : overlay_runs) {
+                SDL_PushGPUVertexUniformData(cb, 0, &vu, sizeof vu);
+                const FragUniforms fu{{0, 0, 1, 0}, {1, 0, 0, 0}, {1, 1, 1, 1}, {0, 0, 0, 1}};
+                SDL_PushGPUFragmentUniformData(cb, 0, &fu, sizeof fu);
+                SDL_GPUTexture* t = tex >= 0 && std::size_t(tex) < g.overlay_tex.size() ? g.overlay_tex[std::size_t(tex)] : g.white;
+                SDL_GPUTextureSamplerBinding tb[2] = {{t, g.sampler}, {g.white, g.sampler}};
+                SDL_BindGPUFragmentSamplers(rp, 0, tb, 2);
+                SDL_DrawGPUPrimitives(rp, count, 1, first, 0);
+                first += count;
             }
         }
         SDL_EndGPURenderPass(rp);
@@ -536,6 +601,9 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
     SDL_ReleaseGPUGraphicsPipeline(g.device, g.pipeline_sky);
     SDL_ReleaseGPUGraphicsPipeline(g.device, g.pipeline_sky_blend);
     if (g.sky_vbuf) SDL_ReleaseGPUBuffer(g.device, g.sky_vbuf);
+    if (g.overlay_vbuf) SDL_ReleaseGPUBuffer(g.device, g.overlay_vbuf);
+    for (auto* t : g.overlay_tex)
+        if (t != g.white) SDL_ReleaseGPUTexture(g.device, t);
     if (g.sky_ibuf) SDL_ReleaseGPUBuffer(g.device, g.sky_ibuf);
     for (auto* t : g.sky_tex)
         if (t && t != g.white) SDL_ReleaseGPUTexture(g.device, t);
