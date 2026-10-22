@@ -11,9 +11,12 @@
 #include "mission/tma.hpp"
 #include "scene/mission_scene.hpp"
 #include "res/ctld.hpp"
+#include "res/fx.hpp"
+#include "res/library.hpp"
 #include "res/material.hpp"
 #include "res/mesh.hpp"
 #include "res/nres.hpp"
+#include "res/swav.hpp"
 #include "res/terrain.hpp"
 #include "world/ground.hpp"
 #include "res/texm.hpp"
@@ -24,6 +27,10 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <strings.h>
+
+#define STB_VORBIS_HEADER_ONLY
+#include "stb_vorbis.c"
 
 namespace fs = std::filesystem;
 using namespace parkan;
@@ -167,6 +174,78 @@ int check_assets(const fs::path& game) {
                 "%zu motion states\n",
                 vertices, batches, texels, terrain_vertices, terrain_faces, motion_states);
     return bad;
+}
+
+// notes/audio.md §1: every SWAV decodes, every FX sound command resolves (except the one entry the
+// data itself lacks), every MUSIC/Track*.ogg opens.
+int check_audio(const fs::path& game) {
+    AssetLibrary lib(game);
+    int bad = 0, swav = 0;
+    double seconds = 0;
+    for (const char* name : {"sounds.lib", "voices.lib"}) {
+        try {
+            for (const auto& e : lib.archive(name).entries()) {
+                try {
+                    if (e.type != fourcc("SWAV")) throw FormatError("entry type is not SWAV");
+                    const Pcm p = decode_swav(e.data);
+                    if (p.rate != 22050) throw FormatError("rate " + std::to_string(p.rate));
+                    seconds += p.seconds();
+                    ++swav;
+                } catch (const std::exception& ex) {
+                    if (bad++ < 5) std::printf("  FAIL %s:%s: %s\n", name, e.name.c_str(), ex.what());
+                }
+            }
+        } catch (const std::exception& ex) {
+            ++bad;
+            std::printf("  FAIL %s: %s\n", name, ex.what());
+        }
+    }
+    // fortif_door_move.wav (FX b_turret) is absent from sounds.lib in the shipped data (audio.md §1.3).
+    const std::set<std::string> known_missing = {"fortif_door_move.wav"};
+    int effects = 0, fx_sounds = 0, resolved = 0, missing_known = 0;
+    std::set<std::string> names;
+    for (const auto& e : lib.archive("effects.rlb").entries()) {
+        try {
+            const auto fx = decode_fx(e.data);
+            ++effects;
+            for (const auto& s : fx.sounds) {
+                ++fx_sounds;
+                names.insert(s.entry);
+                if (lib.find(s.archive, s.entry)) {
+                    ++resolved;
+                } else if (known_missing.count(s.entry)) {
+                    ++missing_known;
+                } else {
+                    ++bad;
+                    std::printf("  FAIL %s: sound %s/%s not found\n", e.name.c_str(), s.archive.c_str(), s.entry.c_str());
+                }
+            }
+        } catch (const std::exception& ex) {
+            ++bad;
+            std::printf("  FAIL effects.rlb:%s: %s\n", e.name.c_str(), ex.what());
+        }
+    }
+    int tracks = 0;
+    double music = 0;
+    if (auto dir = resolve_path(game, "MUSIC"))
+        for (const auto& e : fs::directory_iterator(*dir)) {
+            const auto f = e.path().filename().string();
+            if (f.size() != 11 || strncasecmp(f.c_str(), "track", 5) != 0 || strcasecmp(f.c_str() + 7, ".ogg") != 0) continue;
+            int err = 0;
+            stb_vorbis* v = stb_vorbis_open_filename(e.path().string().c_str(), &err, nullptr);
+            if (!v) {
+                ++bad;
+                std::printf("  FAIL MUSIC/%s: stb_vorbis error %d\n", f.c_str(), err);
+                continue;
+            }
+            ++tracks;
+            music += stb_vorbis_stream_length_in_seconds(v);
+            stb_vorbis_close(v);
+        }
+    std::printf("audio: %d SWAV decoded (%.1f s), %d failed; effects %d, %d sound commands "
+                "(%zu names): %d resolved, %d known-missing; music %d tracks, %.1f s\n",
+                swav, seconds, bad, effects, fx_sounds, names.size(), resolved, missing_known, tracks, music);
+    return bad + (tracks ? 0 : 1);
 }
 
 int check_missions(const fs::path& game) {
@@ -343,6 +422,6 @@ int main(int argc, char** argv) {
     }
     fs::path game = argv[1];
     int bad = check_scripts(game) + check_research(game) + check_missions(game) + check_schemes(game) + check_bindings(game) + check_ground(game) +
-              check_assets(game);
+              check_assets(game) + check_audio(game);
     return bad ? 1 : 0;
 }

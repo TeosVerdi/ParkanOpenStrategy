@@ -183,7 +183,7 @@ void pose_unit(UnitModel& unit, const Mat4& world, float time_a, float time_b, f
 }
 
 RenderMesh load_mission_render_mesh(AssetLibrary& lib, std::string_view mission_dir, MissionSceneStats* stats,
-                                   std::size_t skip_object) {
+                                   const std::function<bool(std::size_t)>& skip) {
     auto dir = resolve_path(lib.game_dir(), mission_dir);
     if (!dir) throw std::runtime_error("mission folder not found: " + std::string(mission_dir));
     auto tma_path = resolve_path(*dir, "data.tma");
@@ -201,7 +201,7 @@ RenderMesh load_mission_render_mesh(AssetLibrary& lib, std::string_view mission_
     MissionSceneStats st;
     for (std::size_t oi = 0; oi < tma.objects.size(); ++oi) {
         const auto& o = tma.objects[oi];
-        if (oi == skip_object) continue;
+        if (skip && skip(oi)) continue;
         ++st.objects;
         auto [it, fresh] = cache.try_emplace(o.resource);
         if (fresh) {

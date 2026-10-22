@@ -3,6 +3,7 @@
 // camera that orbits the hero.
 #pragma once
 
+#include "input/keymap.hpp"
 #include "res/library.hpp"
 
 #include <SDL3/SDL.h>
@@ -19,6 +20,7 @@ struct PlayOptions {
     bool demo_walk = false;   // hold "forward" from the start (for --shot checks)
     bool demo_strafe = false; // hold "strafe left" from the start
     int camera_preset = 0;    // 0 TURRET view, 1..4 OUTER presets (for --shot checks)
+    input::KeyLayout layout = input::KeyLayout::Modern; // --classic-keys: the 2001 layout
 };
 
 int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt);

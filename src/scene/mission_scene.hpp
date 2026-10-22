@@ -8,6 +8,7 @@
 #include "scene/render_mesh.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 
 namespace parkan {
@@ -46,9 +47,9 @@ void pose_unit(UnitModel& unit, const Mat4& world, float time_a, float time_b, f
                std::vector<Mat4>& transforms, std::size_t first);
 
 // `mission_dir` is game-relative, e.g. "MISSIONS/CAMPAIGN/CAMPAIGN.00/Mission.02".
-// `skip_object` (an index into the TMA objects) is left out, e.g. the unit the player drives.
+// Objects for which `skip(index)` is true are left out (the units that move are drawn separately).
 RenderMesh load_mission_render_mesh(AssetLibrary& lib, std::string_view mission_dir, MissionSceneStats* stats = nullptr,
-                                    std::size_t skip_object = SIZE_MAX);
+                                    const std::function<bool(std::size_t)>& skip = {});
 
 // A placed object's world matrix: T · Rz·Ry·Rx · S (iron3d 0x36610).
 Mat4 tma_placement(const mission::TmaObject& o);

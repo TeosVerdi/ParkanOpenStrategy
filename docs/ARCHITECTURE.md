@@ -112,10 +112,13 @@ Paths inside the data are resolved case-insensitively (`core/paths`).
 - Per ≤33 ms simulation step: SDL key → `input::scan_from_hid` → `ManManager` (M1.TBL + MacBook remap)
   → `CommandState` → `UnitMotion::set_throttle`/`set_angular_command` (ExecuteBinding's vehicle
   mapping) → `UnitMotion::update` → ground offset from the feet → `pose_unit`.
-- The hero uses HERO.TBL (with the MacBook remap): arrows walk/strafe, mouse X turns the body
-  (ANGLE_Z → attitude target), mouse Y raises the barrel (turret ANGLE_Y), `=`/`-`/`\`/Backspace
-  set speed, LShift + mouse looks around. `C` cycles the OUTER camera presets; Tab toggles the
-  port's debug orbit camera.
+- The hero uses HERO.TBL, rebound to the modern WASD layout by default (`--classic-keys` for the
+  2001 one); see docs/CONTROLS.md and `input/keymap`. Mouse X turns the body (ANGLE_Z → attitude
+  target), mouse Y raises the barrel (turret ANGLE_Y). JAMES_OUTER_CAMERA (V, classic C) cycles the
+  OUTER presets; F10 toggles the port's debug orbit camera.
+- Live units (`world/live_unit`): every TMA object whose design is under `UNITS\UNITS` (hero,
+  robots, animals) is a posable model + UnitMotion + reduced FollowGround + collision (static walls,
+  world bounds, unit-vs-unit spheres with the mass² split).
 - Turret and cameras (`control/turret`; notes/turret-camera.md): joints play their node's keyframe
   range (t per node); the TURRET view sits at CameraCenter looking along TargetDirect (FOV 1.3,
   near 0.1, far 1000); the own unit is not drawn from it (inferred). Strafing is the attitude offset

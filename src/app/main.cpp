@@ -5,15 +5,18 @@
 //                                                   model viewer; plays motion state n of the model's CTLD
 //   parkan --terrain <map dir> [--shot <out.bmp>] [<game dir>]        terrain viewer (e.g. DATA/MAPS/Tut_2)
 //   parkan --unit <scheme .dat> [--shot <out.bmp>] [<game dir>]      unit design (e.g. UNITS/AUTO/swlklas.dat)
-//   parkan --play <mission dir> [--time <s>] [--no-fog] [--walk] [--shot <out.bmp>] [<game dir>]
+//   parkan --play <mission dir> [--classic-keys] [--time <s>] [--no-fog] [--walk] [--shot <out.bmp>] [<game dir>]
 //                                                   drive the mission's hero (M1.TBL keys; --walk holds forward)
 //   parkan --mission <mission dir> [--time <s>] [--no-fog] [--shot <out.bmp>] [<game dir>]
 //                                                   mission scene: terrain, placed objects, sky, lighting
+//   parkan --sound <lib> <entry> [<game dir>]                         play one sample (e.g. sounds.lib i_button.wav)
+//   parkan --music <n> [<game dir>]                                   play CD index n (MUSIC/Track{n+1:02}.ogg)
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
 #include "app/play.hpp"
 #include "app/scene_viewer.hpp"
+#include "audio/audio_engine.hpp"
 #include "res/ctld.hpp"
 #include "mission/ske.hpp"
 #include "scene/mission_scene.hpp"
@@ -51,6 +54,47 @@ int run_placeholder() {
     return 0;
 }
 
+// --sound / --music smoke path: plays one sample or one music track to its end, then exits.
+int run_audio(const std::filesystem::path& game, const std::string& lib_name, const std::string& entry, int music) {
+    if (!SDL_Init(SDL_INIT_AUDIO)) {
+        SDL_Log("SDL_Init failed: %s", SDL_GetError());
+        return 1;
+    }
+    auto quit = [] { // Ctrl-C arrives as SDL_EVENT_QUIT
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev))
+            if (ev.type == SDL_EVENT_QUIT) return true;
+        return false;
+    };
+    int rc = 1;
+    try {
+        parkan::AssetLibrary lib(game);
+        parkan::audio::AudioEngine audio(lib);
+        if (!audio.ok()) {
+            SDL_Log("no audio device");
+        } else if (music >= 0) {
+            if (audio.play_music(music, false)) {
+                SDL_Log("music: index %d (Track%02d.ogg)", music, music + 1);
+                while (!audio.music_finished() && !quit()) SDL_Delay(50);
+                rc = 0;
+            } else {
+                SDL_Log("music index %d: no MUSIC/Track%02d.ogg", music, music + 1);
+            }
+        } else if (auto pcm = audio.load(lib_name, entry)) {
+            SDL_Log("%s/%s: %d Hz, %d ch, %.2f s", lib_name.c_str(), entry.c_str(), pcm->rate, pcm->channels,
+                    pcm->seconds());
+            const parkan::audio::Handle h = audio.play({lib_name, entry});
+            while (audio.is_playing(h) && !quit()) SDL_Delay(20);
+            rc = 0;
+        }
+        if (rc == 0) SDL_Delay(250); // let the device drain its buffer
+    } catch (const std::exception& ex) {
+        SDL_Log("error: %s", ex.what());
+    }
+    SDL_Quit();
+    return rc;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -58,21 +102,29 @@ int main(int argc, char** argv) {
     std::string view_archive, view_mesh, unit, terrain, mission, shot;
     double start_time = 0;
     int start_state = 0;
-    bool no_fog = false, demo_walk = false, demo_strafe = false;
+    bool no_fog = false, demo_walk = false, demo_strafe = false, classic_keys = false;
     int camera_preset = 0;
-    std::string play;
+    std::string play, sound_lib, sound_entry;
+    int music = -1;
     float pitch = -1; // camera elevation override (radians); negative = the mode's default
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--view" && i + 2 < argc) {
             view_archive = argv[++i];
             view_mesh = argv[++i];
+        } else if (a == "--sound" && i + 2 < argc) {
+            sound_lib = argv[++i];
+            sound_entry = argv[++i];
+        } else if (a == "--music" && i + 1 < argc) {
+            music = std::atoi(argv[++i]);
         } else if (a == "--unit" && i + 1 < argc) {
             unit = argv[++i];
         } else if (a == "--play" && i + 1 < argc) {
             play = argv[++i];
         } else if (a == "--walk") {
             demo_walk = true;
+        } else if (a == "--classic-keys") {
+            classic_keys = true;
         } else if (a == "--strafe") {
             demo_strafe = true;
         } else if (a == "--outer" && i + 1 < argc) {
@@ -102,6 +154,7 @@ int main(int argc, char** argv) {
                                  nullptr);
         return 1;
     }
+    if (!sound_entry.empty() || music >= 0) return run_audio(game, sound_lib, sound_entry, music);
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
@@ -132,6 +185,7 @@ int main(int argc, char** argv) {
             po.demo_walk = demo_walk;
             po.demo_strafe = demo_strafe;
             po.camera_preset = camera_preset;
+            po.layout = classic_keys ? parkan::input::KeyLayout::Classic : parkan::input::KeyLayout::Modern;
             rc = parkan::run_play(window, lib, po);
         } else if (!view_mesh.empty()) {
             opt.title = view_mesh;

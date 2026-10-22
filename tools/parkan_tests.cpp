@@ -1,15 +1,19 @@
 // Unit tests for engine logic that needs no game data, plus an optional corpus run.
 // Usage: parkan-tests [<game dir>]
 #include "ai/script_vm.hpp"
+#include "audio/spatial.hpp"
 #include "control/unit_motion.hpp"
 #include "core/paths.hpp"
 #include "input/scancodes.hpp"
+#include "input/keymap.hpp"
 #include "input/man_manager.hpp"
 #include "input/translate_table.hpp"
 #include "mission/scheme.hpp"
 #include "world/collision.hpp"
 #include "mission/ske.hpp"
+#include "res/fx.hpp"
 #include "res/library.hpp"
+#include "res/swav.hpp"
 #include "scene/model.hpp"
 
 #include <cmath>
@@ -17,6 +21,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <map>
+#include <set>
 
 using namespace parkan;
 using namespace parkan::ai;
@@ -431,8 +436,118 @@ void test_collision() {
     CHECK(dot(s.push_sphere({3, 0, 0}, 1), Vec3{1, 1, 1}) == 0.f);
 }
 
+void test_audio() {
+    std::printf("audio\n");
+    // One mono MS-ADPCM block: predictor 0 (256, 0) predicts s1, so each nibble adds n × delta; delta
+    // adapts by the table (1: 230 → floor 16; −8: 768 → 48; 7: 614 → 115). Header samples come out older first.
+    const std::uint8_t block[] = {0, 16, 0, 100, 0, 50, 0, 0x18, 0x7f};
+    const auto pcm = decode_ms_adpcm(block, 1, 9, {});
+    CHECK((pcm == std::vector<std::int16_t>{50, 100, 116, -12, 324, 209}));
+    // Predictor 1 (512, −256) extrapolates 2·s1 − s2; the sum clamps to int16.
+    const std::uint8_t ramp[] = {1, 16, 0, 0x00, 0x7f, 0x00, 0x7e, 0x00};
+    CHECK((decode_ms_adpcm(ramp, 1, 8, {}) == std::vector<std::int16_t>{0x7e00, 0x7f00, 0x7fff, 0x7fff}));
+    // Stereo: per-channel headers interleaved, nibbles alternate L (high), R (low); cut at `frames`.
+    const std::uint8_t st[] = {0, 0, 16, 0, 32, 0, 10, 0, 20, 0, 1, 0, 2, 0, 0x1f};
+    CHECK((decode_ms_adpcm(st, 2, 15, {}, 2) == std::vector<std::int16_t>{1, 2, 10, 20}));
+    CHECK((decode_ms_adpcm(st, 2, 15, {}) == std::vector<std::int16_t>{1, 2, 10, 20, 26, -12}));
+
+    // RIFF wrapper: the bogus nAvgBytesPerSec (5578) is ignored, `fact` trims the block.
+    std::vector<std::uint8_t> riff;
+    auto put = [&](std::initializer_list<int> bytes) { for (int b : bytes) riff.push_back(std::uint8_t(b)); };
+    auto put32 = [&](std::uint32_t v) { put({int(v & 255), int(v >> 8 & 255), int(v >> 16 & 255), int(v >> 24)}); };
+    put({'R', 'I', 'F', 'F'}), put32(0), put({'W', 'A', 'V', 'E', 'f', 'm', 't', ' '}), put32(50);
+    put({2, 0, 1, 0}), put32(22050), put32(5578), put({9, 0, 4, 0, 32, 0, 6, 0, 7, 0});
+    for (int c : {256, 0, 512, -256, 0, 0, 192, 64, 240, 0, 460, -208, 392, -232}) put({c & 255, (c >> 8) & 255});
+    put({'f', 'a', 'c', 't'}), put32(4), put32(5), put({'d', 'a', 't', 'a'}), put32(9);
+    riff.insert(riff.end(), std::begin(block), std::end(block));
+    put({0}); // pad byte after the odd chunk
+    const std::uint32_t riff_size = std::uint32_t(riff.size() - 8);
+    std::memcpy(riff.data() + 4, &riff_size, 4);
+    const Pcm w = decode_swav(riff);
+    CHECK(w.rate == 22050 && w.channels == 1 && w.frames() == 5 && w.samples[4] == 324);
+
+    // 3D model (audio.md §2.4).
+    using namespace parkan::audio;
+    CHECK(distance_gain(2, 5, 50) == 1.f);
+    CHECK(std::abs(distance_gain(10, 5, 50) - 0.5f) < 1e-6f); // 6 dB per doubling past min
+    CHECK(distance_gain(51, 5, 50) == 0.f);
+    const Vec3 fwd{1, 0, 0}, up{0, 0, 1}; // right = fwd × up = −Y
+    const StereoGain right = pan_gain({0, -10, 0}, fwd, up), ahead = pan_gain({10, 0, 0}, fwd, up);
+    CHECK(right.right == 1.f && right.left < 0.5f);
+    CHECK(ahead.left == 1.f && ahead.right == 1.f);
+    CHECK(doppler_ratio({10, 0, 0}, {-34.33f, 0, 0}, {}, {}) > 1.1f); // approaching source
+    CHECK(doppler_ratio({10, 0, 0}, {0, 5, 0}, {}, {}) == 1.f);        // tangential motion
+    const int tracks[] = {1, 2, 3};
+    for (std::uint32_t r = 0; r < 6; ++r) CHECK(pick_random_track(tracks, 2, r) != 2);
+    CHECK(pick_random_track(tracks, 2, 1) == 3);
+    CHECK(pick_random_track(std::span<const int>(tracks, 1), 1, 7) == 1);
+    CHECK(pick_random_track({}, -1, 0) == -1);
+}
+
+void test_audio_corpus(const std::filesystem::path& game) {
+    // Every SWAV decodes (audio.md §1.2: 167 + 232 entries, all 22050 Hz).
+    AssetLibrary lib(game);
+    int entries = 0, failed = 0;
+    double seconds[2] = {};
+    for (int i = 0; i < 2; ++i)
+        for (const auto& e : lib.archive(i ? "voices.lib" : "sounds.lib").entries()) {
+            ++entries;
+            try {
+                const Pcm p = decode_swav(e.data);
+                if (p.rate != 22050 || !p.frames()) ++failed;
+                seconds[i] += p.seconds();
+            } catch (const std::exception& ex) {
+                ++failed;
+                std::printf("  FAILED %s: %s\n", e.name.c_str(), ex.what());
+            }
+        }
+    CHECK(entries == 399 && failed == 0);
+    CHECK(std::abs(seconds[0] - 293) < 1 && std::abs(seconds[1] - 2580) < 1);
+    // FX sound commands: 517 in 509 effects, modes 0 ×411 / 2 ×106; one entry is missing from sounds.lib.
+    int effects = 0, sounds = 0, loops = 0;
+    std::set<std::string> missing;
+    for (const auto& e : lib.archive("effects.rlb").entries()) {
+        const auto fx = decode_fx(e.data);
+        effects += !fx.sounds.empty();
+        for (const auto& s : fx.sounds) {
+            ++sounds;
+            loops += s.mode == 2;
+            CHECK(s.mode == 0 || s.mode == 2);
+            if (!lib.find(s.archive, s.entry)) missing.insert(s.entry);
+        }
+    }
+    CHECK(effects == 509 && sounds == 517 && loops == 106);
+    CHECK((missing == std::set<std::string>{"fortif_door_move.wav"}));
+    const auto light = load_fx_sounds(lib, "env_lightning");
+    CHECK(light.size() == 1 && light[0].entry == "atm_light1.wav" && light[0].min_distance == 100.f &&
+          light[0].max_distance == 1500.f && !light[0].loop());
+    std::printf("  %d SWAV entries, %.1f s + %.1f s; %d FX sounds\n", entries, seconds[0], seconds[1], sounds);
+}
+
+// Layouts: the modern one moves movement to WASD and the free-look modifier to the middle button,
+// from the shipped (Num*) and the MacBook-remapped (\\) full-speed key alike, and is idempotent.
+void test_keymap() {
+    using namespace parkan::input;
+    {
+        auto t = parse_translate_table("KEY SCAN_NULL SCAN_G_UP 1 CICLS_UNKNOWN MCMD_WALK_F 1.0 0 0 0.0 0\n"
+                                       "KEY SCAN_NULL SCAN_G_ASTERISK 1 CICLS_UNKNOWN MCMD_FORWARD 1.0 0 0 0.0 0\n"
+                                       "KEY SCAN_NULL SCAN_BSLASH 1 CICLS_UNKNOWN MCMD_FORWARD 1.0 0 0 0.0 0\n"
+                                       "MOUSE SCAN_LSHIFT SCAN_MOUSE_X 1 CICLS_CAMERA MCMD_ANGLE_X 0.1 1 MAN_WRAP 0.0 0\n");
+        apply_layout(t, KeyLayout::Modern);
+        CHECK(t[0].key == *scan_from_name("SCAN_W"));
+        CHECK(t[1].key == *scan_from_name("SCAN_LSHIFT") && t[2].key == *scan_from_name("SCAN_LSHIFT"));
+        CHECK(t[3].modifier == kScanMouseMiddle);
+        apply_layout(t, KeyLayout::Modern);
+        CHECK(t[1].key == *scan_from_name("SCAN_LSHIFT") && t[3].modifier == kScanMouseMiddle);
+    }
+    CHECK(ui_key("CMD_JAMES_OUTER_CAMERA", KeyLayout::Modern)->key == *scan_from_name("SCAN_V"));
+    CHECK(ui_key("CMD_JAMES_OUTER_CAMERA", KeyLayout::Classic)->key == *scan_from_name("SCAN_C"));
+    CHECK(!ui_key("CMD_NO_SUCH", KeyLayout::Modern));
+}
+
 void test_corpus(const std::filesystem::path& game) {
     test_unit_motion(game);
+    test_audio_corpus(game);
 
     // Tut_2's sky at 07:00 (notes/atmosphere-render.md §10): the clock starts at 01:30 and a day lasts
     // 900 s, so 07:00 is 900·330/1440 s in; that is a layer time, so its values come out unblended.
@@ -492,6 +607,7 @@ int main(int argc, char** argv) {
     test_input();
     test_man_manager();
     test_collision();
+    test_audio();
     if (argc > 1) test_corpus(argv[1]);
     std::printf(g_failures ? "%d FAILURES\n" : "all passed\n", g_failures);
     return g_failures ? 1 : 0;
