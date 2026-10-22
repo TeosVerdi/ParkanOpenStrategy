@@ -9,6 +9,8 @@
 #include "res/mesh.hpp"
 #include "res/texm.hpp"
 
+#include <span>
+
 namespace parkan {
 
 struct ModelTexture {
@@ -64,6 +66,11 @@ void pose_model(ModelAsset& model, float time, const Mat4* attach = nullptr);
 
 // The same with every node cross-faded between two times (sample_node_blend; Control's tracks A/B).
 void pose_model_blend(ModelAsset& model, float time_a, float time_b, float blend, const Mat4* attach = nullptr);
+
+// Poses each node at its own keyframe time `frames[node]` (CTLD joints playing their node's
+// range); a node without one (index past the end or a negative time) takes its static pose. Root
+// translation is removed as in pose_model; `attach` replaces the root.
+void pose_model_frames(ModelAsset& model, std::span<const float> frames, const Mat4* attach = nullptr);
 
 // Re-poses the model as a component attached to a parent's mesh node: like AniMesh, the model's
 // root node is replaced by the parent node (`attach`, in the parent's space) and every other node

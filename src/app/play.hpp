@@ -16,7 +16,9 @@ struct PlayOptions {
     std::string shot_path;  // render one frame and exit
     double start_time = 0;  // seconds; with --shot, the simulation runs up to this time first
     bool no_fog = false;
-    bool demo_walk = false; // hold "forward" from the start (for --shot checks)
+    bool demo_walk = false;   // hold "forward" from the start (for --shot checks)
+    bool demo_strafe = false; // hold "strafe left" from the start
+    int camera_preset = 0;    // 0 TURRET view, 1..4 OUTER presets (for --shot checks)
 };
 
 int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt);

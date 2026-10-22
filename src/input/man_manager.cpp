@@ -21,12 +21,18 @@ float wrap01(float v) { return v - std::floor(v); }
 
 } // namespace
 
+// The vehicle (class 0) has one set of channels: ExecuteBinding ignores INDEX for it (HERO.TBL's
+// strafe-release lines carry index 1).
 float CommandState::get(std::uint32_t cls, std::int32_t index, std::uint32_t cmd) const {
+    if (cls == 0) index = 0;
     auto it = values_.find({cls, index, cmd});
     return it == values_.end() ? (is_angle(cmd) ? 0.5f : 0.f) : it->second;
 }
 
-void CommandState::set(std::uint32_t cls, std::int32_t index, std::uint32_t cmd, float v) { values_[{cls, index, cmd}] = v; }
+void CommandState::set(std::uint32_t cls, std::int32_t index, std::uint32_t cmd, float v) {
+    if (cls == 0) index = 0;
+    values_[{cls, index, cmd}] = v;
+}
 
 std::vector<Binding> CommandState::take_actions() { return std::exchange(actions_, {}); }
 
@@ -36,7 +42,8 @@ void ManManager::set_table(std::vector<Binding> table) {
     live_.clear();
     for (auto& b : table) {
         Live l{std::move(b)};
-        if (l.b.device != Device::Key) l.active = 2; // axes are evaluated whenever their device moves
+        // Axes are evaluated whenever their device moves; mouse buttons are edges like keys.
+        if (l.b.device == Device::Mouse && (l.b.key == kScanMouseX || l.b.key == kScanMouseY)) l.active = 2;
         live_.push_back(std::move(l));
     }
 }
@@ -60,7 +67,7 @@ void ManManager::activate(Live& l, const CommandState& out) {
 
 void ManManager::on_edge(std::uint16_t scan, bool pressed, const CommandState& out) {
     for (auto& l : live_) {
-        if (l.b.device != Device::Key || l.b.key != scan) continue;
+        if (l.active == 2 || l.b.key != scan) continue;
         if (l.b.on_press == pressed) {
             if (modifier_ok(l)) activate(l, out);
         } else {
@@ -70,7 +77,7 @@ void ManManager::on_edge(std::uint16_t scan, bool pressed, const CommandState& o
     // UpdateModifierBindings: a modifier changing state re-evaluates the press bindings of keys
     // that are still held, so Shift+key and key switch cleanly while the key stays down.
     for (auto& l : live_) {
-        if (l.b.device != Device::Key || !l.b.on_press || l.b.key == scan || !held(l.b.key)) continue;
+        if (l.active == 2 || !l.b.on_press || l.b.key == scan || !held(l.b.key)) continue;
         const bool related = l.b.modifier == scan || std::any_of(live_.begin(), live_.end(), [&](const Live& o) {
                                  return o.b.key == l.b.key && o.b.modifier == scan;
                              });

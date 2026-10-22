@@ -112,7 +112,14 @@ Paths inside the data are resolved case-insensitively (`core/paths`).
 - Per ≤33 ms simulation step: SDL key → `input::scan_from_hid` → `ManManager` (M1.TBL + MacBook remap)
   → `CommandState` → `UnitMotion::set_throttle`/`set_angular_command` (ExecuteBinding's vehicle
   mapping) → `UnitMotion::update` → ground offset from the feet → `pose_unit`.
-- Keys are the game's own M1.TBL: arrows walk, `,`/`.` turn, `=`/`-` speed, and so on.
+- The hero uses HERO.TBL (with the MacBook remap): arrows walk/strafe, mouse X turns the body
+  (ANGLE_Z → attitude target), mouse Y raises the barrel (turret ANGLE_Y), `=`/`-`/`\`/Backspace
+  set speed, LShift + mouse looks around. `C` cycles the OUTER camera presets; Tab toggles the
+  port's debug orbit camera.
+- Turret and cameras (`control/turret`; notes/turret-camera.md): joints play their node's keyframe
+  range (t per node); the TURRET view sits at CameraCenter looking along TargetDirect (FOV 1.3,
+  near 0.1, far 1000); the own unit is not drawn from it (inferred). Strafing is the attitude offset
+  (IControl +0x50), added to the chassis yaw after the rate clamp and counter-rotated by the turret.
 - `--walk` holds forward (for `--shot` checks); `--time` runs the simulation to that time first.
 - Collision (`world/collision`; control-physics.md "Collision"): positional only. The hero's sphere
   (around its chassis bounds) is pushed out of the static objects' near-vertical faces

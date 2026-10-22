@@ -29,6 +29,8 @@ struct UnitPart {
     int parent = -1;  // index into UnitModel::parts; -1 for the chassis
     int mount = -1;   // node of the parent part
     std::uint32_t transform_base = 0; // first transform of this part in UnitModel::mesh
+    std::string archive, ctl_entry, cpt_entry; // the prototype's motion graph / marker points (may be empty)
+    std::vector<float> node_frames;  // components: keyframe time per node (-1 = static), e.g. turret joints
 };
 struct UnitModel {
     std::vector<UnitPart> parts;
@@ -38,7 +40,7 @@ struct UnitModel {
 std::optional<UnitModel> load_unit_model(AssetLibrary& lib, std::string_view scheme_path);
 
 // Poses the chassis at the two animation times (cross-faded by `blend`; root translation removed),
-// re-attaches the components (static pose) and writes world · node matrices to
+// re-attaches the components (each posed by its node_frames) and writes world · node matrices to
 // `transforms[first + part base + node]`.
 void pose_unit(UnitModel& unit, const Mat4& world, float time_a, float time_b, float blend,
                std::vector<Mat4>& transforms, std::size_t first);

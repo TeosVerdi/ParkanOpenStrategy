@@ -146,6 +146,7 @@ void UnitMotion::advance_motion() {
     // track starts are used for that last translation; only the rotation (InvRotate below) matters.
     interpolate(clock_);
     start_ = end_; // BeginStep
+    att_delta_ = {}; // BeginStep also clears m+0x188
     step_start_ = clock_;
     prev_w_ = w_;
     w_ = 1;
@@ -244,6 +245,10 @@ void UnitMotion::step_rotation(float dt, bool unclamped) {
     rot.z += drive * (drive_right - drive_left);
     if (!unclamped)
         for (int i = 0; i < 3; ++i) comp(rot, i) = std::clamp(comp(rot, i), -comp(rate_dt, i), comp(rate_dt, i));
+    // The attitude offset's change since the last step, after the clamp (strafing).
+    att_delta_ = att_offset_ - att_prev_;
+    att_prev_ = att_offset_;
+    rot = rot + att_delta_;
 
     q_step_ = euler_zxy(rot);
     end_ = end_ * flip_z(q_step_); // body-frame post-multiply; translation unchanged
@@ -305,6 +310,7 @@ MotionFrame UnitMotion::interpolate(float now_ms) {
     f.frame_a = anim_.time * anim_.a[1] + (1 - anim_.time) * anim_.a[0];
     f.frame_b = anim_.time * anim_.b[1] + (1 - anim_.time) * anim_.b[0];
     f.weight_b = anim_.weight;
+    f.attitude_offset = att_prev_ - att_delta_ * (1 - u);
     return f;
 }
 

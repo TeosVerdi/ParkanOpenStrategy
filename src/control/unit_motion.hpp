@@ -22,6 +22,9 @@ namespace parkan {
 struct MotionFrame {
     Mat4 matrix = Mat4::identity();
     float frame_a = 0, frame_b = 0, weight_b = 0;
+    // The attitude offset as the render pose has it: m+0x17c − (1 − u)·m+0x188 (z = strafe heading);
+    // the turret counter-rotates its yaw by it (CTurretDevice::SetYawOffsetFromAttitude 10028990).
+    Vec3 attitude_offset{};
 };
 
 class UnitMotion {
@@ -35,6 +38,10 @@ public:
     void set_angular_command(Vec3 a);     // fraction of body[9..11] per axis; leaves attitude-target mode
     void set_attitude_target(Vec3 turns); // remaining turn per axis as a fraction of 2π, offset by 0.5
                                           // (0.5 = on target); StepRotation then writes the command
+    // IControl +0x50 SetAttitudeOffset (m+0x40): StepRotation adds its change since the last step
+    // after the rate clamp, so a strafe yaws the chassis by the whole offset in one step.
+    void set_attitude_offset(Vec3 o) { att_offset_ = o; }
+    Vec3 attitude_target() const { return attitude_; } // m+0x2c (IControl GetProperty 0x30)
     void set_mode(std::int32_t mode) { mode_ = mode; } // IControl slot 19 SetMode (ctl+0x1ac)
     void set_contact_touch(std::size_t c, bool touch) { contacts_.at(c).touch = touch; }
 
@@ -116,6 +123,7 @@ private:
     Vec3 throttle_{}, v_{}, ang_cmd_{};
     Vec3 attitude_{0.5f, 0.5f, 0.5f};
     Vec3 level_{}, world_vel_{}, dv_{}, lean_angles_{};
+    Vec3 att_offset_{}, att_prev_{}, att_delta_{}; // m+0x40, m+0x17c, m+0x188
     bool velocity_mode_ = true, attitude_mode_ = false;
     Quat q_step_{}, lean_prev_{}, lean_cur_{};
     Mat4 end_ = Mat4::identity(), start_ = Mat4::identity(), out_ = Mat4::identity();

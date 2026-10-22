@@ -66,6 +66,18 @@ void pose_model_blend(ModelAsset& model, float time_a, float time_b, float blend
     }
 }
 
+void pose_model_frames(ModelAsset& model, std::span<const float> frames, const Mat4* attach) {
+    const auto& nodes = model.mesh.nodes;
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        const bool root = nodes[i].parent == 0xFFFF;
+        NodePose p = sample_node(model.mesh, i, i < frames.size() ? frames[i] : -1.f);
+        if (root) p.pos = {};
+        model.node_local[i] = pose_matrix(p);
+        model.node_world[i] = root ? (attach ? *attach : model.node_local[i])
+                                   : model.node_world[nodes[i].parent] * model.node_local[i];
+    }
+}
+
 void pose_model(ModelAsset& model, float time, const Mat4* attach) { pose_model_blend(model, time, -1, 0, attach); }
 
 ModelAsset load_model(AssetLibrary& lib, std::string_view archive, std::string_view mesh_entry, int state, int lod) {

@@ -20,6 +20,7 @@ add_library(parkan_core STATIC
   src/res/ctld.cpp
   src/control/motion_graph.cpp
   src/control/unit_motion.cpp
+  src/control/turret.cpp
   src/scene/model.cpp
   src/scene/render_mesh.cpp
   src/scene/mission_scene.cpp

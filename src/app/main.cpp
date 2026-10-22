@@ -58,7 +58,8 @@ int main(int argc, char** argv) {
     std::string view_archive, view_mesh, unit, terrain, mission, shot;
     double start_time = 0;
     int start_state = 0;
-    bool no_fog = false, demo_walk = false;
+    bool no_fog = false, demo_walk = false, demo_strafe = false;
+    int camera_preset = 0;
     std::string play;
     float pitch = -1; // camera elevation override (radians); negative = the mode's default
     for (int i = 1; i < argc; ++i) {
@@ -72,6 +73,10 @@ int main(int argc, char** argv) {
             play = argv[++i];
         } else if (a == "--walk") {
             demo_walk = true;
+        } else if (a == "--strafe") {
+            demo_strafe = true;
+        } else if (a == "--outer" && i + 1 < argc) {
+            camera_preset = std::atoi(argv[++i]);
         } else if (a == "--mission" && i + 1 < argc) {
             mission = argv[++i];
         } else if (a == "--terrain" && i + 1 < argc) {
@@ -125,6 +130,8 @@ int main(int argc, char** argv) {
             po.start_time = start_time;
             po.no_fog = no_fog;
             po.demo_walk = demo_walk;
+            po.demo_strafe = demo_strafe;
+            po.camera_preset = camera_preset;
             rc = parkan::run_play(window, lib, po);
         } else if (!view_mesh.empty()) {
             opt.title = view_mesh;

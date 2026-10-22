@@ -137,6 +137,12 @@ std::optional<UnitModel> load_unit_model(AssetLibrary& lib, std::string_view rel
         part.model = load_model(lib, ref->archive, ref->mesh);
         part.parent = parent;
         part.mount = node.mount;
+        // Prototype pairs: 0 mesh, 1 WEAR, 2 CTPT, 3 NDPR, 4 CTLD (STAT/BTLU/EXTO records).
+        if (const NResEntry* pe = lib.find("objects.rlb", node.entry); pe && pe->data.size() >= 0x140) {
+            part.archive = field(pe->data, 0x80);
+            part.cpt_entry = field(pe->data, 0xa0);
+            part.ctl_entry = field(pe->data, 0x120);
+        }
         if (parent >= 0) attach_pose(part.model, u.parts[std::size_t(parent)].model.node_world[std::size_t(node.mount)]);
         else if (const NResEntry* e = lib.find("objects.rlb", node.entry); e && e->data.size() >= 0x140) {
             u.ctl_archive = field(e->data, 0x100), u.ctl_entry = field(e->data, 0x120);
@@ -166,7 +172,8 @@ void pose_unit(UnitModel& unit, const Mat4& world, float time_a, float time_b, f
         if (part.parent < 0) {
             pose_model_blend(part.model, time_a, time_b, blend);
         } else {
-            attach_pose(part.model, unit.parts[std::size_t(part.parent)].model.node_world[std::size_t(part.mount)]);
+            pose_model_frames(part.model, part.node_frames,
+                              &unit.parts[std::size_t(part.parent)].model.node_world[std::size_t(part.mount)]);
         }
         for (std::size_t i = 0; i < part.model.node_world.size(); ++i) {
             const std::size_t at = first + part.transform_base + i;

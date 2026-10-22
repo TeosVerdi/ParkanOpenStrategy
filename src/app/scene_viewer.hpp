@@ -41,6 +41,14 @@ struct ViewerOptions {
     // Optional: after `animate`, may move the orbit centre (a camera following a unit).
     std::function<void(Vec3& centre)> follow;
     float orbit_distance = 0; // initial orbit distance in world units; 0 = from the mesh bounds
+    // Optional: a game camera. When it returns true the orbit camera is replaced for this frame.
+    struct Camera {
+        Vec3 eye, forward, up{0, 0, 1};
+        float fov_x = 1.3f; // horizontal field of view (radians)
+        float znear = 0.1f, zfar = 1000.f;
+    };
+    std::function<bool(Camera&)> camera;
+    bool relative_mouse = false; // capture the mouse (game mouse look)
 };
 
 // Mouse drag orbits, the wheel zooms, Esc quits.

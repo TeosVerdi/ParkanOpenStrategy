@@ -264,6 +264,7 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
     }
 
     upload_mesh(g, mesh);
+    if (opt.relative_mouse && opt.shot_path.empty()) SDL_SetWindowRelativeMouseMode(window, true);
     SkyDome dome;
     if (opt.sky) {
         dome = build_sky_dome(16);
@@ -334,12 +335,21 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
 
     auto render = [&](SDL_GPUCommandBuffer* cb, SDL_GPUTexture* target, Uint32 w, Uint32 h) {
         ensure_depth(w, h);
-        const Vec3 eye = centre + Vec3{std::cos(pitch) * std::cos(yaw), std::cos(pitch) * std::sin(yaw), std::sin(pitch)} * dist;
+        Vec3 eye = centre + Vec3{std::cos(pitch) * std::cos(yaw), std::cos(pitch) * std::sin(yaw), std::sin(pitch)} * dist;
+        Vec3 look = centre;
         const float aspect = float(w) / float(std::max<Uint32>(h, 1));
-        const Mat4 view = Mat4::look_at(eye, centre, {0, 0, 1});
-        const Mat4 vp = Mat4::perspective(0.8f, aspect, std::max(0.05f, dist * 0.005f), radius * 20.f) * view;
+        float fovy = 0.8f, znear = std::max(0.05f, dist * 0.005f), zfar = radius * 20.f;
+        Vec3 up{0, 0, 1};
+        ViewerOptions::Camera cam;
+        if (opt.camera && opt.camera(cam)) {
+            eye = cam.eye, look = cam.eye + cam.forward, up = cam.up;
+            fovy = 2 * std::atan(std::tan(cam.fov_x / 2) / aspect);
+            znear = cam.znear, zfar = cam.zfar;
+        }
+        const Mat4 view = Mat4::look_at(eye, look, up);
+        const Mat4 vp = Mat4::perspective(fovy, aspect, znear, zfar) * view;
         if (opt.sky) { // colours and lighting for this frame, then the dome's vertices to the GPU
-            opt.sky(anim_time, normalize(centre - eye), dome, sky_frame);
+            opt.sky(anim_time, normalize(look - eye), dome, sky_frame);
             lighting = sky_frame.lighting;
             upload(g.device, dome.vertices.data(), Uint32(dome.vertices.size() * sizeof(RenderVertex)), g.sky_vbuf, nullptr);
         }
@@ -360,7 +370,7 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
             // RenderSkyDome (10048110): the clear colour is the fog colour (background quad), then the
             // nebula with stars, the alpha-blended colour gradient and the scrolling clouds 5000 lower.
             // The sky passes are unfogged and unlit; the clouds are lit and fogged from 5000 to R/3.
-            const Mat4 sky_vp = Mat4::perspective(0.8f, aspect, 10.f, 100000.f) * view;
+            const Mat4 sky_vp = Mat4::perspective(fovy, aspect, 10.f, 100000.f) * view;
             SceneLighting unlit;
             unlit.sun_color = unlit.fill_color = {};
             unlit.ambient = {1, 1, 1};
