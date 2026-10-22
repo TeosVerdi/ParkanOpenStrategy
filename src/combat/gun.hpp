@@ -78,6 +78,7 @@ public:
     std::size_t barrel_count() const { return channels_.size(); }
     std::uint32_t barrel_joint(std::size_t b) const { return channels_[b].joint; }
     std::uint32_t shots() const { return shots_; }   // bullets spawned (port statistics)
+    float lock_timer() const { return lock_; }       // dev+0x170: seconds left to lock on (HUD brackets)
     bool enabled = true;                               // dev+0x118
     float recharge_per_s = INFINITY;                   // port (see the file comment)
     float damage_mult = 1;                             // dev+0x180 → bullet property 0xb4

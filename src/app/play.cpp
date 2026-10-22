@@ -23,6 +23,8 @@
 #include "game/mission_runtime.hpp"
 #include "res/textres.hpp"
 #include "res/tft.hpp"
+#include "ui/hud.hpp"
+#include "ui/hud_resources.hpp"
 #include "ui/hud_text.hpp"
 
 #include <set>
@@ -434,6 +436,22 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             break;
         }
     }
+    // The cockpit (notes/hud.md): the ui.lib pages and the mission's satellite map, uploaded after the fonts.
+    ui::HudTextures hud_tex;
+    try {
+        const ui::HudResources hr = ui::load_hud_resources(lib, &*dir);
+        auto add = [&](const Texm* t, const char* name) -> std::int32_t {
+            if (!t || t->mips_rgba.empty()) return -1;
+            font_textures.push_back({name, t->width, t->height, t->mips_rgba.front()});
+            return std::int32_t(font_textures.size() - 1);
+        };
+        auto page = [&](const char* name) { auto it = hr.pages.find(name); return add(it != hr.pages.end() ? &it->second : nullptr, name); };
+        hud_tex.page6 = page("page6"), hud_tex.page7 = page("page7"), hud_tex.page9 = page("page9");
+        hud_tex.ui_menu = page("ui_menu"), hud_tex.ui_menu3 = page("ui_menu3");
+        hud_tex.minimap = add(hr.minimap ? &*hr.minimap : nullptr, "minimap");
+    } catch (const std::exception& ex) {
+        SDL_Log("play: HUD textures: %s", ex.what());
+    }
     // Message sources: messages.cfg (`info_system` picks the header) and the voice table, which maps a
     // voice key to a voices.lib entry in mission.cfg's resource objects.
     std::set<std::uint32_t> info_messages;
@@ -491,12 +509,11 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         objectives_visible = !runtime->config().primary_objectives.empty(), objectives_auto_hide = true;
     }
 
-    // The hero chassis root's rest rotation (its static-pose key), for the camera stabilisation.
-    Mat4 root_rest = Mat4::identity();
-    {
-        const NodePose p = sample_node(hero.model.parts.front().model.mesh, 0, -1);
-        root_rest = Mat4::rotation(p.rot.conjugate()); // AniMesh's local matrix rotates by the conjugate
-    }
+    // Steady turret (port choice, --camera-sway turns it off): the walk clips twist the chassis root
+    // (r_h_02: up to ~10° of yaw per stride) and everything mounted under it follows, in the original
+    // too (notes/turret-camera.md "Walk sway"). The hero's turret, guns, sight and cockpit camera are
+    // attached as if the root kept its rest rotation, so view and barrels stay together and still.
+    hero.steady_mounts = opt.stabilize_camera;
 
 
     // Input: the hero is driven through HERO.TBL (iron3d loads it for the hero; warbots use M1/M2),
@@ -526,12 +543,88 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     Vec3 last_cam_forward{};
     std::size_t pushed_steps = 0;
 
+    // HUD state (notes/hud.md §10): cockpit pages on/off, the satellite map and its alpha, the sight zoom,
+    // the selected target (CTargeting+4; −1 none) and the last rendered camera (projections, the radar).
+    bool cockpit_on = true, map_visible = false, zoomed = false;
+    int map_alpha = 0x80;          // CSatelliteMap +0x90 (iron_3d.ini MAP_ALPHA is not read)
+    double map_alpha_changed_ms = -1e9;
+    float zoom_fov = -1;           // the turret camera's current FOV (CUnit +0x14); < 0 = not started
+    std::int32_t hud_target = -1;
+    double hud_target_since_ms = -1e9;
+    std::optional<ViewerOptions::Camera> hud_cam;
+    float max_speed_seen = 10.f;   // port: the speed arc's full scale (property 0x90 is not read)
+    // Port stand-in for the radar range (unit property 0x50): the detected objects are the living units
+    // within it.
+    constexpr float kRadarRange = 300.f;
+    const std::uint32_t hero_clan = hero.placement->ai_index;
+    auto detected = [&]() {
+        std::vector<std::int32_t> out;
+        for (std::size_t i = 0; i < combat.size(); ++i) {
+            const combat::Combatant& c = combat.unit(i);
+            if (i == hero_slot || c.removed || !c.alive()) continue;
+            const Vec3 d = c.unit->position() - hero.position();
+            if (d.x * d.x + d.y * d.y <= kRadarRange * kRadarRange) out.push_back(std::int32_t(i));
+        }
+        return out;
+    };
+    auto set_hud_target = [&](std::int32_t t) {
+        if (t != hud_target) hud_target_since_ms = sim_ms;
+        hud_target = t;
+    };
+    // CTargeting::SelectNearestEnemy / SelectNearestFriend over the detected objects.
+    auto select_nearest = [&](bool enemy) {
+        std::int32_t best = -1;
+        float best_d = FLT_MAX;
+        for (std::int32_t i : detected()) {
+            const bool hostile = perception.hostile(hero_clan, live[std::size_t(i)]->placement->ai_index);
+            if (hostile != enemy) continue;
+            const Vec3 d = combat.unit(std::size_t(i)).unit->position() - hero.position();
+            if (dot(d, d) < best_d) best_d = dot(d, d), best = i;
+        }
+        if (best >= 0) set_hud_target(best);
+    };
+
     ViewerOptions vo;
     vo.title = "Parkan — " + opt.mission;
     vo.shot_path = opt.shot_path;
     vo.start_time = opt.start_time;
     vo.pitch = 0.35f;
     vo.orbit_distance = 9.f;
+
+    // The HUD's UI commands (OnUICommandDown 10072120), by the scan code pressed (keys and mouse buttons).
+    auto hud_command = [&](std::uint16_t scan) {
+        auto is = [&](std::string_view command) {
+            const auto k = input::ui_key(command, opt.layout);
+            return k && k->key == scan;
+        };
+        if (is("CMD_JAMES_COCKPIT_OFF")) {
+            cockpit_on = !cockpit_on; // CCockpit_AnyPageVisible ? hide all : show all
+        } else if (is("CMD_JAMES_SATELLITE_MAP")) {
+            map_visible = !map_visible;
+        } else if ((is("CMD_INC_MAP_ALPHA") || is("CMD_DEC_MAP_ALPHA")) && map_visible) {
+            map_alpha = std::clamp(map_alpha + (is("CMD_INC_MAP_ALPHA") ? 1 : -1) * ui::kMapAlphaStep, ui::kMapAlphaMin, ui::kMapAlphaMax);
+            map_alpha_changed_ms = sim_ms;
+        } else if (is("CMD_JAMES_ZOOM_MODE")) {
+            // Ignored while a zoom transition runs (0.2 < fov < the camera's own).
+            const float base = hero.rig ? hero.rig->camera_fov : 1.3f;
+            if (zoom_fov < 0 || zoom_fov <= ui::kZoomFov + 1e-4f || zoom_fov >= base - 1e-4f) zoomed = !zoomed;
+        } else if (is("CMD_JAMES_SELECT_TARGET")) {
+            // CycleRadarTarget: the entry after the current target in the detected list.
+            const auto list = detected();
+            if (!list.empty()) {
+                auto it = std::find(list.begin(), list.end(), hud_target);
+                set_hud_target(it == list.end() || it + 1 == list.end() ? list.front() : *(it + 1));
+            }
+        } else if (is("CMD_JAMES_SELECT_ENEMY")) {
+            select_nearest(true);
+        } else if (is("CMD_JAMES_SELECT_FRIEND")) {
+            select_nearest(false);
+        } else if (is("CMD_JAMES_AIM_TARGET")) {
+            // LockTarget: the object under the screen centre within the radar range.
+            const std::int32_t t = combat.sight_target(hero_slot, kRadarRange);
+            if (t >= 0) set_hud_target(t);
+        }
+    };
 
     vo.on_event = [&](const SDL_Event& ev) {
         if ((ev.type == SDL_EVENT_KEY_DOWN || ev.type == SDL_EVENT_KEY_UP) && !ev.key.repeat) {
@@ -551,11 +644,14 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             }
             if (ev.type == SDL_EVENT_KEY_DOWN && ev.key.scancode == SDL_SCANCODE_F10) // port debug orbit
                 camera_mode = camera_mode < 0 ? 0 : -1;
+            if (ev.type == SDL_EVENT_KEY_DOWN)
+                if (const auto scan = input::scan_from_hid(int(ev.key.scancode))) hud_command(scan);
         } else if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN || ev.type == SDL_EVENT_MOUSE_BUTTON_UP) {
             const std::uint16_t b = ev.button.button == SDL_BUTTON_LEFT    ? input::kScanMouseLeft
                                     : ev.button.button == SDL_BUTTON_RIGHT ? input::kScanMouseRight
                                                                            : input::kScanMouseMiddle;
             events.push_back({ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN, b});
+            if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN) hud_command(b);
         } else if (ev.type == SDL_EVENT_MOUSE_MOTION) {
             mouse_dx += ev.motion.xrel, mouse_dy += ev.motion.yrel;
         }
@@ -689,7 +785,11 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 }
             }
         } else {
-            hero_combat.target = combat.sight_target(hero_slot); // guided guns lock on what the sight covers
+            // Guided guns lock on the selected HUD target, else on what the sight covers (port: the turret's
+            // PushTargetToGuns is not traced).
+            if (hud_target >= 0 && (combat.unit(std::size_t(hud_target)).removed || !combat.unit(std::size_t(hud_target)).alive()))
+                hud_target = -1;
+            hero_combat.target = hud_target >= 0 ? hud_target : combat.sight_target(hero_slot);
         }
         combat.update(float(sim_ms));
         for (const auto& e : combat.take_events()) {
@@ -777,6 +877,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     // CCameraDevice::Update: eye = CameraCenter, X = TargetDirect (the barrel), up = CameraCenter's
     // vector; free look (LShift + mouse) rotates locally by Rz((0.5 − ax)·2π) · Ry((0.5 − ay)·π).
     vo.camera = [&](ViewerOptions::Camera& cam) {
+        hud_cam.reset();
         const auto& rig = hero.rig;
         const auto& turret_points = hero.turret_points;
         if (camera_mode < 0 || !rig || rig->camera_eye_point < 0 || std::size_t(rig->camera_eye_point) >= turret_points.size() ||
@@ -787,17 +888,8 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         const ContactPoint &pe = turret_points[std::size_t(rig->camera_eye_point)],
                            &pa = turret_points[std::size_t(rig->camera_axis_point)];
         if (pe.part >= nodes.size() || pa.part >= nodes.size()) return false;
-        // Camera stabilisation (port choice): walk clips twist the chassis root (r_h_02: up to ~10° of
-        // yaw per stride) and the turret, mounted under it, swings the view ±8°. The camera is placed
-        // as if the root kept its rest rotation; the model itself still plays the original motion.
-        Mat4 base = last_frame.matrix;
-        if (opt.stabilize_camera) {
-            const Mat4& root_local = hero.model.parts.front().model.node_local[0]; // rotation only (root)
-            Mat4 unroot = Mat4::identity();
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c) unroot.at(r, c) = root_local.at(c, r); // inverse of a rotation
-            base = base * root_rest * unroot;
-        }
+        // The turret part's nodes already carry the steady mount (hero.steady_mounts).
+        const Mat4& base = last_frame.matrix;
         const Mat4 me = base * nodes[pe.part], ma = base * nodes[pa.part];
         const Vec3 eye = me.transform_point(pe.pos);
         Vec3 fwd = normalize(ma.transform_point(pa.vec) - ma.transform_point({}));
@@ -812,7 +904,11 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         cam.eye = eye, cam.forward = fwd, cam.up = up;
         if (sound) sound->set_listener(eye, fwd, up);
         last_cam_forward = fwd;
-        cam.fov_x = rig->camera_fov, cam.znear = rig->camera_near, cam.zfar = rig->camera_far;
+        // JAMES_ZOOM_MODE (CUnit_Update 10075ad0): the FOV steps 0.1 per frame toward 0.2 or back.
+        if (zoom_fov < 0) zoom_fov = rig->camera_fov;
+        zoom_fov = zoomed ? std::max(ui::kZoomFov, zoom_fov - ui::kZoomStep) : std::min(rig->camera_fov, zoom_fov + ui::kZoomStep);
+        cam.fov_x = zoom_fov, cam.znear = rig->camera_near, cam.zfar = rig->camera_far;
+        hud_cam = cam;
         if (camera_mode == 1) {
             // CMissionCameras::UpdateOuter: parallel to the turret view, behind and below it by the unit's
             // radius × the preset factors; the presets blend over 0.3 s (0.5 s leaving).
@@ -835,8 +931,120 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (auto g = ground.probe(cam.eye + Vec3{0, 0, 50}, 100.f); g && cam.eye.z < g->z + 0.75f) cam.eye.z = g->z + 0.75f;
             cam.znear = 0.5f, cam.zfar = 175.f, cam.fov_x = 1.3f;
             if (sound) sound->set_listener(cam.eye, fwd, up);
+            hud_cam = cam;
         }
         return true;
+    };
+
+    // The cockpit's state for this frame (notes/hud.md), from the hero's combatant, the live units and the
+    // rendered camera. `aspect` = drawable width / height (projections).
+    ui::HudStrings hud_strings;
+    hud_strings.inf = ui_text(5094), hud_strings.out_of_zone = ui_text(6250), hud_strings.metres = ui_text(6178);
+    auto unit_name = [&](std::size_t i) {
+        const mission::TmaObject& o = *live[i]->placement;
+        if (!o.instance_name.empty()) return utf8_to_cp1251(o.instance_name);
+        std::string n = o.resource;
+        if (auto cut = n.find_last_of("\\/"); cut != std::string::npos) n = n.substr(cut + 1);
+        if (auto dot_at = n.find('.'); dot_at != std::string::npos) n.resize(dot_at);
+        return n;
+    };
+    // GetClanRelationColour: own clan, nature clans (TMA mode 0; inferred = record kind 0), else the
+    // other clan's relation towards the hero's.
+    auto unit_colour = [&](std::size_t i) {
+        const std::uint32_t clan = live[i]->placement->ai_index;
+        const int kind = clan < tma.clans.size() && tma.clans[clan].mode == 0 ? 0 : 1;
+        int relation = perception.hostile(hero_clan, clan) ? 0 : 1;
+        if (runtime && clan < runtime->world().clans.size() && hero_clan < runtime->world().clans[clan].relations.size())
+            relation = int(runtime->world().clans[clan].relations[hero_clan]);
+        return ui::relation_colour(clan == hero_clan, kind, relation);
+    };
+    auto build_hud = [&](float aspect) {
+        ui::HudState s;
+        s.cockpit = cockpit_on;
+        const Vec3 hero_pos = hero.position();
+        auto project = [&](Vec3 p) -> std::optional<ui::Vec2f> {
+            if (!hud_cam) return std::nullopt;
+            const float eye[3] = {hud_cam->eye.x, hud_cam->eye.y, hud_cam->eye.z};
+            const float fwd[3] = {hud_cam->forward.x, hud_cam->forward.y, hud_cam->forward.z};
+            const float up[3] = {hud_cam->up.x, hud_cam->up.y, hud_cam->up.z}, pt[3] = {p.x, p.y, p.z};
+            return ui::project_to_virtual(eye, fwd, up, hud_cam->fov_x, aspect, pt);
+        };
+        if (hud_cam) {
+            s.fwd_x = hud_cam->forward.x, s.fwd_y = hud_cam->forward.y, s.fov = hud_cam->fov_x;
+        } else { // debug orbit: the body's heading, no sight
+            const Mat4& m = hero.frame.matrix;
+            s.fwd_x = m.at(0, 1), s.fwd_y = m.at(1, 1), s.has_camera = false;
+        }
+        // Radar: the detected units; the ping period range·0.002 s (property 0xa9 stand-in); altitude above
+        // the map's lowest point (mission+0xad8 inferred); speed in km/h.
+        s.radar_range = kRadarRange;
+        const double period_ms = kRadarRange * 0.002 * 1000;
+        s.sweep = float(std::fmod(sim_ms, period_ms) / period_ms);
+        for (std::int32_t i : detected()) {
+            const Vec3 d = combat.unit(std::size_t(i)).unit->position() - hero_pos;
+            ui::HudBlip b;
+            b.dx = d.x, b.dy = d.y, b.argb = unit_colour(std::size_t(i));
+            b.kind = contains_ci(live[std::size_t(i)]->placement->resource, "\\ANIMAL\\") ? ui::BlipKind::Flyer : ui::BlipKind::Ground;
+            b.selected = i == hud_target;
+            s.blips.push_back(b);
+        }
+        s.altitude = hero_pos.z - ground.bounds_min().z;
+        const Vec3 v = motion.world_velocity();
+        s.speed_kmh = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z) * 3.6f;
+        max_speed_seen = std::max(max_speed_seen, s.speed_kmh);
+        s.max_speed_kmh = max_speed_seen;
+        s.lamps[3] = 1; // piloted directly (top view state 0)
+        s.lamps[5] = 1; // behaviour mode 0 (unit+0x9c; port default)
+        // Weapon rows: the hero's guns in HERO.TBL order, named by iron3d 3071..3074 (CHeroUnit_Ctor).
+        for (std::size_t g = 0; g < hero_combat.guns.size(); ++g) {
+            const combat::GunDevice& gun = hero_combat.guns[g];
+            ui::HudWeapon w;
+            w.name = g < 4 ? ui_text(3071 + std::uint32_t(g)) : utf8_to_cp1251(gun.spec().bullet.second);
+            w.ammo = gun.ammo(), w.state = gun.state();
+            w.selected = g < hero_combat.selected.size() && hero_combat.selected[g];
+            w.energy = gun.param(1) > 0 ? std::clamp(gun.energy() / gun.param(1), 0.f, 1.f) : 1.f;
+            // Lock progress (control slot 0x28, inferred): guided guns only, 1 − timer / lock time.
+            if (gun.param(9) > 0)
+                w.lock = gun.state() == combat::kGunIdle      ? 1.f
+                         : gun.state() == combat::kGunLocking ? std::clamp(1 - gun.lock_timer() / gun.param(9), 0.01f, 1.f)
+                                                              : 0.f;
+            s.weapons.push_back(w);
+        }
+        if (hero_combat.target >= 0) s.lock_point = project(combat.unit(std::size_t(hero_combat.target)).aim_centre());
+        // Own unit (page 2) and the selected target (page 1, with its on-screen box).
+        s.own.name = unit_name(hero_slot);
+        s.own.health = hero_combat.damage.hp_ratio() * 100;
+        const std::int32_t shown = hud_target >= 0 ? hud_target : opt.demo_aim ? hero_combat.target : -1;
+        if (shown >= 0 && !combat.unit(std::size_t(shown)).removed) {
+            const combat::Combatant& t = combat.unit(std::size_t(shown));
+            ui::HudUnitPanel p;
+            p.name = unit_name(std::size_t(shown));
+            p.health = t.damage.hp_ratio() * 100;
+            const Vec3 d = t.unit->position() - hero_pos;
+            p.distance = std::sqrt(dot(d, d));
+            s.target = p;
+            if (auto sp = project(t.aim_centre())) {
+                // Port: the box half-size 200·s is 2/3 of the projected bounding radius (the original's
+                // projection terms p[4]/p[5] are not decoded).
+                const Vec3 e = t.aim_centre() - hud_cam->eye;
+                const float dist = std::max(0.1f, std::sqrt(dot(e, e)));
+                ui::HudTargetMarker m;
+                m.x = sp->x, m.y = sp->y, m.argb = unit_colour(std::size_t(shown));
+                m.size = t.radius() / (dist * std::tan(hud_cam->fov_x / 2)) * 320.f / 200.f * (2.f / 3.f);
+                m.since_change_s = float((sim_ms - hud_target_since_ms) / 1000);
+                s.marker = m;
+            }
+        }
+        // The satellite map: units as dots (x·256/S, S = the map's width).
+        s.map_visible = map_visible, s.map_alpha = map_alpha, s.map_alpha_label = sim_ms - map_alpha_changed_ms < 1000;
+        const float S = std::max(1.f, ground.bounds_max().x);
+        for (std::size_t i = 0; i < combat.size(); ++i) {
+            const combat::Combatant& c = combat.unit(i);
+            if (c.removed || !c.alive()) continue;
+            const Vec3 p = c.unit->position();
+            s.map_dots.push_back({p.x * 256 / S, p.y * 256 / S, i == hero_slot ? 0xffffffffu : unit_colour(i)});
+        }
+        return s;
     };
 
     // HUD text. Positions are in the 640×480 virtual screen; the font set is chosen by the window's size
@@ -852,10 +1060,19 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         if (pager && sim_ms - pager->shown_ms >= ui::kPagerLifetimeMs) pager.reset();
         if (objectives_visible && objectives_auto_hide && sim_ms - objectives_shown_ms >= ui::kObjectivesAutoHideMs)
             objectives_visible = false;
-        if (pager) ui::draw_pager(f, vs, game_font, *pager);
+        // CHud_Draw: with the objectives screen up only it is drawn; otherwise the cockpit, the satellite
+        // map, then the pager.
+        if (!objectives_visible) {
+            const ui::HudState hs = build_hud(float(f.width) / float(std::max(1u, f.height)));
+            ui::draw_hud(f, ui::HudContext{vs, game_font, hud_tex, hud_strings}, hs);
+            if (pager) ui::draw_pager(f, vs, game_font, *pager);
+        }
         if (objectives_visible && runtime) {
             ui::ObjectivesScreen o;
             o.title = ui_text(3062), o.bonus_title = ui_text(3061), o.footer = with_key(ui_text(1017), objectives_key);
+            // Port deviation: the RU string 1017 hard-codes "F12" (no %s; ENG has %s), so the bound key replaces it.
+            if (ui_text(1017).find("%s") == std::string::npos)
+                if (auto p12 = o.footer.find("F12"); p12 != std::string::npos) o.footer.replace(p12, 3, objectives_key);
             o.state_word[0] = ui_text(1014), o.state_word[1] = ui_text(1027), o.state_word[2] = ui_text(1015);
             const auto& cfg = runtime->config();
             const auto& st = runtime->objectives();

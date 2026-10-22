@@ -85,6 +85,7 @@ Paths inside the data are resolved case-insensitively (`core/paths`).
 | Behavior | `behavior/` unit brains, orders, tasks | behaviour-data.md | — |
 | ai | `ai/` script VM; `game/` world model, SuperAI per clan, MissionRuntime | script-vm.md, script-handlers-a/b.md | VM done; 61/73 handlers, 12 neutral (super_ai.hpp); wired into play |
 | iron3d HUD text | `res/tft`, `ui/hud_text` (pager, objectives screen) | rsli-font.md | done for the pager and objectives; frame art inferred |
+| iron3d cockpit HUD | `ui/hud` (pages from a plain `HudState`), `ui/hud_resources` (ui.lib pages, hq.cfg/compaund.cfg sprites, minimap) | hud.md | radar, target/own panels, status lamps, weapon rows with lock brackets, sight, satellite map; targeter 3D model, wingman page, map icons to do |
 | MisLoad, ArealMap | `mission/` TMA, research | research-tree.md, mission-data.md, FParkan tma | TMA, schemes + research done; missions render |
 | iron3d | `game/`, `shell/` | ui-shell.md | — |
 

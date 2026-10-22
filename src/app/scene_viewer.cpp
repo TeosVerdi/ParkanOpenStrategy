@@ -389,8 +389,12 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
                     std::memcpy(r.color, q.rgba, 4);
                     verts.push_back(r);
                 };
-                v(q.x0, q.y0, q.u0, q.v0), v(q.x1, q.y0, q.u1, q.v0), v(q.x1, q.y1, q.u1, q.v1);
-                v(q.x0, q.y0, q.u0, q.v0), v(q.x1, q.y1, q.u1, q.v1), v(q.x0, q.y1, q.u0, q.v1);
+                if (q.free) {
+                    for (int k : {0, 1, 2, 0, 2, 3}) v(q.x[k], q.y[k], q.u[k], q.v[k]);
+                } else {
+                    v(q.x0, q.y0, q.u0, q.v0), v(q.x1, q.y0, q.u1, q.v0), v(q.x1, q.y1, q.u1, q.v1);
+                    v(q.x0, q.y0, q.u0, q.v0), v(q.x1, q.y1, q.u1, q.v1), v(q.x0, q.y1, q.u0, q.v1);
+                }
                 if (!overlay_runs.empty() && overlay_runs.back().first == q.texture) overlay_runs.back().second += 6;
                 else overlay_runs.push_back({q.texture, 6});
             }

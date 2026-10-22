@@ -38,12 +38,13 @@ full value, so Shift switches gait while a movement key is held (the original's 
 | Command | Modern | Classic |
 |---|---|---|
 | Outer (third-person) camera, cycles 4 positions | **V** | C |
-| Zoom | **right mouse** | Z |
-| Aim at target | **T** | right mouse |
-| Select target / enemy / friend | Tab / **G** / F | Tab / E / F |
+| Zoom (live: the sight FOV steps to 0.2 rad) | **right mouse** | Z |
+| Aim at target (live: selects the unit under the sight) | **T** | right mouse |
+| Select target / enemy / friend (live: radar-detected units) | Tab / **G** / F | Tab / E / F |
 | Autopilot | **P** | A |
 | Wingman menu | `` ` `` | `` ` `` |
-| Satellite map, map transparency | M, `[` `]` | M, `[` `]` |
+| Satellite map, map transparency (live) | M, `[` `]` | M, `[` `]` |
+| Cockpit instruments on/off (live) | U | U |
 | Mission objectives (live in `--play`) | **O** | F12 |
 | Quick save / load | **F5 / F9** | F7 / F8 |
 | Chat terminal / new message | F4 / **Y** | F4 / F5 |

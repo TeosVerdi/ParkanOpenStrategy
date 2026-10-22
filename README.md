@@ -13,7 +13,7 @@ rebuilt from a full decompilation of the original Windows binaries, running nati
 
 <table>
 <tr>
-<td><img src="docs/images/cockpit.jpg" alt="Walking the hero towards a base on the red planet, cockpit view"></td>
+<td><img src="docs/images/cockpit.jpg" alt="Combat in Tut_2: the original cockpit HUD with weapons, radar, unit panels and a plasma hit on a tent"></td>
 <td><img src="docs/images/alien-sky.jpg" alt="A campaign mission under a green alien sky"></td>
 </tr>
 <tr>
@@ -22,7 +22,7 @@ rebuilt from a full decompilation of the original Windows binaries, running nati
 </tr>
 </table>
 
-<sub>Rendered by the port from the original GOG data: cockpit view in Campaign 0, a Campaign 2 sky,
+<sub>Rendered by the port from the original GOG data: a fight in Tut_2 with the original cockpit HUD, a Campaign 2 sky,
 a warbot assembled from its <code>.dat</code> design, and Tut_2's first message and objectives
 (English release).</sub>
 
@@ -52,10 +52,10 @@ The target is behavioural fidelity on a modern platform.
 
 ## Status
 
-> Early but playable: you can walk the hero around every campaign map and fight. Guns, bullets,
-> damage, deaths and explosions work, enemy robots engage you, and the mission scripts notice your
-> kills. Tutorials talk to you and track objectives. There is no combat HUD, no building capture and
-> no base building yet.
+> Early but playable: you can walk the hero around every campaign map and fight with the original
+> cockpit HUD. Guns, bullets, damage, deaths and explosions work, enemy robots engage you, and the
+> mission scripts notice your kills. Tutorials talk to you and track objectives. There is no building
+> capture, no base building and no menu shell yet.
 
 | Area | State |
 |---|---|
@@ -75,7 +75,8 @@ The target is behavioural fidelity on a modern platform.
 | Weapons: 158 guns, 66 bullet types, ammo and energy, barrel cycle, sight convergence | ✅ (homing missiles and shields to come) |
 | Damage and death: per-part hit points, direct and splash hits, armour, explosions, removal | ✅ (buildings and capture to come) |
 | Visual effects: 923 effects (sprites, beams, trails, bursts, debris, lights) | ✅ |
-| Combat HUD, base building, research UI, menus | ⬜ not started |
+| Cockpit HUD: sight, radar, unit panels, status lamps, weapon rows, lock-on, satellite map | ✅ (targeter 3D view, wingman menu, HUD sounds to come) |
+| Base building, research UI, menus, game shell | ⬜ not started |
 | Multiplayer (DirectPlay) | ⬜ partly mapped in Ghidra, not ported |
 
 ## Quick start
