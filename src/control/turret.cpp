@@ -1,5 +1,6 @@
 #include "control/turret.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -47,10 +48,50 @@ std::optional<TurretRig> TurretRig::from_ctld(const Ctld& c) {
     r.invert_inputs_ = (at<std::uint32_t>(turret->header.data(), 0x08) & 0x4000000) != 0;
     for (auto j : turret->joints)
         if (j < r.joints_.size()) r.channels_.push_back(j);
+    if (r.channels_.size() >= 2)
+        r.sight_origin_point = r.joints_[r.channels_[0]].point_a, r.sight_dir_point = r.joints_[r.channels_[1]].point_b;
     // LoadControlData appends the gun joints (flag 8) as further channels of the turret device.
     for (std::uint32_t j = 0; j < r.joints_.size(); ++j)
         if (r.joints_[j].flags & 8) r.channels_.push_back(j);
     return r;
+}
+
+std::pair<float, float> TurretRig::inputs_for_angles(float yaw, float pitch) const {
+    float t[2] = {kManualX, kManualY};
+    const float a[2] = {yaw, pitch};
+    for (std::size_t k = 0; k < 2 && k < channels_.size(); ++k) {
+        const CtldJoint& j = joints_[channels_[k]];
+        // A joint whose mesh output is inverted (flag 2) turns the other way per t (inferred from
+        // o_tur_ht_02: yaw joint flags 3, pitch joint flags 0).
+        const float sign = (j.flags & 2) ? -1.f : 1.f;
+        t[k] = j.default_t + (j.range != 0 ? sign * a[k] / j.range : 0.f);
+        t[k] = (j.flags & 1) ? wrap01(t[k]) : std::clamp(t[k], 0.f, 1.f);
+    }
+    return invert_inputs_ ? std::pair{1 - t[0], 1 - t[1]} : std::pair{t[0], t[1]};
+}
+
+void TurretRig::slew(float& x, float& y, float tx, float ty, float dt_s) const {
+    float* v[2] = {&x, &y};
+    const float target[2] = {tx, ty};
+    for (std::size_t k = 0; k < 2; ++k) {
+        const CtldJoint* j = k < channels_.size() ? &joints_[channels_[k]] : nullptr;
+        float d = target[k] - *v[k];
+        if (j && (j->flags & 1)) d -= std::round(d); // shortest way on a wrapping joint
+        const float step = j && j->rate > 0 ? j->rate * dt_s : 1.f;
+        *v[k] += std::clamp(d, -step, step);
+        if (j && (j->flags & 1)) *v[k] = wrap01(*v[k]);
+    }
+}
+
+void TurretRig::gun_frames(const std::vector<CtldJoint>& joints, float target_y, std::vector<float>& frames) const {
+    const float pitch = invert_inputs_ ? 1 - target_y : target_y;
+    for (const CtldJoint& j : joints) {
+        if (!(j.flags & 8) || (j.flags & 4) || j.part < 0) continue;
+        float t = (j.flags & 1) ? wrap01(pitch) : std::clamp(pitch, 0.f, 1.f);
+        if (j.flags & 2) t = 1 - t;
+        if (frames.size() <= std::size_t(j.part)) frames.resize(std::size_t(j.part) + 1, -1.f);
+        frames[std::size_t(j.part)] = j.frame_from + t * (j.frame_to - j.frame_from);
+    }
 }
 
 void TurretRig::node_frames(float target_x, float target_y, float yaw_offset, std::vector<float>& frames) const {

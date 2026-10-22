@@ -23,6 +23,8 @@ add_library(parkan_core STATIC
   src/res/ctld.cpp
   src/res/swav.cpp
   src/res/fx.cpp
+  src/fx/fx_material.cpp
+  src/fx/effect.cpp
   src/control/motion_graph.cpp
   src/control/unit_motion.cpp
   src/control/turret.cpp
@@ -33,6 +35,10 @@ add_library(parkan_core STATIC
   src/world/ground.cpp
   src/world/collision.cpp
   src/world/live_unit.cpp
+  src/res/weapons.cpp
+  src/combat/damage.cpp
+  src/combat/gun.cpp
+  src/combat/combat_world.cpp
   src/res/terrain.cpp
   src/ai/script_program.cpp
   src/ai/formula.cpp
@@ -70,7 +76,7 @@ target_link_libraries(parkan-check PRIVATE parkan_core stb_vorbis)
 add_executable(parkan-dump tools/parkan_dump.cpp)
 target_link_libraries(parkan-dump PRIVATE parkan_core)
 
-add_executable(parkan-tests tools/parkan_tests.cpp tools/ai_tests.cpp tools/game_tests.cpp)
+add_executable(parkan-tests tools/parkan_tests.cpp tools/ai_tests.cpp tools/game_tests.cpp tools/fx_tests.cpp tools/combat_tests.cpp)
 target_link_libraries(parkan-tests PRIVATE parkan_core)
 enable_testing()
 add_test(NAME unit COMMAND parkan-tests)
@@ -83,7 +89,7 @@ add_library(parkan_audio STATIC src/audio/audio_engine.cpp)
 target_link_libraries(parkan_audio PUBLIC parkan_core PRIVATE SDL3::SDL3 stb_vorbis)
 target_compile_options(parkan_audio PRIVATE -Wall -Wextra -Wpedantic)
 
-add_executable(parkan MACOSX_BUNDLE src/app/main.cpp src/app/scene_viewer.cpp src/app/play.cpp)
+add_executable(parkan MACOSX_BUNDLE src/app/main.cpp src/app/scene_viewer.cpp src/app/play.cpp src/app/fx_viewer.cpp src/app/fx_draw.cpp)
 target_link_libraries(parkan PRIVATE parkan_audio parkan_core SDL3::SDL3)
 set_target_properties(parkan PROPERTIES
   MACOSX_BUNDLE_GUI_IDENTIFIER org.parkan.port

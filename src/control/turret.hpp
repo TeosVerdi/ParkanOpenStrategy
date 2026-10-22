@@ -37,6 +37,24 @@ public:
     // interpolated attitude offset (rad), which the yaw channel counter-rotates (strafing).
     void node_frames(float target_x, float target_y, float yaw_offset, std::vector<float>& frames) const;
 
+    // The sight the guns converge on (CGunDevice +0x114 / +0x110): the yaw joint's CTPT point A
+    // (origin) and the pitch joint's point B (direction); -1 when the rig has no such joints.
+    std::int32_t sight_origin_point = -1, sight_dir_point = -1;
+
+    // Gun components mounted on the turret (o_gun_* on o_tur_*): LoadControlData merges their CTLD
+    // joints into the unit's, so their gun joints (flag 8) are further channels of the turret device and
+    // follow its pitch channel like the turret's own (AimGunChannel). `joints` is the component's CTLD.
+    void gun_frames(const std::vector<CtldJoint>& joints, float target_y, std::vector<float>& frames) const;
+
+    // CTurretDevice state 0x400 ("AI point", turret-camera.md §1.3): the yaw / pitch channel times for
+    // angles in the body frame (yaw > 0 right, pitch > 0 up) are t = angle / joint range + default t; the
+    // result is in node_frames' input space (target_x, target_y). The angle's sign flips on a joint with
+    // inverted output (flag 2): inferred, checked on o_tur_ht_02 by tools/combat_tests.cpp.
+    std::pair<float, float> inputs_for_angles(float yaw, float pitch) const;
+    // Moves (x, y) toward (tx, ty) at the yaw / pitch joint rates (t per second) for `dt_s` seconds,
+    // the short way round on a wrapping joint (SlewChannel 100289f0).
+    void slew(float& x, float& y, float tx, float ty, float dt_s) const;
+
     // The camera device (type 4): its joint's CTPT points (eye, view axis) and projection
     // (near p0, far p1, FOV p2 in radians).
     std::int32_t camera_eye_point = -1, camera_axis_point = -1;

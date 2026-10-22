@@ -5,16 +5,20 @@
 //                                                   model viewer; plays motion state n of the model's CTLD
 //   parkan --terrain <map dir> [--shot <out.bmp>] [<game dir>]        terrain viewer (e.g. DATA/MAPS/Tut_2)
 //   parkan --unit <scheme .dat> [--shot <out.bmp>] [<game dir>]      unit design (e.g. UNITS/AUTO/swlklas.dat)
-//   parkan --play <mission dir> [--classic-keys] [--time <s>] [--no-fog] [--walk] [--shot <out.bmp>] [<game dir>]
-//                                                   drive the mission's hero (M1.TBL keys; --walk holds forward)
+//   parkan --play <mission dir> [--classic-keys] [--time <s>] [--no-fog] [--walk] [--fire] [--aim] [--shot <out.bmp>] [<game dir>]
+//                                                   drive the mission's hero (M1.TBL keys; --walk holds forward,
+//                                                   --fire holds LMB with every gun selected, --aim turns to the
+//                                                   nearest hostile unit and aims the bullets at it)
 //   parkan --mission <mission dir> [--time <s>] [--no-fog] [--shot <out.bmp>] [<game dir>]
 //                                                   mission scene: terrain, placed objects, sky, lighting
 //   parkan --sound <lib> <entry> [<game dir>]                         play one sample (e.g. sounds.lib i_button.wav)
 //   parkan --music <n> [<game dir>]                                   play CD index n (MUSIC/Track{n+1:02}.ogg)
+//   parkan --effect <name> [--time <s>] [--shot <out.bmp>] [<game dir>] one effects.rlb effect (src/fx)
 //   --lang en                                       use the English GOG install when no game dir is given
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
+#include "app/fx_viewer.hpp"
 #include "app/play.hpp"
 #include "app/scene_viewer.hpp"
 #include "audio/audio_engine.hpp"
@@ -109,9 +113,9 @@ int main(int argc, char** argv) {
     std::string view_archive, view_mesh, unit, terrain, mission, shot;
     double start_time = 0;
     int start_state = 0;
-    bool no_fog = false, demo_walk = false, demo_strafe = false, classic_keys = false, camera_sway = false;
+    bool no_fog = false, demo_walk = false, demo_strafe = false, demo_fire = false, demo_aim = false, classic_keys = false, camera_sway = false;
     int camera_preset = 0;
-    std::string play, sound_lib, sound_entry;
+    std::string play, sound_lib, sound_entry, effect;
     int music = -1;
     float pitch = -1; // camera elevation override (radians); negative = the mode's default
     for (int i = 1; i < argc; ++i) {
@@ -122,6 +126,8 @@ int main(int argc, char** argv) {
         } else if (a == "--sound" && i + 2 < argc) {
             sound_lib = argv[++i];
             sound_entry = argv[++i];
+        } else if (a == "--effect" && i + 1 < argc) {
+            effect = argv[++i];
         } else if (a == "--music" && i + 1 < argc) {
             music = std::atoi(argv[++i]);
         } else if (a == "--unit" && i + 1 < argc) {
@@ -130,6 +136,10 @@ int main(int argc, char** argv) {
             play = argv[++i];
         } else if (a == "--walk") {
             demo_walk = true;
+        } else if (a == "--fire") {
+            demo_fire = true;
+        } else if (a == "--aim") {
+            demo_aim = true;
         } else if (a == "--camera-sway") {
             camera_sway = true;
         } else if (a == "--classic-keys") {
@@ -188,13 +198,22 @@ int main(int argc, char** argv) {
         parkan::ViewerOptions opt;
         opt.shot_path = shot;
         opt.start_time = start_time;
-        if (!play.empty()) {
+        if (!effect.empty()) {
+            parkan::EffectViewerOptions eo;
+            eo.effect = effect;
+            eo.time = start_time > 0 ? start_time : 0.5;
+            eo.shot_path = shot;
+            if (pitch >= 0) eo.pitch = pitch;
+            rc = parkan::run_effect_viewer(window, lib, eo);
+        } else if (!play.empty()) {
             parkan::PlayOptions po;
             po.mission = play;
             po.shot_path = shot;
             po.start_time = start_time;
             po.no_fog = no_fog;
             po.demo_walk = demo_walk;
+            po.demo_fire = demo_fire;
+            po.demo_aim = demo_aim;
             po.demo_strafe = demo_strafe;
             po.camera_preset = camera_preset;
             po.stabilize_camera = !camera_sway;

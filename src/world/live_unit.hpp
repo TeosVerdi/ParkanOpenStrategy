@@ -27,6 +27,8 @@ public:
     std::size_t turret_part = 0;
     std::optional<TurretRig> rig;
     std::vector<ContactPoint> turret_points;
+    // Components under the turret with gun joints (flag 8) that follow its pitch: {part, CTLD joints}.
+    std::vector<std::pair<std::size_t, std::vector<CtldJoint>>> gun_joints;
     // Collision sphere around the chassis' static-pose bounds (inferred; CCollObject +0x50 untraced).
     Vec3 sphere_centre{};
     float sphere_radius = 1;
@@ -53,9 +55,26 @@ public:
     // Collision sphere centre in the world (after settle).
     Vec3 sphere_world() const { return frame.matrix.transform_point(sphere_centre); }
     Vec3 position() const { return frame.matrix.transform_point({}); }
-    // Pose the parts into `transforms` (turret target 0..1 per axis; hidden = collapsed, e.g. the own
-    // unit seen from its TURRET camera).
-    void pose(std::vector<Mat4>& transforms, float turret_x, float turret_y, bool hidden);
+    // Turret target 0..1 per axis (TurretRig::node_frames): HERO.TBL's turret channels for the hero,
+    // the AI's aim for the others; the manual-entry default straight ahead.
+    float aim_x = TurretRig::kManualX, aim_y = TurretRig::kManualY;
+    // Further joint-driven keyframe times applied after the turret rig: the gun devices' barrel
+    // channels (recoil), set by combat. {part index, mesh node, frame}.
+    struct JointFrame {
+        std::size_t part = 0;
+        std::int32_t node = -1;
+        float frame = 0;
+    };
+    std::vector<JointFrame> joint_frames;
+    // Transforms not drawn (collapsed): parts thrown off as debris (DetachPartDebris), set by combat.
+    std::vector<bool> detached;
+    // World matrix of every transform of model.mesh (part base + node) after the last pose_parts().
+    std::vector<Mat4> posed;
+    // Pose every part at the current frame with the turret at (aim_x, aim_y) and the joint frames.
+    void pose_parts();
+    // pose_parts(), then copy into `transforms` from first_transform (hidden = collapsed, e.g. the own
+    // unit seen from its TURRET camera, or a removed unit).
+    void pose(std::vector<Mat4>& transforms, bool hidden);
 
 private:
     LiveUnit() = default;

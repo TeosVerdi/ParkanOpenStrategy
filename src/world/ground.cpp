@@ -68,4 +68,19 @@ std::optional<GroundHit> TerrainGround::probe(Vec3 p, float max_rise) const {
     return best;
 }
 
+std::optional<TraceHit> TerrainGround::trace(Vec3 a, Vec3 b) const {
+    if (cells_.empty()) return std::nullopt;
+    std::optional<TraceHit> best;
+    walk_grid(min_, cell_, nx_, ny_, a, b, [&](std::size_t c, float exit) {
+        for (std::uint32_t i : cells_[c]) {
+            const Tri& t = tris_[i];
+            const auto hit = segment_triangle(a, b, t.a, t.b, t.c);
+            if (!hit || (best && *hit >= best->t)) continue;
+            best = TraceHit{*hit, a + (b - a) * *hit, t.n, t.face, 0};
+        }
+        return !(best && best->t <= exit);
+    });
+    return best;
+}
+
 } // namespace parkan

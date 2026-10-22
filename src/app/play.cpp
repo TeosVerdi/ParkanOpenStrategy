@@ -2,6 +2,7 @@
 
 #include "app/scene_viewer.hpp"
 #include "audio/audio_engine.hpp"
+#include "combat/combat_world.hpp"
 #include "res/fx.hpp"
 #include "control/turret.hpp"
 #include "control/unit_motion.hpp"
@@ -58,17 +59,91 @@ public:
     UnitAdapter(const LiveUnit& unit, ai::AiUnit* brain) : unit_(unit), brain_(brain) {}
     bool give_order(const game::UnitOrder& o, int mode) override {
         if (!brain_) return false;
-        // ai::Order has no LogicID target yet: attack/follow/enter orders arrive without their target.
-        brain_->give_order({o.type, float(o.param), o.target_kind, o.place}, mode);
-        return true;
+        // The script's limits (UnitOrder +0x110, [7..10] only) stay at the task defaults.
+        ai::Order order;
+        order.type = o.type, order.param = float(o.param), order.target_kind = o.target_kind, order.place = o.place;
+        order.target_id = o.target_id;
+        return brain_->give_order(order, mode);
     }
     std::uint32_t current_order() const override { return brain_ ? brain_->current_order() : 0; }
+    void stop() { brain_ = nullptr; } // the unit died: no more orders
     Vec3 position() const override { return unit_.position(); }
     float speed() const override { return brain_ ? brain_->walker().max_speed : 0; }
 
 private:
     const LiveUnit& unit_;
     ai::AiUnit* brain_;
+};
+
+// The brains' view of the world (ai::Perception): live units through the combat world (dead or removed
+// units are gone), the other objects (buildings) through the mission's world model.
+class WorldPerception final : public ai::Perception {
+public:
+    WorldPerception(const combat::CombatWorld& combat, const game::World* world, const TerrainGround& ground, const TraceMesh& statics,
+                    std::map<std::uint32_t, std::size_t> units, std::map<std::uint32_t, std::uint32_t> clans,
+                    std::map<std::uint32_t, std::uint32_t> types)
+        : combat_(combat), world_(world), ground_(ground), statics_(statics), units_(std::move(units)), clans_(std::move(clans)),
+          types_(std::move(types)) {}
+
+    std::optional<ai::SeenObject> object(std::uint32_t lid) const override {
+        if (auto it = units_.find(lid); it != units_.end()) {
+            const combat::Combatant& c = combat_.unit(it->second);
+            if (c.removed || !c.alive()) return std::nullopt;
+            ai::SeenObject o;
+            o.logic_id = lid, o.clan = clan(lid), o.type = type(lid), o.pos = c.unit->position(), o.radius = c.radius();
+            return o;
+        }
+        if (!world_) return std::nullopt;
+        const game::WorldObject* w = world_->live(lid);
+        if (!w || w->clan == ai::kNoClan) return std::nullopt;
+        ai::SeenObject o;
+        o.logic_id = lid, o.clan = w->clan, o.type = w->type, o.pos = w->position();
+        o.radius = w->building() ? kBuildingRadius : 1.f;
+        o.armour = w->armour, o.weapon = w->weapon;
+        return o;
+    }
+    void objects_near(Vec3 centre, float radius, std::vector<std::uint32_t>& out) const override {
+        const float r2 = radius * radius;
+        auto near2d = [&](Vec3 p) { return (p.x - centre.x) * (p.x - centre.x) + (p.y - centre.y) * (p.y - centre.y) <= r2; };
+        for (const auto& [lid, i] : units_) {
+            const combat::Combatant& c = combat_.unit(i);
+            if (!c.removed && c.alive() && near2d(c.unit->position())) out.push_back(lid);
+        }
+        if (world_)
+            for (const auto& w : world_->objects())
+                if (w.alive && w.building() && !units_.count(w.logic_id) && near2d(w.position())) out.push_back(w.logic_id);
+    }
+    bool hostile(std::uint32_t own, std::uint32_t other) const override {
+        if (!world_ || own >= world_->clans.size() || other >= world_->clans[own].relations.size()) return own != other;
+        return world_->clans[own].relations[other] == 0;
+    }
+    bool line_clear(Vec3 from, Vec3 to, std::uint32_t, std::uint32_t) const override {
+        // The world ray (flags 0x40a): landscape and static objects; a hit within 20 m of the aim counts as clear.
+        std::optional<TraceHit> h = ground_.trace(from, to);
+        if (auto s = statics_.trace(from, to); s && (!h || s->t < h->t)) h = s;
+        if (!h) return true;
+        const Vec3 d = h->point - to;
+        return dot(d, d) <= 20.f * 20.f;
+    }
+
+private:
+    static constexpr float kBuildingRadius = 15.f; // port: buildings' bounding radius is not read yet
+    std::uint32_t clan(std::uint32_t lid) const {
+        if (world_)
+            if (const game::WorldObject* w = world_->find(lid)) return w->clan;
+        auto it = clans_.find(lid);
+        return it != clans_.end() ? it->second : ai::kNoClan;
+    }
+    std::uint32_t type(std::uint32_t lid) const {
+        auto it = types_.find(lid);
+        return it != types_.end() ? it->second : 0;
+    }
+    const combat::CombatWorld& combat_;
+    const game::World* world_;
+    const TerrainGround& ground_;
+    const TraceMesh& statics_;
+    std::map<std::uint32_t, std::size_t> units_;
+    std::map<std::uint32_t, std::uint32_t> clans_, types_;
 };
 
 // The key bound to a UI command, as the in-game text names it (the SCAN_ name without its prefix).
@@ -121,7 +196,45 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     StaticColliders statics; // the terrain's draws use transform 0
     statics.add(scene, 1, std::uint32_t(scene.transforms.size()));
     statics.finish();
+    TraceMesh trace_statics; // every static triangle, for bullets and sight rays
+    trace_statics.add(scene, 1, std::uint32_t(scene.transforms.size()));
+    trace_statics.finish();
     for (auto& u : live) u->first_transform = append_render_mesh(scene, u->model.mesh, Mat4::identity());
+
+    // Weapons, damage and death (notes/weapons-damage.md): every live unit is a combatant; the hero's
+    // guns follow HERO.TBL (1–8 / 0 select, LMB fires the selection).
+    combat::CombatWorld combat(lib, ground, &trace_statics);
+    for (std::size_t i = 0; i < live.size(); ++i)
+        combat.add_unit(*live[i], live[i]->placement->identity, live[i]->placement->ai_index, i == hero_slot);
+    combat::Combatant& hero_combat = combat.unit(hero_slot);
+    if (opt.demo_fire) hero_combat.select(-1);
+    {
+        std::string guns;
+        for (const auto& g : hero_combat.guns)
+            guns += " " + g.spec().bullet.second + (g.ammo() < 0 ? std::string("(inf)") : "(" + std::to_string(g.ammo()) + ")");
+        SDL_Log("play: hero guns:%s; %.0f HP", guns.c_str(), hero_combat.damage.initial);
+    }
+    // Bullets are drawn with their BULL prototype mesh until effects exist: a fixed pool of copies per
+    // prototype appended to the scene, unused copies collapsed (zero matrices).
+    struct BulletPool {
+        const BulletProto* proto = nullptr;
+        std::vector<Mat4> nodes;            // the mesh's static node matrices
+        std::vector<std::uint32_t> firsts;  // first transform of each copy
+    };
+    std::vector<BulletPool> bullet_pools;
+    constexpr std::size_t kBulletSlots = 48;
+    for (const auto& [name, proto] : combat.bullet_protos()) {
+        RenderMesh bm;
+        try {
+            bm = to_render_mesh(load_model(lib, proto->record.mesh().first, proto->record.mesh().second));
+        } catch (const std::exception& ex) {
+            SDL_Log("play: bullet %s mesh: %s", name.c_str(), ex.what());
+        }
+        if (bm.draws.empty()) continue;
+        BulletPool pool{proto.get(), bm.transforms, {}};
+        for (std::size_t k = 0; k < kBulletSlots; ++k) pool.firsts.push_back(append_render_mesh(scene, bm, Mat4::identity()));
+        bullet_pools.push_back(std::move(pool));
+    }
     LiveUnit& hero = *live[hero_slot];
     UnitMotion& motion = *hero.motion;
     std::vector<LiveUnit*> live_ptrs;
@@ -164,6 +277,71 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         else sound->play_random_music(false);
     }
     std::size_t footsteps = 0;
+    std::map<std::string, std::vector<FxSound>> fx_sounds; // effect → its sound commands
+    auto play_effect_sounds = [&](const ResName& fx, Vec3 pos) {
+        if (!sound || fx.second.empty()) return;
+        auto [it, fresh] = fx_sounds.try_emplace(fx.second);
+        if (fresh) it->second = load_fx_sounds(lib, fx.second);
+        for (const auto& s : it->second) sound->play(audio::fx_sound(s), pos);
+    };
+    std::size_t kills = 0;
+    // Effects (src/fx): bullet tracers ride their bullet, impacts and part explosions play once; their
+    // sound commands drive positional voices.
+    fx::FxContext fx_ctx(lib);
+    std::map<std::string, std::shared_ptr<const FxEffect>> fx_templates;
+    struct LiveEffect {
+        fx::EffectInstance inst;
+        std::uint32_t bullet = 0;
+        bool stopped = false;
+        std::map<std::size_t, audio::Handle> voices; // sound command → voice
+    };
+    std::vector<LiveEffect> effects;
+    auto start_effect = [&](const combat::CombatEvent& e, double now) {
+        auto [it, fresh] = fx_templates.try_emplace(e.effect.second);
+        if (fresh) {
+            try {
+                it->second = fx::load_effect(lib, e.effect.second);
+            } catch (const std::exception& ex) {
+                SDL_Log("play: effect %s: %s", e.effect.second.c_str(), ex.what());
+            }
+        }
+        if (!it->second) { // no template: its sounds at least
+            play_effect_sounds(e.effect, e.pos);
+            return;
+        }
+        effects.push_back({fx::EffectInstance(it->second, fx_ctx, combat::CombatWorld::bullet_matrix(e.pos, e.axis), now), e.bullet});
+        if (e.scale != 1) effects.back().inst.set_scale({e.scale, e.scale, e.scale});
+    };
+    auto update_effects = [&](double now) {
+        std::map<std::uint32_t, const combat::Bullet*> flying;
+        for (const auto& b : combat.bullets()) flying[b.id] = &b;
+        std::vector<fx::FxSoundEvent> sounds;
+        for (auto& e : effects) {
+            if (e.bullet && !e.stopped) {
+                if (auto f = flying.find(e.bullet); f != flying.end()) {
+                    e.inst.set_transform(combat::CombatWorld::bullet_matrix(f->second->pos, f->second->dir));
+                } else { // the bullet hit or ran out: event 0x13 stops its effects
+                    e.inst.stop(now);
+                    e.stopped = true;
+                }
+            }
+            sounds.clear();
+            const bool alive = e.inst.update(now, &sounds);
+            if (sound)
+                for (const auto& s : sounds) {
+                    if (s.kind == fx::FxSoundEvent::Play && s.sound) {
+                        audio::Sound snd = audio::fx_sound(*s.sound);
+                        snd.pitch *= s.pitch;
+                        e.voices[s.command] = sound->play(snd, s.pos);
+                    } else if (auto v = e.voices.find(s.command); v != e.voices.end()) {
+                        if (s.kind == fx::FxSoundEvent::Stop) sound->stop(v->second), e.voices.erase(v);
+                        else sound->set_position(v->second, s.pos, {});
+                    }
+                }
+            if (!alive) e.bullet = ~0u; // marked for removal
+        }
+        std::erase_if(effects, [](const LiveEffect& e) { return e.bullet == ~0u; });
+    };
 
     // The mission's strategy layer (notes/script-vm.md): one SuperAI per clan running the clan's script;
     // its orders reach the brains through UnitAdapter, its messages and objectives the HUD below.
@@ -180,6 +358,51 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             adapters.push_back(std::make_unique<UnitAdapter>(*live[i], brains[i].get()));
             runtime->world().attach(live[i]->placement->identity, adapters.back().get());
         }
+    }
+
+    // The brains' combat layer (notes/unit-ai-runtime.md §4): perception over the live units and the world
+    // model, one fire-control weapon per gun that can fire.
+    std::map<std::uint32_t, std::size_t> unit_of; // LogicID → live unit
+    std::map<std::uint32_t, std::uint32_t> tma_clans, tma_types;
+    for (std::size_t i = 0; i < live.size(); ++i) {
+        const auto& o = *live[i]->placement;
+        unit_of[o.identity] = i;
+        tma_clans[o.identity] = o.ai_index;
+        tma_types[o.identity] = game::type_code_for_resource(o.resource);
+    }
+    WorldPerception perception(combat, runtime ? &runtime->world() : nullptr, ground, trace_statics, unit_of, tma_clans, tma_types);
+    std::vector<std::vector<std::size_t>> weapon_guns(live.size()); // fire-control weapon → gun
+    for (std::size_t i = 0; i < live.size(); ++i) {
+        if (!brains[i]) continue;
+        const auto& o = *live[i]->placement;
+        combat::Combatant& c = combat.unit(i);
+        ai::SelfInfo self;
+        self.logic_id = o.identity, self.clan = o.ai_index, self.type = tma_types[o.identity];
+        self.has_weapons = false;
+        auto& fc = brains[i]->fire_control();
+        fc.weapons.clear();
+        for (std::size_t g = 0; g < c.guns.size(); ++g) {
+            const auto& gun = c.guns[g];
+            if (gun.barrel_count() == 0 || !gun.bullet()) continue;
+            // MWeaponPart init (Behavior 1001b4b0, read 2026-10-23): rate = device property 0x800, envelope
+            // near 5 (animals 0) / opt (h + 1)/2 / far 2(h + 1) from +0x14 = a device property not resolved;
+            // port: h = the bullet's range, rate = rounds per second from the barrel steps and param 3.
+            ai::Weapon w;
+            w.group = c.mounts[g].on_turret() ? 0 : -1;
+            const auto& joints = gun.joints();
+            const std::uint32_t j = gun.barrel_joint(0);
+            const float step_ms = j < joints.size() && joints[j].rate > 0 ? 1000.f / joints[j].rate : 0.f;
+            w.rate = 1000.f / std::max(1.f, step_ms + gun.param(3));
+            w.height = gun.bullet()->range;
+            w.near = self.animal() ? 0.f : 5.f;
+            w.opt = (w.height + 1) * 0.5f;
+            w.far = (w.height + 1) * 2;
+            fc.weapons.push_back(w);
+            weapon_guns[i].push_back(g);
+            self.has_weapons = true;
+        }
+        fc.turret_error.assign(1, 0.f);
+        brains[i]->set_perception(&perception, self);
     }
 
     // In-mission text (notes/rsli-font.md §3): mission texts from TextRes, the HUD's own strings from
@@ -379,16 +602,139 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         } else if (commands.get(0, 0, kMcmdRotateZ) != 0) {
             motion.set_angular_command({0, 0, commands.get(0, 0, kMcmdRotateZ)});
         }
+        // The multigun bindings (ExecuteBinding SELECT / STATE): 1–8 toggle a gun, 0 selects all, LMB
+        // sets CIS_CONTINUEFIGHT on the selected guns and its release CIS_SWITCHOFF.
+        for (const auto& a : commands.take_actions()) {
+            if (a.cls != 2) continue;
+            if (a.cmd == kMcmdSelect) hero_combat.select(a.index);
+            else if (a.cmd == kMcmdState && a.index == -1) hero_combat.set_state_selected(std::uint32_t(a.state));
+            else if (a.cmd == kMcmdState && a.index >= 1) hero_combat.set_gun_state(std::size_t(a.index - 1), std::uint32_t(a.state));
+        }
+        if (opt.demo_fire && hero_combat.alive()) hero_combat.set_trigger(true);
         sim_ms = to_ms;
         for (std::size_t i = 0; i < live.size(); ++i) {
-            if (brains[i]) brains[i]->update(float(sim_ms)); // brain tick + motion update (pilot inside)
+            const combat::Combatant& c = combat.unit(i);
+            if (c.removed) continue;
+            if (brains[i] && c.alive()) brains[i]->update(float(sim_ms)); // brain tick + motion update (pilot inside)
             else live[i]->motion->update(float(sim_ms));
         }
-        for (auto& u : live) {
-            const Vec3 push = u->settle(float(sim_ms), ground, statics);
-            if (u.get() == &hero && dot(push, push) > 0) ++pushed_steps;
+        // The fire control's request: the target goes to the guns (SetTarget), the turret slews toward its
+        // aim (state 0x400 AI point; port: the target's root part), each requested weapon fires a shot
+        // (state 0x200). The aim errors feed the next pass.
+        for (std::size_t i = 0; i < live.size(); ++i) {
+            combat::Combatant& c = combat.unit(i);
+            if (!brains[i] || !c.alive() || c.removed) continue;
+            const ai::FireRequest& fr = brains[i]->fire();
+            const auto t = unit_of.find(fr.target);
+            c.target = t != unit_of.end() ? std::int32_t(t->second) : -1;
+            auto& fc = brains[i]->fire_control();
+            if (c.target < 0) continue;
+            const Vec3 aim = combat.unit(std::size_t(c.target)).aim_centre();
+            LiveUnit& u = *live[i];
+            float group_err = 3.1415927f;
+            for (std::size_t k = 0; k < weapon_guns[i].size() && k < fc.weapons.size(); ++k) {
+                const std::size_t g = weapon_guns[i][k];
+                fc.weapons[k].aim_error = fc.weapons[k].group < 0 ? 0.f : combat.aim_error(i, g, aim);
+                if (fc.weapons[k].group >= 0) group_err = std::min(group_err, fc.weapons[k].aim_error);
+                if (fr.trigger & (1u << k)) c.set_gun_state(g, combat::kFireSingle);
+            }
+            if (!fc.turret_error.empty()) fc.turret_error[0] = group_err;
+            if (fr.track && u.rig) {
+                Vec3 mount = u.position() + Vec3{0, 0, 2};
+                for (std::size_t g : weapon_guns[i])
+                    if (auto m = combat.muzzle(i, g)) {
+                        mount = *m;
+                        break;
+                    }
+                const ai::AimAngles a = ai::aim_angles(u.frame.matrix, mount, aim);
+                const auto [tx, ty] = u.rig->inputs_for_angles(a.yaw, a.pitch);
+                u.rig->slew(u.aim_x, u.aim_y, tx, ty, dt * 0.001f);
+            }
+        }
+        live_ptrs.clear();
+        for (std::size_t i = 0; i < live.size(); ++i) {
+            if (combat.unit(i).removed) continue;
+            const Vec3 push = live[i]->settle(float(sim_ms), ground, statics);
+            if (i == hero_slot && dot(push, push) > 0) ++pushed_steps;
+            if (combat.unit(i).alive()) live_ptrs.push_back(live[i].get()); // the dead have left collision
         }
         collide_units(live_ptrs, float(sim_ms));
+        // Turrets: the hero's from HERO.TBL (turret channels), the others hold their aim_x/aim_y.
+        hero.aim_x = commands.get(1, 1, input::kMcmdAngleX), hero.aim_y = commands.get(1, 1, input::kMcmdAngleY);
+        for (std::size_t i = 0; i < live.size(); ++i)
+            if (!combat.unit(i).removed) live[i]->pose_parts();
+        if (opt.demo_aim) {
+            // Port debug aid: the nearest living hostile unit becomes the target; the body turns to it and every
+            // bullet heads for its centre.
+            std::int32_t best = -1;
+            float best_d = FLT_MAX;
+            for (std::size_t i = 0; i < combat.size(); ++i) {
+                if (i == hero_slot || combat.unit(i).removed || !combat.unit(i).alive()) continue;
+                if (!perception.hostile(live[hero_slot]->placement->ai_index, live[i]->placement->ai_index)) continue;
+                const Vec3 d = combat.unit(i).centre() - hero.position();
+                if (dot(d, d) < best_d) best_d = dot(d, d), best = std::int32_t(i);
+            }
+            hero_combat.target = best;
+            hero_combat.aim_point.reset();
+            if (best >= 0) {
+                const Vec3 to = combat.unit(std::size_t(best)).aim_centre() - hero.position();
+                hero_combat.aim_point = combat.unit(std::size_t(best)).aim_centre();
+                const Mat4& m = hero.frame.matrix;
+                const float err = std::atan2(to.y, to.x) - std::atan2(m.at(1, 1), m.at(0, 1));
+                const float turns = err / 6.2831853f - std::round(err / 6.2831853f);
+                motion.set_attitude_target({0.5f, 0.5f, 0.5f - turns});
+                if (hero.rig) { // and the turret (with the camera) looks at it
+                    const ai::AimAngles a = ai::aim_angles(hero.frame.matrix, hero.position() + Vec3{0, 0, 3}, *hero_combat.aim_point);
+                    std::tie(hero.aim_x, hero.aim_y) = hero.rig->inputs_for_angles(a.yaw, a.pitch);
+                    hero.pose_parts();
+                }
+            }
+        } else {
+            hero_combat.target = combat.sight_target(hero_slot); // guided guns lock on what the sight covers
+        }
+        combat.update(float(sim_ms));
+        for (const auto& e : combat.take_events()) {
+            using T = combat::CombatEvent::Type;
+            const auto name = [&](std::int32_t u) { return u >= 0 ? live[std::size_t(u)]->placement->resource.c_str() : "-"; };
+            switch (e.type) {
+            case T::Effect:
+                start_effect(e, sim_ms / 1000);
+                break;
+            case T::Hit:
+                if (e.unit >= 0)
+                    SDL_Log("play: %.2f s bullet of %d hit %s at (%.1f, %.1f, %.1f)", sim_ms / 1000, e.other, e.unit >= 0 ? name(e.unit) : "the world",
+                            e.pos.x, e.pos.y, e.pos.z);
+                break;
+            case T::Damaged: {
+                const auto& v = combat.unit(std::size_t(e.unit));
+                SDL_Log("play: %.2f s hit %zu %s by %d: -%.0f HP (%.0f / %.0f left)", sim_ms / 1000, std::size_t(e.unit), name(e.unit),
+                        e.other, e.amount, v.damage.total, v.damage.initial);
+                if (brains[std::size_t(e.unit)] && e.other >= 0 && v.alive())
+                    brains[std::size_t(e.unit)]->on_damage(combat.unit(std::size_t(e.other)).logic_id);
+                break;
+            }
+            case T::Killed: {
+                ++kills;
+                const auto& v = combat.unit(std::size_t(e.unit));
+                SDL_Log("play: %.2f s %s %u (%s) killed", sim_ms / 1000, std::size_t(e.unit) == hero_slot ? "HERO" : "unit", v.logic_id,
+                        name(e.unit));
+                // GetObjectClan returns 0xfffe from now on; the AI stops (MBehaviour OnTakt "No clan").
+                if (runtime) runtime->world().set_clan(v.logic_id, combat::kKilledClan);
+                live[std::size_t(e.unit)]->motion->pilot = nullptr;
+                live[std::size_t(e.unit)]->motion->set_throttle({});
+                live[std::size_t(e.unit)]->motion->set_angular_command({});
+                if (runtime && std::size_t(e.unit) < adapters.size()) adapters[std::size_t(e.unit)]->stop();
+                break;
+            }
+            case T::Removed:
+                SDL_Log("play: %.2f s unit %u removed", sim_ms / 1000, combat.unit(std::size_t(e.unit)).logic_id);
+                if (runtime) runtime->object_killed(combat.unit(std::size_t(e.unit)).logic_id);
+                break;
+            default:
+                break;
+            }
+        }
+        update_effects(sim_ms / 1000);
         if (runtime) runtime->update(std::uint32_t(sim_ms));
         // Footsteps: a touch-down starts its step effect (step_h* by surface; the default surface's
         // entry until surfaces are decoded); the effect's sound commands play at the foot.
@@ -405,15 +751,27 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     vo.animate = [&](double seconds, std::vector<Mat4>& transforms) {
         const double now = seconds * 1000.0;
         while (sim_ms + 1e-6 < now) step(std::min(now, sim_ms + 33.0));
-        for (auto& u : live) {
-            // HERO.TBL drives the hero's turret (mouse Y); others hold the manual-entry default for now.
-            const bool is_hero = u.get() == &hero;
-            const float tx = is_hero ? commands.get(1, 1, input::kMcmdAngleX) : TurretRig::kManualX;
-            const float ty = is_hero ? commands.get(1, 1, input::kMcmdAngleY) : TurretRig::kManualY;
+        for (std::size_t i = 0; i < live.size(); ++i) {
             // From its own TURRET camera the unit is not drawn (inferred from CCameraDevice::CreateCamera
             // handing the camera to IAniMesh slot 0x84). The camera reads the posed model, not these.
-            u->pose(transforms, tx, ty, is_hero && camera_mode == 0);
+            // A removed unit is no longer drawn.
+            live[i]->pose(transforms, (i == hero_slot && camera_mode == 0) || combat.unit(i).removed);
         }
+        for (auto& pool : bullet_pools) {
+            std::size_t k = 0;
+            for (const auto& b : combat.bullets()) {
+                if (b.proto != pool.proto || k >= pool.firsts.size()) continue;
+                const Mat4 m = combat::CombatWorld::bullet_matrix(b.pos, b.dir);
+                for (std::size_t n = 0; n < pool.nodes.size(); ++n) transforms[pool.firsts[k] + n] = m * pool.nodes[n];
+                ++k;
+            }
+            for (; k < pool.firsts.size(); ++k)
+                for (std::size_t n = 0; n < pool.nodes.size(); ++n) transforms[pool.firsts[k] + n] = Mat4{};
+        }
+    };
+    vo.effect_textures = &fx_ctx.materials.textures;
+    vo.effects = [&](Vec3 eye, fx::FxFrame& f) {
+        for (auto& e : effects) e.inst.render(f, eye);
     };
     vo.follow = [&](Vec3& centre) { centre = hero.position() + Vec3{0, 0, 2.f}; };
     vo.relative_mouse = true;
@@ -534,15 +892,23 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     const int rc = run_scene_viewer(window, std::move(scene), vo);
     for (std::size_t i = 0; i < live.size(); ++i) {
         const Vec3 a = unit_start[i], b = live[i]->position();
-        SDL_Log("play: unit %zu %s moved %.1f m (order %u, state %u, moving %d, v=(%.2f %.2f %.2f), z %.1f)", i,
-                live[i]->placement->resource.c_str(), std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y)),
+        const Vec3 h = b - hero.position();
+        SDL_Log("play: unit %zu %s moved %.1f m (order %u, state %u, moving %d, v=(%.2f %.2f %.2f), z %.1f); %.0f m from the hero, "
+                "%.0f / %.0f HP%s, target %d",
+                i, live[i]->placement->resource.c_str(), std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y)),
                 brains[i] ? brains[i]->current_order() : 0u, live[i]->motion->current_state(), brains[i] ? int(brains[i]->moving()) : -1,
-                live[i]->motion->velocity().x, live[i]->motion->velocity().y, live[i]->motion->velocity().z, b.z);
+                live[i]->motion->velocity().x, live[i]->motion->velocity().y, live[i]->motion->velocity().z, b.z, std::sqrt(dot(h, h)),
+                combat.unit(i).damage.total, combat.unit(i).damage.initial, combat.unit(i).removed ? " (removed)" : "", combat.unit(i).target);
     }
     const Vec3 hero_pos = hero.position();
     SDL_Log("play: hero ended at (%.2f, %.2f, %.2f) after %.0f ms, state %u; %zu collision pushes; %zu wall triangles; "
             "%zu footsteps",
             hero_pos.x, hero_pos.y, hero_pos.z, sim_ms, motion.current_state(), pushed_steps, statics.triangle_count(), footsteps);
+    SDL_Log("play: combat: %zu shots, %zu bullet hits, %zu kills; hero %.0f / %.0f HP", combat.shots, combat.hits, kills,
+            hero_combat.damage.total, hero_combat.damage.initial);
+    for (std::size_t g = 0; g < hero_combat.guns.size(); ++g)
+        SDL_Log("play: hero gun %zu %s: %u shots, ammo %d, energy %.1f, state %u", g + 1, hero_combat.guns[g].spec().bullet.second.c_str(),
+                hero_combat.guns[g].shots(), hero_combat.guns[g].ammo(), hero_combat.guns[g].energy(), unsigned(hero_combat.guns[g].state()));
     const Mat4& hm = hero.frame.matrix;
     SDL_Log("play: body forward (%.3f, %.3f), view forward (%.3f, %.3f, %.3f)", hm.at(0, 1), hm.at(1, 1), last_cam_forward.x,
             last_cam_forward.y, last_cam_forward.z);

@@ -6,6 +6,7 @@
 
 #include "core/math.hpp"
 #include "res/terrain.hpp"
+#include "world/collision.hpp"
 
 #include <optional>
 
@@ -28,6 +29,10 @@ public:
     // `max_rise` above p.z wins (the original accepts a rise below the step limit, ≤ 7.5 m);
     // nullopt off the map or when every face there is higher.
     std::optional<GroundHit> probe(Vec3 p, float max_rise = 7.5f) const;
+
+    // The first landscape face along the segment a → b (bullets: TraceBulletVsWorld 1001d9d0 on the
+    // landscape); TraceHit::triangle is the terrain face index. Water surfaces are not hit (as in probe).
+    std::optional<TraceHit> trace(Vec3 a, Vec3 b) const;
 
     Vec3 bounds_min() const { return min_; }
     Vec3 bounds_max() const { return max_; }

@@ -81,6 +81,7 @@ Paths inside the data are resolved case-insensitively (`core/paths`).
 | World3D | `world/` object queue, ids, messages | world3d-runtime.md, components.md | — |
 | Terrain | `res/terrain` (Land.msh), `scene/render_mesh`; atmosphere/sky to do | FParkan tomes/04-world, 05-render | LOD0 renders |
 | AniMesh, Control | `scene/model` (static pose) → `anim/` motion graph, mover | control-physics.md, formats-wea-cpt-ndp.md | static models render |
+| Control (devices, damage) | `res/weapons` (weapon devices, BULL, NDPR, EXPL), `combat/` gun device, bullets, part HP, death | weapons-damage.md | hero and AI fire, bullets hit faces, damage/death/removal reach the scripts; seekers, shields, debris, capture to do |
 | Behavior | `behavior/` unit brains, orders, tasks | behaviour-data.md | — |
 | ai | `ai/` script VM; `game/` world model, SuperAI per clan, MissionRuntime | script-vm.md, script-handlers-a/b.md | VM done; 61/73 handlers, 12 neutral (super_ai.hpp); wired into play |
 | iron3d HUD text | `res/tft`, `ui/hud_text` (pager, objectives screen) | rsli-font.md | done for the pager and objectives; frame art inferred |
@@ -127,6 +128,22 @@ Paths inside the data are resolved case-insensitively (`core/paths`).
   near 0.1, far 1000); the own unit is not drawn from it (inferred). Strafing is the attitude offset
   (IControl +0x50), added to the chassis yaw after the rate clamp and counter-rotated by the turret.
 - `--walk` holds forward (for `--shot` checks); `--time` runs the simulation to that time first.
+- Combat (`combat/`; notes/weapons-damage.md §7): every live unit is a `combat::Combatant` with
+  one `GunDevice` per CTLD weapon device of its parts (CGunDevice::Update / StepBarrel: 4 barrel steps
+  per shot timed by the barrel joint's rate, ammo, energy, param 3 delay, guided guns' lock gate) and
+  a `DamageState` built from its parts' NDPR (one part per mesh node; a component's root merges into
+  its mount). The hero's guns follow HERO.TBL (1–8 toggle, 0 all, LMB CIS_CONTINUEFIGHT); the AI's
+  fire control pulls single shots (`fire_mask`) and aims the turret (state 0x400:
+  `TurretRig::inputs_for_angles` + `slew`). Bullets (BULL prototype) fly straight (ballistic ones
+  fall), are traced each step against the landscape, every static triangle (`TraceMesh`) and the
+  posed triangles of live units (the face hit names the part), and explode with their EXPL: kind 2
+  damages the hit part, kind 3 every part in reach with the cubic falloff. Part 0 (or a vital node)
+  at 0 HP → clan 0xfffe (`World::set_clan`), AI stopped, removal after body[18] ms →
+  `MissionRuntime::object_killed`; destroyed parts are no longer drawn or hit. Bullet meshes are
+  drawn from a fixed pool per prototype; bullet, impact and part-explosion effects run through
+  `fx::EffectInstance`, their sound commands through the audio engine.
+- `--fire` holds LMB with every hero gun selected; `--aim` (port debug aid) turns the hero and its
+  turret to the nearest hostile unit and sends every bullet at it.
 - Collision (`world/collision`; control-physics.md "Collision"): positional only. The hero's sphere
   (around its chassis bounds) is pushed out of the static objects' near-vertical faces
   (|n.z| < 0.7) and kept inside the landscape box (ContainInWorldBounds), and the push is made

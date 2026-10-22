@@ -19,6 +19,8 @@ struct PlayOptions {
     bool no_fog = false;
     bool demo_walk = false;   // hold "forward" from the start (for --shot checks)
     bool demo_strafe = false; // hold "strafe left" from the start
+    bool demo_fire = false;   // hold the fire button (LMB) from the start, every gun selected
+    bool demo_aim = false;    // port debug aid: turn to the nearest hostile unit and aim every bullet at it
     int camera_preset = 0;    // 0 TURRET view, 1..4 OUTER presets (for --shot checks)
     input::KeyLayout layout = input::KeyLayout::Modern; // --classic-keys: the 2001 layout
     bool stabilize_camera = true; // --camera-sway: the original's data-driven cockpit sway

@@ -34,6 +34,12 @@ int ai_corpus_tests(const std::filesystem::path& game);
 // tools/game_tests.cpp: the strategy layer (world model, SuperAI, mission runtime).
 int game_unit_tests();
 int game_corpus_tests(const std::filesystem::path& game);
+// tools/combat_tests.cpp: weapons, bullets, damage and death.
+int combat_unit_tests();
+int combat_corpus_tests(const std::filesystem::path& game);
+// tools/fx_tests.cpp: visual effects (FXID/EXPL decoding, the src/fx runtime).
+int fx_unit_tests();
+int fx_corpus_tests(const std::filesystem::path& game);
 
 namespace {
 
@@ -616,6 +622,8 @@ void test_corpus(const std::filesystem::path& game) {
     test_unit_motion(game);
     g_failures += ai_corpus_tests(game); // tools/ai_tests.cpp
     g_failures += game_corpus_tests(game); // tools/game_tests.cpp
+    g_failures += combat_corpus_tests(game); // tools/combat_tests.cpp
+    g_failures += fx_corpus_tests(game); // tools/fx_tests.cpp
     test_audio_corpus(game);
 
     // Tut_2's sky at 07:00 (notes/atmosphere-render.md §10): the clock starts at 01:30 and a day lasts
@@ -680,6 +688,8 @@ int main(int argc, char** argv) {
     test_text();
     g_failures += ai_unit_tests();
     g_failures += game_unit_tests();
+    g_failures += combat_unit_tests();
+    g_failures += fx_unit_tests();
     if (argc > 1) test_corpus(argv[1]);
     std::printf(g_failures ? "%d FAILURES\n" : "all passed\n", g_failures);
     return g_failures ? 1 : 0;

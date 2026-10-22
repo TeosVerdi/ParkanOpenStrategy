@@ -2,6 +2,7 @@
 
 #include "res/ctld.hpp"
 
+#include <algorithm>
 #include <cfloat>
 #include <cstring>
 
@@ -39,6 +40,19 @@ std::unique_ptr<LiveUnit> LiveUnit::load(AssetLibrary& lib, const mission::TmaOb
             if (const NResEntry* pe = lib.find(p.archive, p.cpt_entry)) u->turret_points = decode_ctpt(pe->data);
         }
     }
+
+    if (u->rig)
+        for (std::size_t i = 1; i < u->model.parts.size(); ++i) {
+            if (i == u->turret_part) continue;
+            bool under = false;
+            for (int q = u->model.parts[i].parent; q >= 0 && !under; q = u->model.parts[std::size_t(q)].parent) under = std::size_t(q) == u->turret_part;
+            const UnitPart& p = u->model.parts[i];
+            const NResEntry* ge = under ? lib.find(p.archive, p.ctl_entry) : nullptr;
+            if (!ge || ge->type != fourcc("CTLD")) continue;
+            auto joints = decode_joints(decode_ctld(ge->data));
+            if (std::any_of(joints.begin(), joints.end(), [](const CtldJoint& j) { return (j.flags & 8) != 0; }))
+                u->gun_joints.push_back({i, std::move(joints)});
+        }
 
     Mat4 spawn = tma_placement(o);
     if (auto g = ground.probe(translation(spawn) + Vec3{0, 0, 50}, 100.f)) spawn.at(2, 3) = g->z;
@@ -136,13 +150,25 @@ std::optional<std::pair<std::string, std::string>> LiveUnit::touchdown_effect(st
     return std::nullopt;
 }
 
-void LiveUnit::pose(std::vector<Mat4>& transforms, float turret_x, float turret_y, bool hidden) {
-    if (rig) rig->node_frames(turret_x, turret_y, frame.attitude_offset.z, model.parts[turret_part].node_frames);
-    pose_unit(model, frame.matrix, frame.frame_a, frame.frame_b, frame.weight_b, transforms, first_transform);
-    if (hidden) {
-        const std::size_t end = std::min(transforms.size(), std::size_t(first_transform) + model.mesh.transforms.size());
-        for (std::size_t i = first_transform; i < end; ++i) transforms[i] = Mat4{};
+void LiveUnit::pose_parts() {
+    if (rig) {
+        rig->node_frames(aim_x, aim_y, frame.attitude_offset.z, model.parts[turret_part].node_frames);
+        for (const auto& [part, joints] : gun_joints) rig->gun_frames(joints, aim_y, model.parts[part].node_frames);
     }
+    for (const auto& j : joint_frames) {
+        if (j.part >= model.parts.size() || j.node < 0) continue;
+        auto& frames = model.parts[j.part].node_frames;
+        if (frames.size() <= std::size_t(j.node)) frames.resize(std::size_t(j.node) + 1, -1.f);
+        frames[std::size_t(j.node)] = j.frame;
+    }
+    posed.resize(model.mesh.transforms.size());
+    pose_unit(model, frame.matrix, frame.frame_a, frame.frame_b, frame.weight_b, posed, 0);
+}
+
+void LiveUnit::pose(std::vector<Mat4>& transforms, bool hidden) {
+    pose_parts();
+    for (std::size_t i = 0; i < posed.size() && first_transform + i < transforms.size(); ++i)
+        transforms[first_transform + i] = hidden || (i < detached.size() && detached[i]) ? Mat4{} : posed[i];
 }
 
 void collide_units(std::vector<LiveUnit*>& units, float now_ms) {

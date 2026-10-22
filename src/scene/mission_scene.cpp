@@ -142,6 +142,8 @@ std::optional<UnitModel> load_unit_model(AssetLibrary& lib, std::string_view rel
             part.archive = field(pe->data, 0x80);
             part.cpt_entry = field(pe->data, 0xa0);
             part.ctl_entry = field(pe->data, 0x120);
+            part.ndp_archive = field(pe->data, 0xc0);
+            part.ndp_entry = field(pe->data, 0xe0);
         }
         if (parent >= 0) attach_pose(part.model, u.parts[std::size_t(parent)].model.node_world[std::size_t(node.mount)]);
         else if (const NResEntry* e = lib.find("objects.rlb", node.entry); e && e->data.size() >= 0x140) {

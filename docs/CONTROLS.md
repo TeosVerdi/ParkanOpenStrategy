@@ -29,8 +29,8 @@ full value, so Shift switches gait while a movement key is held (the original's 
 | Lock turret to the body | L | L (Num 5) |
 | Free look | **hold Option** + mouse; release recentres | hold Left Shift + mouse |
 | Recentre free look | Option + right mouse | Left Shift + right mouse |
-| Fire selected weapons | left mouse | left mouse |
-| Select weapon 1–8 / all | 1–8 / 0 | 1–8 / 0 |
+| Fire selected weapons (live in `--play`) | left mouse | left mouse |
+| Toggle weapon 1–8 / select all (live; the hero starts with weapon 1) | 1–8 / 0 | 1–8 / 0 |
 | Infrared / camouflage / repair | N / H / R | N / H / R |
 
 ## Interface (recorded for the interface layer; not all are live in `--play` yet)

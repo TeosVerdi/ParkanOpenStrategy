@@ -23,6 +23,7 @@
 #include "ai/pathfind.hpp"
 #include "world/ground.hpp"
 #include "res/texm.hpp"
+#include "res/weapons.hpp"
 
 #include <fstream>
 #include <map>
@@ -251,6 +252,65 @@ int check_audio(const fs::path& game) {
     return bad + (tracks ? 0 : 1);
 }
 
+// notes/effects.md: every FXID effect and EXPL explosion definition decodes; every effect material
+// and EXPL effect resolves.
+int check_effects(const fs::path& game) {
+    AssetLibrary lib(game);
+    int bad = 0, effects = 0, materials = 0, expl = 0, surfaces = 0;
+    std::map<std::uint32_t, int> ops;
+    for (const auto& e : lib.archive("effects.rlb").entries()) {
+        try {
+            const FxEffect fx = decode_fx(e.data);
+            ++effects;
+            for (const auto& c : fx.list) {
+                ++ops[c.opcode];
+                const FxResourceRef* m = nullptr;
+                if (auto* x = std::get_if<FxSpriteCmd>(&c.data)) m = &x->material;
+                if (auto* x = std::get_if<FxBeamCmd>(&c.data)) m = &x->material;
+                if (auto* x = std::get_if<FxBurstCmd>(&c.data)) m = &x->material;
+                if (auto* x = std::get_if<FxTrailCmd>(&c.data)) m = &x->material;
+                if (!m || m->name.empty()) continue;
+                ++materials;
+                if (!lib.find("Material.lib", m->name)) {
+                    ++bad;
+                    std::printf("  FAIL effects.rlb:%s: material %s not found\n", e.name.c_str(), m->name.c_str());
+                }
+            }
+        } catch (const std::exception& ex) {
+            ++bad;
+            std::printf("  FAIL effects.rlb:%s: %s\n", e.name.c_str(), ex.what());
+        }
+    }
+    for (const char* a : {"animals.rlb", "static.rlb", "system.rlb", "turrets.rlb", "weapon.rlb", "bases.rlb",
+                          "guns.rlb", "fortif.rlb", "parts.rlb", "objects.rlb", "intsys.rlb"}) {
+        try {
+            for (const auto& e : lib.archive(a).entries()) {
+                if (e.type != fourcc("EXPL")) continue;
+                try {
+                    const ExplosionDef x = decode_expl(e.data);
+                    ++expl;
+                    if (!x.effect.empty() && !lib.find(x.effect.archive, x.effect.name)) {
+                        ++bad;
+                        std::printf("  FAIL %s:%s: effect %s not found\n", a, e.name.c_str(), x.effect.name.c_str());
+                    }
+                    for (std::size_t k = 0; k < x.surface.size(); ++k)
+                        surfaces += x.surface_valid[k] && lib.find(x.surface[k].archive, x.surface[k].name);
+                } catch (const std::exception& ex) {
+                    ++bad;
+                    std::printf("  FAIL %s:%s: %s\n", a, e.name.c_str(), ex.what());
+                }
+            }
+        } catch (const std::exception&) {
+            // archive absent in this release
+        }
+    }
+    std::printf("effects: %d FXID decoded (op1 %d, op2 %d, op3 %d, op4 %d, op5 %d, op7 %d, op8 %d, op9 %d, op10 %d), "
+                "%d material refs; %d EXPL decoded, %d surface variants; %d failed\n",
+                effects, ops[1], ops[2], ops[3], ops[4], ops[5], ops[7], ops[8], ops[9], ops[10], materials, expl,
+                surfaces, bad);
+    return bad;
+}
+
 int check_missions(const fs::path& game) {
     auto dir = resolve_path(game, "MISSIONS");
     if (!dir) return 1;
@@ -474,6 +534,23 @@ int check_bindings(const fs::path& game) {
     return failed;
 }
 
+// notes/weapons-damage.md §1: every weapon device's bullet resolves (BULL → CTLD, NDPR, EXPL); the one
+// BULL whose data is missing (bm_b_02, unused) is reported, not fatal. Same totals as
+// tools/weapons_dump.py --check.
+int check_weapons(const fs::path& game) {
+    AssetLibrary lib(game);
+    try {
+        const WeaponCorpus w = scan_weapon_corpus(lib);
+        std::printf("weapons: %zu weapon devices, %zu bullets (%zu BULL records), %zu EXPL entries; %zu NDPR (%zu parts)\n",
+                    w.weapon_devices, w.bullets, w.bull_records, w.expl_entries, w.ndpr_entries, w.ndpr_parts);
+        for (const auto& u : w.unresolved) std::printf("  unused BULL with missing data: %s\n", u.c_str());
+        return 0;
+    } catch (const std::exception& ex) {
+        std::printf("weapons: FAIL %s\n", ex.what());
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -483,6 +560,6 @@ int main(int argc, char** argv) {
     }
     fs::path game = argv[1];
     int bad = check_scripts(game) + check_research(game) + check_missions(game) + check_schemes(game) + check_bindings(game) + check_ground(game) + check_textres(game) + check_landmaps(game) +
-              check_assets(game) + check_audio(game);
+              check_assets(game) + check_audio(game) + check_effects(game) + check_weapons(game);
     return bad ? 1 : 0;
 }

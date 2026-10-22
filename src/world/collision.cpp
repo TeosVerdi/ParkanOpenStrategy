@@ -29,7 +29,119 @@ Vec3 closest_on_triangle(Vec3 p, Vec3 a, Vec3 b, Vec3 c) {
     return a + ab * (vb * denom) + ac * (vc * denom);
 }
 
+void add_to_grid(std::vector<std::vector<std::uint32_t>>& cells, Vec3 min, float cell, int nx, int ny, std::uint32_t i, Vec3 a,
+                 Vec3 b, Vec3 c) {
+    const int x0 = std::clamp(int((std::min({a.x, b.x, c.x}) - min.x) / cell), 0, nx - 1);
+    const int x1 = std::clamp(int((std::max({a.x, b.x, c.x}) - min.x) / cell), 0, nx - 1);
+    const int y0 = std::clamp(int((std::min({a.y, b.y, c.y}) - min.y) / cell), 0, ny - 1);
+    const int y1 = std::clamp(int((std::max({a.y, b.y, c.y}) - min.y) / cell), 0, ny - 1);
+    for (int x = x0; x <= x1; ++x)
+        for (int y = y0; y <= y1; ++y) cells[std::size_t(x) * std::size_t(ny) + std::size_t(y)].push_back(i);
+}
+
 } // namespace
+
+std::optional<float> segment_triangle(Vec3 a, Vec3 b, Vec3 p0, Vec3 p1, Vec3 p2) {
+    const Vec3 d = b - a, e1 = p1 - p0, e2 = p2 - p0;
+    const Vec3 h = cross(d, e2);
+    const float det = dot(e1, h);
+    if (std::abs(det) < 1e-12f) return std::nullopt;
+    const float inv = 1 / det;
+    const Vec3 s = a - p0;
+    const float u = dot(s, h) * inv;
+    if (u < 0 || u > 1) return std::nullopt;
+    const Vec3 q = cross(s, e1);
+    const float v = dot(d, q) * inv;
+    if (v < 0 || u + v > 1) return std::nullopt;
+    const float t = dot(e2, q) * inv;
+    if (t < 0 || t > 1) return std::nullopt;
+    return t;
+}
+
+void walk_grid(Vec3 lo, float cell, int nx, int ny, Vec3 a, Vec3 b, const std::function<bool(std::size_t, float)>& visit) {
+    if (nx <= 0 || ny <= 0 || cell <= 0) return;
+    const float hx = lo.x + float(nx) * cell, hy = lo.y + float(ny) * cell;
+    const float dx = b.x - a.x, dy = b.y - a.y;
+    // Clip the segment's xy projection to the grid rectangle (slab test).
+    float t0 = 0, t1 = 1;
+    auto slab = [&](float p, float d, float mn, float mx) {
+        if (std::abs(d) < 1e-12f) return p >= mn && p <= mx;
+        float ta = (mn - p) / d, tb = (mx - p) / d;
+        if (ta > tb) std::swap(ta, tb);
+        t0 = std::max(t0, ta), t1 = std::min(t1, tb);
+        return t0 <= t1;
+    };
+    if (!slab(a.x, dx, lo.x, hx) || !slab(a.y, dy, lo.y, hy)) return;
+    const float sx = a.x + dx * t0, sy = a.y + dy * t0;
+    int x = std::clamp(int((sx - lo.x) / cell), 0, nx - 1), y = std::clamp(int((sy - lo.y) / cell), 0, ny - 1);
+    const int step_x = dx > 0 ? 1 : -1, step_y = dy > 0 ? 1 : -1;
+    const float inf = 1e30f;
+    const float delta_x = std::abs(dx) > 1e-12f ? cell / std::abs(dx) : inf;
+    const float delta_y = std::abs(dy) > 1e-12f ? cell / std::abs(dy) : inf;
+    float next_x = std::abs(dx) > 1e-12f ? (lo.x + float(x + (dx > 0)) * cell - a.x) / dx : inf;
+    float next_y = std::abs(dy) > 1e-12f ? (lo.y + float(y + (dy > 0)) * cell - a.y) / dy : inf;
+    for (;;) {
+        const float exit = std::min({next_x, next_y, t1});
+        if (!visit(std::size_t(x) * std::size_t(ny) + std::size_t(y), exit) || exit >= t1) return;
+        if (next_x < next_y) {
+            x += step_x, next_x += delta_x;
+            if (x < 0 || x >= nx) return;
+        } else {
+            y += step_y, next_y += delta_y;
+            if (y < 0 || y >= ny) return;
+        }
+    }
+}
+
+void TraceMesh::add(const RenderMesh& mesh, std::uint32_t first, std::uint32_t last) {
+    for (const auto& d : mesh.draws) {
+        if (d.transform < first || d.transform >= last) continue;
+        const Mat4& m = mesh.transforms[d.transform];
+        for (std::uint32_t i = 0; i + 2 < d.index_count; i += 3) {
+            Vec3 v[3];
+            for (int k = 0; k < 3; ++k) {
+                const auto& rv = mesh.vertices[std::size_t(d.base_vertex + std::int32_t(mesh.indices[d.index_start + i + std::uint32_t(k)]))];
+                v[k] = m.transform_point({rv.pos[0], rv.pos[1], rv.pos[2]});
+            }
+            const Vec3 n = cross(v[1] - v[0], v[2] - v[0]);
+            if (dot(n, n) <= 1e-18f) continue;
+            tris_.push_back({v[0], v[1], v[2], d.transform});
+        }
+    }
+}
+
+void TraceMesh::finish() {
+    if (tris_.empty()) return;
+    min_ = {FLT_MAX, FLT_MAX, FLT_MAX};
+    max_ = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+    for (const auto& t : tris_)
+        for (const Vec3& p : {t.a, t.b, t.c}) {
+            min_ = {std::min(min_.x, p.x), std::min(min_.y, p.y), std::min(min_.z, p.z)};
+            max_ = {std::max(max_.x, p.x), std::max(max_.y, p.y), std::max(max_.z, p.z)};
+        }
+    nx_ = std::max(1, int((max_.x - min_.x) / cell_) + 1);
+    ny_ = std::max(1, int((max_.y - min_.y) / cell_) + 1);
+    cells_.assign(std::size_t(nx_) * std::size_t(ny_), {});
+    for (std::uint32_t i = 0; i < tris_.size(); ++i) add_to_grid(cells_, min_, cell_, nx_, ny_, i, tris_[i].a, tris_[i].b, tris_[i].c);
+}
+
+std::optional<TraceHit> TraceMesh::trace(Vec3 a, Vec3 b) const {
+    if (cells_.empty()) return std::nullopt;
+    if (std::max(a.z, b.z) < min_.z || std::min(a.z, b.z) > max_.z) return std::nullopt;
+    std::optional<TraceHit> best;
+    walk_grid(min_, cell_, nx_, ny_, a, b, [&](std::size_t c, float exit) {
+        for (std::uint32_t i : cells_[c]) {
+            const Tri& t = tris_[i];
+            const auto hit = segment_triangle(a, b, t.a, t.b, t.c);
+            if (!hit || (best && *hit >= best->t)) continue;
+            Vec3 n = normalize(cross(t.b - t.a, t.c - t.a));
+            if (dot(n, b - a) > 0) n = n * -1.f;
+            best = TraceHit{*hit, a + (b - a) * *hit, n, i, t.transform};
+        }
+        return !(best && best->t <= exit); // a hit inside this cell is the nearest
+    });
+    return best;
+}
 
 std::optional<float> swept_sphere_toi(Vec3 a0, Vec3 a1, float ra, Vec3 b0, Vec3 b1, float rb) {
     const Vec3 dp = b0 - a0, d = (b1 - b0) - (a1 - a0);
