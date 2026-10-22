@@ -193,6 +193,287 @@ void test_walker_targets() {
     CHECK(!w.set_target({25, 5, 0}, 10));
 }
 
+// ---- combat (notes/unit-ai-runtime.md §4) ----
+
+// A fake world: static objects; clans 1 and 2 are hostile, clan 3 is at peace with everyone.
+struct FakeWorld final : Perception {
+    std::vector<SeenObject> objs;
+    bool blocked = false;
+    SeenObject* find(std::uint32_t lid) {
+        for (auto& o : objs)
+            if (o.logic_id == lid) return &o;
+        return nullptr;
+    }
+    std::optional<SeenObject> object(std::uint32_t lid) const override {
+        for (const auto& o : objs)
+            if (o.logic_id == lid) return o;
+        return std::nullopt;
+    }
+    void objects_near(Vec3 c, float r, std::vector<std::uint32_t>& out) const override {
+        for (const auto& o : objs)
+            if (dist2d(o.pos, c) < r) out.push_back(o.logic_id);
+    }
+    bool hostile(std::uint32_t a, std::uint32_t b) const override { return (a == 1 && b == 2) || (a == 2 && b == 1); }
+    bool line_clear(Vec3, Vec3, std::uint32_t, std::uint32_t) const override { return !blocked; }
+};
+
+// A walkable 1000 m square cut into 10 × 10 areals of 100 m (so routes have portal points).
+LandMap big_square() {
+    constexpr int n = 10;
+    constexpr float size = 100;
+    LandMap m;
+    for (int ix = 0; ix < n; ++ix)
+        for (int iy = 0; iy < n; ++iy) {
+            LandAreal a;
+            const float x0 = size * float(ix), y0 = size * float(iy);
+            a.verts = {{x0, y0, 0}, {x0 + size, y0, 0}, {x0 + size, y0 + size, 0}, {x0, y0 + size, 0}}; // CCW
+            const auto id = [&](int x, int y) { return (x < 0 || y < 0 || x >= n || y >= n) ? -1 : x * n + y; };
+            const auto link = [&](int nb, int edge) { return std::array<std::int32_t, 2>{nb, nb < 0 ? -1 : edge}; };
+            a.links = {link(id(ix, iy - 1), 2), link(id(ix + 1, iy), 3), link(id(ix, iy + 1), 0), link(id(ix - 1, iy), 1)};
+            a.anchor = {x0 + size / 2, y0 + size / 2, 0};
+            a.walkable = 1;
+            a.min_x = x0, a.max_x = x0 + size, a.min_y = y0, a.max_y = y0 + size;
+            m.areals.push_back(a);
+        }
+    m.cells_x = m.cells_y = n;
+    for (int c = 0; c < n * n; ++c) m.cell_first.push_back(std::uint32_t(c)), m.cell_ids.push_back(std::uint16_t(c));
+    m.cell_first.push_back(n * n);
+    m.set_bounds(0, 0, n * size, n * size);
+    return m;
+}
+
+// A brain with a kinematic body instead of the motion runtime: the pilot's two IControl requests are
+// integrated directly (forward speed along the heading, yaw · body[11]).
+struct Sim {
+    LandMap map = big_square();
+    ArealGraph graph = ArealGraph::build(map);
+    MsvcRand rng;
+    RandomSource rand = [this] { return rng(); };
+    Walker walker{map, graph, rand};
+    Behaviour brain{walker, rand};
+    Wizard wz;
+    UnitState st;
+    float heading = 0; // radians, counter-clockwise from +y
+    std::array<float, 27> body{};
+    std::uint32_t now = 0;
+
+    Sim(FakeWorld* world, std::uint32_t lid, std::uint32_t clan, Vec3 pos, float max_speed = 10) {
+        body[6] = body[8] = 1, body[7] = max_speed, body[11] = 2;
+        walker.max_speed = max_speed, walker.min_speed = 0;
+        st.pos = pos;
+        walker.unit_state = [this] { return state(); };
+        brain.world = world;
+        brain.self = {lid, clan, 0x01008000};
+    }
+    UnitState state() const {
+        UnitState s = st;
+        s.dir = {-std::sin(heading), std::cos(heading), 0};
+        s.time = now;
+        return s;
+    }
+    Mat4 placement() const {
+        Mat4 m = Mat4::translation(st.pos);
+        const float c = std::cos(heading), s = std::sin(heading);
+        m.at(0, 0) = c, m.at(1, 0) = s;  // right
+        m.at(0, 1) = -s, m.at(1, 1) = c; // forward
+        return m;
+    }
+    void step(std::uint32_t dt = 33) {
+        now += dt;
+        wz.set_tick_time(now);
+        brain.takt(now, wz);
+        if (auto out = wz.takt(now, float(dt), placement(), body)) {
+            heading += out->yaw * body[11] * float(dt) * 0.001f;
+            st.pos = st.pos + Vec3{-std::sin(heading), std::cos(heading), 0} * (out->linear.y * float(dt) * 0.001f);
+        }
+    }
+};
+
+SeenObject enemy_at(std::uint32_t lid, std::uint32_t clan, Vec3 pos) {
+    SeenObject o;
+    o.logic_id = lid, o.clan = clan, o.type = 0x01008000, o.pos = pos, o.radius = 3;
+    return o;
+}
+
+void test_combat_helpers() {
+    std::printf("combat helpers\n");
+    Weapon w; // 0..150..200 m
+    CHECK(range_factor(w, 100, 0) == 1 && near(range_factor(w, 175, 0), 0.5f, 1e-5f) && range_factor(w, 200, 0) == 0);
+    w.near = 20;
+    CHECK(near(range_factor(w, 10, 0), 0.5f, 1e-5f));
+    w.height = 50;
+    CHECK(near(range_factor(w, 100, 10), 0.8f, 1e-5f)); // 10 m above the target
+    w.flags = 0x10;
+    CHECK(near(range_factor(w, 1000, 0), 1.1f, 1e-6f));
+    // Facing +y: a point ahead-right is yaw > 0, one above is pitch > 0.
+    const AimAngles a = aim_angles(Mat4::identity(), {0, 0, 0}, {10, 10, 0});
+    CHECK(near(a.yaw, 0.7853982f, 1e-5f) && a.pitch == 0);
+    CHECK(near(aim_angles(Mat4::identity(), {0, 0, 0}, {0, 10, 10}).pitch, 0.7853982f, 1e-5f));
+}
+
+// The weapon timer: one fire-mode request re-times the weapon (1001b650, F = 1: SetPeriod(0.5, 1.5) =
+// {7, 23} × 64 ms); the fire control then fires at the first gated pass and every 448–1920 ms after
+// (+ up to 144 ms of gate and step).
+void test_fire_spacing() {
+    std::printf("fire timer spacing\n");
+    FakeWorld world;
+    world.objs = {enemy_at(2, 2, {500, 600, 0})};
+    Sim s(&world, 1, 1, {500, 500, 0});
+    s.brain.enemies = {2};
+    s.brain.set_fire_mode(kFireTarget, 2, 0.5f);
+    std::vector<std::uint32_t> shots;
+    for (std::uint32_t t = 16; t < 30000; t += 16) {
+        s.now = t;
+        s.brain.fire.takt(s.brain, t);
+        if (s.brain.fire.request().trigger & 1) shots.push_back(t);
+        CHECK(s.brain.fire.request().target == 2 || t < 200);
+    }
+    CHECK(shots.size() > 10 && shots.front() < 200 && s.brain.last_fire == shots.back());
+    bool spaced = true;
+    for (std::size_t i = 1; i < shots.size(); ++i) spaced = spaced && shots[i] - shots[i - 1] >= 448 && shots[i] - shots[i - 1] <= 2064;
+    CHECK(spaced);
+    // A blocked line of fire: the timer still runs, nothing fires.
+    world.blocked = true;
+    std::uint32_t fired = 0;
+    for (std::uint32_t t = 30000; t < 40000; t += 16) s.brain.fire.takt(s.brain, t), fired |= s.brain.fire.request().trigger;
+    CHECK(fired == 0 && !s.brain.fire.request().line_clear);
+    // Fire frequency factor 2 halves the period: SetPeriod(0.25, 0.75) = {3, 11} × 64 ms.
+    world.blocked = false;
+    s.brain.fire.freq_factor = 2;
+    s.brain.set_fire_mode(kFireTarget, 2, 0.5f);
+    shots.clear();
+    for (std::uint32_t t = 40000; t < 60000; t += 16) {
+        s.brain.fire.takt(s.brain, t);
+        if (s.brain.fire.request().trigger & 1) shots.push_back(t);
+    }
+    spaced = shots.size() > 20;
+    for (std::size_t i = 1; i < shots.size(); ++i) spaced = spaced && shots[i] - shots[i - 1] >= 192 && shots[i] - shots[i - 1] <= 1040;
+    CHECK(spaced);
+}
+
+// An Attack order on a static enemy 400 m away: the unit nears at full speed, switches to fighting
+// inside 200 m, ends up in the stand-off band (50–100 m short of the target, ±80 m sideways, dodges
+// within ±27.5 m of it) and requests fire only when the target is within the weapon's 200 m.
+void test_attack_order() {
+    std::printf("attack order\n");
+    FakeWorld world;
+    world.objs = {enemy_at(2, 2, {500, 500, 0}), enemy_at(1, 1, {100, 500, 0})};
+    Sim s(&world, 1, 1, {100, 500, 0});
+    Order o{kOrderAttack};
+    o.target_kind = kTargetLogicId, o.target_id = 1; // itself: refused
+    CHECK(!s.brain.give_order(o, 3));
+    o.target_id = 2;
+    CHECK(s.brain.give_order(o, 3) && s.brain.current_order() == kOrderAttack);
+    int shots = 0, far_shots = 0;
+    float closest = 1e9f, end_d = 0;
+    bool fighting = false;
+    for (int i = 0; i < 60000 / 33; ++i) {
+        s.step();
+        world.find(1)->pos = s.st.pos;
+        const float d = dist2d(s.st.pos, {500, 500, 0});
+        if (s.brain.fire.request().trigger) ++shots, far_shots += d > 200.5f;
+        if (s.brain.fire.mode().mode == kFireTarget && d < 200) fighting = true;
+        closest = std::min(closest, d);
+        end_d = d;
+    }
+    std::printf("  attack: %d shots, closest %.0f m, end %.0f m from the target\n", shots, closest, end_d);
+    CHECK(s.brain.current_order() == kOrderAttack && fighting);
+    CHECK(shots > 5 && far_shots == 0);
+    CHECK(end_d < 140 && closest < 110);
+    // The target dies: the task ends, the unit goes back to the default Stop (fire at will).
+    world.objs.erase(world.objs.begin());
+    for (int i = 0; i < 100; ++i) s.step();
+    CHECK(s.brain.current_order() == kOrderNone && s.brain.fire.mode().mode == kFireAtWill);
+}
+
+// A unit that cannot move (no interrupt task) with an enemy in its sensor: fire at will picks the
+// enemy, but fires only inside the 200 m envelope.
+void test_fire_range() {
+    std::printf("fire range\n");
+    for (const float d : {250.f, 150.f}) {
+        FakeWorld world;
+        world.objs = {enemy_at(2, 2, {500, 500 + d, 0})};
+        Sim s(&world, 1, 1, {500, 500, 0}, 0); // max speed 0
+        std::uint32_t fired = 0;
+        for (int i = 0; i < 10000 / 33; ++i) s.step(), fired |= s.brain.fire.request().trigger;
+        CHECK(s.brain.fire.target() == 2 && s.brain.current_order() == kOrderNone);
+        CHECK((fired != 0) == (d < 200));
+    }
+}
+
+// An idle unit with an enemy 120 m away gets an interrupt attack (CheckTargets → InsertInterrupt,
+// limited to 1000 m around where it stood); StayGround never yields to one; friends are ignored.
+void test_interrupts() {
+    std::printf("interrupts\n");
+    {
+        FakeWorld world;
+        world.objs = {enemy_at(2, 2, {500, 620, 0})};
+        Sim s(&world, 1, 1, {500, 500, 0});
+        int t = 0;
+        for (; t < 10000 && s.brain.current_order() != kOrderAttack; t += 33) s.step();
+        CHECK(s.brain.current_order() == kOrderAttack);
+        const Task* task = s.brain.current_task();
+        CHECK(task && task->origin == 2 && task->limits.place_radius == 1000 && near(task->limits.place.y, 500, 1e-3f));
+        std::printf("  interrupt attack after %.1f s\n", t / 1000.0);
+        // Hit by a second enemy: an interrupt attack does not switch to a farther one.
+        world.objs.push_back(enemy_at(3, 2, {900, 900, 0}));
+        for (int i = 0; i < 200; ++i) s.step();
+        CHECK(!s.brain.on_damage(3));
+    }
+    {
+        FakeWorld world;
+        world.objs = {enemy_at(2, 2, {500, 620, 0})};
+        Sim s(&world, 1, 1, {500, 500, 0});
+        CHECK(s.brain.give_order({kOrderStayGround}, 3));
+        std::uint32_t fired = 0;
+        for (int i = 0; i < 10000 / 33; ++i) s.step(), fired |= s.brain.fire.request().trigger;
+        CHECK(s.brain.current_order() == kOrderStayGround && fired != 0);
+        CHECK(!s.brain.on_damage(2)); // StayGround's slot 12 is 0
+    }
+    {
+        FakeWorld world;
+        world.objs = {enemy_at(2, 1, {500, 620, 0}), enemy_at(3, 3, {520, 560, 0})}; // own clan, neutral clan
+        Sim s(&world, 1, 1, {500, 500, 0});
+        std::uint32_t fired = 0;
+        for (int i = 0; i < 10000 / 33; ++i) s.step(), fired |= s.brain.fire.request().trigger;
+        CHECK(s.brain.current_order() == kOrderNone && s.brain.enemies.empty() && s.brain.fire.target() == kNoObject && fired == 0);
+        Order o{kOrderAttack};
+        o.target_kind = kTargetLogicId, o.target_id = 2;
+        CHECK(!s.brain.give_order(o, 3)); // "Clan": an own-clan target is refused
+    }
+    {
+        // A Go order is not interrupted (slot 12 of M_Task_Go), but fires at will on the way.
+        FakeWorld world;
+        world.objs = {enemy_at(2, 2, {500, 620, 0})};
+        Sim s(&world, 1, 1, {500, 500, 0});
+        CHECK(s.brain.give_order({kOrderGo, 0, kTargetPlace, {900, 500, 0}}, 3));
+        for (int i = 0; i < 3000 / 33; ++i) s.step();
+        CHECK(s.brain.current_order() == kOrderGo && s.brain.fire.target() == 2);
+    }
+}
+
+// Follow (0x16): the follower walks to within (distance + 20) of its leader and re-follows it.
+void test_follow() {
+    std::printf("follow\n");
+    FakeWorld world;
+    world.objs = {enemy_at(2, 1, {500, 500, 0}), enemy_at(1, 1, {200, 200, 0})};
+    Sim s(&world, 1, 1, {200, 200, 0});
+    Order o{kOrderFollow};
+    o.target_kind = kTargetLogicId, o.target_id = 2;
+    CHECK(s.brain.give_order(o, 3));
+    for (int i = 0; i < 60000 / 33; ++i) s.step(), world.find(1)->pos = s.st.pos;
+    const float d1 = dist2d(s.st.pos, {500, 500, 0});
+    world.find(2)->pos = {700, 300, 0}; // the leader moves on
+    for (int i = 0; i < 60000 / 33; ++i) s.step(), world.find(1)->pos = s.st.pos;
+    const float d2 = dist2d(s.st.pos, {700, 300, 0});
+    std::printf("  follow: %.0f m, then %.0f m from the leader\n", d1, d2);
+    CHECK(s.brain.current_order() == kOrderFollow && d1 < 45 && d2 < 45);
+    // A leader of another clan ends the task.
+    world.find(2)->clan = 2;
+    for (int i = 0; i < 100; ++i) s.step();
+    CHECK(s.brain.current_order() != kOrderFollow);
+}
+
 // ---- corpus ----
 
 struct Unit {
@@ -304,6 +585,39 @@ void test_tut2(const std::filesystem::path& game) {
             follow_ground(motion, ground);
         }
         CHECK(unit.current_order() == kOrderPatrol && dist2d(unit.position(), at_done) > 10);
+
+        // The same chassis given an Attack on a static enemy standing at the target (a fake world): it
+        // closes in over the real areal map and motion graph, and fires only inside 200 m.
+        FakeWorld world;
+        Vec3 enemy = target;
+        if (auto g = ground.probe(target + Vec3{0, 0, 1000}, 2000.f)) enemy.z = g->z;
+        world.objs = {enemy_at(2, 2, enemy), enemy_at(1, 1, spawn)};
+        UnitMotion m2(ctld, mesh, points);
+        m2.start(0, pose);
+        MsvcRand r2{3};
+        AiUnit u2(m2, map, graph, [&] { return r2(); });
+        u2.set_ground_height([&](float x, float y) {
+            auto g = ground.probe({x, y, 1000}, 2000.f);
+            return g ? g->z : 0.f;
+        });
+        u2.set_perception(&world, {1, 1, 0x01008000});
+        Order attack{kOrderAttack};
+        attack.target_kind = kTargetLogicId, attack.target_id = 2;
+        CHECK(u2.give_order(attack, 3));
+        int shots = 0, far_shots = 0;
+        float closest = 1e9f;
+        for (float t2 = 0; t2 < 90000; t2 += 33) {
+            u2.update(t2);
+            follow_ground(m2, ground);
+            world.find(1)->pos = u2.position();
+            const float d = dist2d(u2.position(), enemy);
+            if (u2.fire().trigger) ++shots, far_shots += std::sqrt(dot(u2.position() - enemy, u2.position() - enemy)) > 200.5f;
+            closest = std::min(closest, d);
+        }
+        std::printf("  r_l_01: attack from %.0f m: %d fire requests, closest %.0f m, end %.0f m\n", dist2d(spawn, enemy), shots,
+                    closest, dist2d(u2.position(), enemy));
+        CHECK(u2.current_order() == kOrderAttack && shots > 0 && far_shots == 0 && closest < 120);
+        CHECK(u2.fire().target == 2 && u2.fire().track);
     }
 
     // ---- an animal (tent.dat) migrating in its clan's areals ----
@@ -383,6 +697,12 @@ int ai_unit_tests() {
     test_wizard();
     test_landmap_synthetic();
     test_walker_targets();
+    test_combat_helpers();
+    test_fire_spacing();
+    test_attack_order();
+    test_fire_range();
+    test_interrupts();
+    test_follow();
     return g_fail;
 }
 

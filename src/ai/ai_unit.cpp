@@ -39,6 +39,11 @@ void AiUnit::set_migration(ClanMigration* clan) {
     brain_.give_order({kOrderMigrate, 0, kTargetNone, {}}, 3);
 }
 
+void AiUnit::set_perception(const Perception* world, const SelfInfo& self) {
+    brain_.world = world;
+    brain_.self = self;
+}
+
 UnitState AiUnit::state() const {
     const Mat4& m = motion_->output_matrix();
     UnitState s;
@@ -55,7 +60,7 @@ void AiUnit::update(float now_ms) {
     walker_.max_speed = motion_->body[7];
     walker_.min_speed = motion_->body[4];
     wizard_.set_tick_time(now_);
-    brain_.movement_takt(now_, wizard_);
+    brain_.takt(now_, wizard_);
     motion_->update(now_ms);
 }
 

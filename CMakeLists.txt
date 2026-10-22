@@ -41,6 +41,7 @@ add_library(parkan_core STATIC
   src/ai/wizard.cpp
   src/ai/walker.cpp
   src/ai/behaviour.cpp
+  src/ai/fire_control.cpp
   src/ai/ai_unit.cpp
   src/res/landmap.cpp
   src/mission/research_tree.cpp
