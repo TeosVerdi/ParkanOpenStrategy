@@ -44,8 +44,14 @@ std::optional<UnitModel> load_unit_model(AssetLibrary& lib, std::string_view sch
 // Poses the chassis at the two animation times (cross-faded by `blend`; root translation removed),
 // re-attaches the components (each posed by its node_frames) and writes world · node matrices to
 // `transforms[first + part base + node]`.
+//
+// `steady_root` (port option, not in the original): components mounted on the chassis are attached
+// as if the chassis root kept this rotation (its rest pose) instead of the walk clip's. The original
+// lets the root rotation reach every child (AniMesh UpdateNodeMatrices 10008b30 zeroes only its
+// translation), so the turret, its guns and the camera on it sway together (notes/turret-camera.md
+// "Walk sway").
 void pose_unit(UnitModel& unit, const Mat4& world, float time_a, float time_b, float blend,
-               std::vector<Mat4>& transforms, std::size_t first);
+               std::vector<Mat4>& transforms, std::size_t first, const Mat4* steady_root = nullptr);
 
 // `mission_dir` is game-relative, e.g. "MISSIONS/CAMPAIGN/CAMPAIGN.00/Mission.02".
 // Objects for which `skip(index)` is true are left out (the units that move are drawn separately).

@@ -68,6 +68,11 @@ public:
     std::vector<JointFrame> joint_frames;
     // Transforms not drawn (collapsed): parts thrown off as debris (DetachPartDebris), set by combat.
     std::vector<bool> detached;
+    // Port option (the player's unit): mount the turret and its guns as if the chassis root kept its
+    // rest rotation, so the cockpit view, the barrels and the sight do not sway with the walk clip
+    // (pose_unit `steady_root`). The original sways them all together.
+    bool steady_mounts = false;
+    Mat4 root_rest = Mat4::identity(); // the chassis root's static-pose rotation
     // World matrix of every transform of model.mesh (part base + node) after the last pose_parts().
     std::vector<Mat4> posed;
     // Pose every part at the current frame with the turret at (aim_x, aim_y) and the joint frames.

@@ -169,10 +169,20 @@ std::optional<UnitModel> load_unit_model(AssetLibrary& lib, std::string_view rel
 }
 
 void pose_unit(UnitModel& unit, const Mat4& world, float time_a, float time_b, float blend, std::vector<Mat4>& transforms,
-               std::size_t first) {
+               std::size_t first, const Mat4* steady_root) {
+    Mat4 steady = Mat4::identity(); // rest rotation · inverse(current root rotation), applied to chassis mounts
     for (auto& part : unit.parts) {
         if (part.parent < 0) {
             pose_model_blend(part.model, time_a, time_b, blend);
+            if (steady_root && !part.model.node_local.empty()) {
+                Mat4 unroot = Mat4::identity();
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c) unroot.at(r, c) = part.model.node_local[0].at(c, r); // rotation only: transpose
+                steady = *steady_root * unroot;
+            }
+        } else if (steady_root && part.parent == 0) {
+            const Mat4 mount = steady * unit.parts[0].model.node_world[std::size_t(part.mount)];
+            pose_model_frames(part.model, part.node_frames, &mount);
         } else {
             pose_model_frames(part.model, part.node_frames,
                               &unit.parts[std::size_t(part.parent)].model.node_world[std::size_t(part.mount)]);

@@ -243,6 +243,29 @@ int combat_corpus_tests(const std::filesystem::path& game) {
     }
     CHECK(hero && tent);
     if (!hero || !tent) return g_fail;
+    // Walk sway (notes/turret-camera.md "Walk sway"): r_h_02's walk clip yaws the chassis root and the
+    // turret mounted under it follows. With steady mounts (the port's player option) the turret's
+    // mount keeps its heading in the body frame; without them it swings as in the original.
+    {
+        auto turret_yaw_range = [&](bool steady) {
+            auto u = LiveUnit::load(lib, *hero->placement, ground);
+            u->steady_mounts = steady;
+            u->motion->set_throttle({0, 1, 0});
+            float lo = 1e9f, hi = -1e9f;
+            for (int ms = 33; ms <= 3000; ms += 33) {
+                u->motion->update(float(ms));
+                u->frame = u->motion->interpolate(float(ms));
+                u->pose_parts();
+                const Mat4& m = u->model.parts[u->turret_part].model.node_world[0]; // body frame
+                const float yaw = std::atan2(m.at(1, 1), m.at(0, 1)) * 57.29578f;
+                lo = std::min(lo, yaw), hi = std::max(hi, yaw);
+            }
+            return hi - lo;
+        };
+        const float swaying = turret_yaw_range(false), steady = turret_yaw_range(true);
+        std::printf("  walk: turret mount yaw swings %.2f° (original), %.3f° (steady mounts)\n", swaying, steady);
+        CHECK(swaying > 3 && steady < 0.05f);
+    }
     // The tent hovers 40 m in front of the hero, at the hero's height.
     {
         Mat4 m = hero->frame.matrix;

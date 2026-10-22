@@ -28,6 +28,8 @@ std::unique_ptr<LiveUnit> LiveUnit::load(AssetLibrary& lib, const mission::TmaOb
     if (const NResEntry* pe = lib.find(u->model.ctl_archive, base + ".cpt")) u->points = decode_ctpt(pe->data);
     const ModelAsset& chassis = u->model.parts.front().model;
     u->motion = std::make_unique<UnitMotion>(ctld, chassis.mesh, u->points);
+    // AniMesh's local matrix rotates by the conjugate of the key (CAniNode::SampleKey; scene/model).
+    u->root_rest = Mat4::rotation(sample_node(chassis.mesh, 0, -1).rot.conjugate());
     u->sphere_centre = (chassis.bounds_min + chassis.bounds_max) * 0.5f;
     const Vec3 ext = chassis.bounds_max - chassis.bounds_min;
     u->sphere_radius = std::max(0.25f, 0.5f * std::max(ext.x, ext.y));
@@ -162,7 +164,7 @@ void LiveUnit::pose_parts() {
         frames[std::size_t(j.node)] = j.frame;
     }
     posed.resize(model.mesh.transforms.size());
-    pose_unit(model, frame.matrix, frame.frame_a, frame.frame_b, frame.weight_b, posed, 0);
+    pose_unit(model, frame.matrix, frame.frame_a, frame.frame_b, frame.weight_b, posed, 0, steady_mounts ? &root_rest : nullptr);
 }
 
 void LiveUnit::pose(std::vector<Mat4>& transforms, bool hidden) {
