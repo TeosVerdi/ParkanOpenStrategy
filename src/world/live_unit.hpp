@@ -33,6 +33,19 @@ public:
     float mass = 1; // CCollObject +0x34 = control property 0x7c (source untraced): equal for now
     std::uint32_t first_transform = 0; // where its parts start in the scene's transforms
     MotionFrame frame;                  // the last interpolated frame
+    Ctld ctld;                          // the chassis' motion graph (event lists for the touch-downs)
+
+    // Feet that touched down during the last settle(), with the event list their constraint fires
+    // (CTLD contact +8, flag 0x1000; FollowGround fires it once per landing).
+    struct Touchdown {
+        std::int32_t event_list = -1;
+        Vec3 position{};
+    };
+    std::vector<Touchdown> touchdowns;
+    // The effect a touch-down list starts: its START_EFFECT (type 10) event, the default surface one
+    // (flag 0x10000000) when present, names an effect handle created by situation 0's list (type 3,
+    // lib/entry). nullopt when the lists do not say. The surface choice itself is not decoded.
+    std::optional<std::pair<std::string, std::string>> touchdown_effect(std::int32_t event_list) const;
 
     // After motion->update(now): ground following from the feet, then out of static walls and
     // inside the landscape box. Returns the collision push applied.
@@ -46,6 +59,9 @@ public:
 
 private:
     LiveUnit() = default;
+    // Touch-down tracking per contact: lands during the current step / was down at the previous step's end.
+    std::vector<bool> landing_, down_at_end_;
+    float last_step_ = -1;
 };
 
 // Unit-vs-unit collision (CCollManager broad phase + PushApart) for the tick: overlapping spheres are

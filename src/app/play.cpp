@@ -1,6 +1,8 @@
 #include "app/play.hpp"
 
 #include "app/scene_viewer.hpp"
+#include "audio/audio_engine.hpp"
+#include "res/fx.hpp"
 #include "control/turret.hpp"
 #include "control/unit_motion.hpp"
 #include "core/paths.hpp"
@@ -83,6 +85,16 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     UnitMotion& motion = *hero.motion;
     std::vector<LiveUnit*> live_ptrs;
     for (auto& u : live) live_ptrs.push_back(u.get());
+
+    // Sound (notes/audio.md): in a mission a random track plays once, then a different random one; the
+    // listener is the rendered camera. Not started for --shot.
+    std::unique_ptr<audio::AudioEngine> sound;
+    if (opt.shot_path.empty()) {
+        sound = std::make_unique<audio::AudioEngine>(lib);
+        if (!sound->ok()) sound.reset();
+        else sound->play_random_music(false);
+    }
+    std::size_t footsteps = 0;
 
     // Input: the hero is driven through HERO.TBL (iron3d loads it for the hero; warbots use M1/M2),
     // rebound to the chosen layout (docs/CONTROLS.md).
@@ -186,6 +198,16 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (u.get() == &hero && dot(push, push) > 0) ++pushed_steps;
         }
         collide_units(live_ptrs, float(sim_ms));
+        // Footsteps: a touch-down starts its step effect (step_h* by surface; the default surface's
+        // entry until surfaces are decoded); the effect's sound commands play at the foot.
+        for (auto& u : live)
+            for (const auto& td : u->touchdowns)
+                if (auto fx = u->touchdown_effect(td.event_list)) {
+                    ++footsteps;
+                    if (sound)
+                        for (const auto& s : load_fx_sounds(lib, fx->second)) sound->play(audio::fx_sound(s), td.position);
+                }
+        if (sound && sound->music_finished()) sound->play_random_music(false);
     };
 
     vo.animate = [&](double seconds, std::vector<Mat4>& transforms) {
@@ -228,6 +250,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         fwd = rot(fwd, up, (0.5f - ax) * 6.2831853f);
         fwd = rot(fwd, rot(leftv, up, (0.5f - ax) * 6.2831853f), (0.5f - ay) * 3.1415927f);
         cam.eye = eye, cam.forward = fwd, cam.up = up;
+        if (sound) sound->set_listener(eye, fwd, up);
         last_cam_forward = fwd;
         cam.fov_x = rig->camera_fov, cam.znear = rig->camera_near, cam.zfar = rig->camera_far;
         if (camera_mode == 1) {
@@ -251,6 +274,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             // ClipOuterToWorld, reduced to the ground: keep the camera 0.75 above the landscape.
             if (auto g = ground.probe(cam.eye + Vec3{0, 0, 50}, 100.f); g && cam.eye.z < g->z + 0.75f) cam.eye.z = g->z + 0.75f;
             cam.znear = 0.5f, cam.zfar = 175.f, cam.fov_x = 1.3f;
+            if (sound) sound->set_listener(cam.eye, fwd, up);
         }
         return true;
     };
@@ -274,8 +298,9 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             start_pos.x, start_pos.y, start_pos.z, hero.model.ctl_entry.c_str(), live.size());
     const int rc = run_scene_viewer(window, std::move(scene), vo);
     const Vec3 hero_pos = hero.position();
-    SDL_Log("play: hero ended at (%.2f, %.2f, %.2f) after %.0f ms, state %u; %zu collision pushes; %zu wall triangles",
-            hero_pos.x, hero_pos.y, hero_pos.z, sim_ms, motion.current_state(), pushed_steps, statics.triangle_count());
+    SDL_Log("play: hero ended at (%.2f, %.2f, %.2f) after %.0f ms, state %u; %zu collision pushes; %zu wall triangles; "
+            "%zu footsteps",
+            hero_pos.x, hero_pos.y, hero_pos.z, sim_ms, motion.current_state(), pushed_steps, statics.triangle_count(), footsteps);
     const Mat4& hm = hero.frame.matrix;
     SDL_Log("play: body forward (%.3f, %.3f), view forward (%.3f, %.3f, %.3f)", hm.at(0, 1), hm.at(1, 1), last_cam_forward.x,
             last_cam_forward.y, last_cam_forward.z);

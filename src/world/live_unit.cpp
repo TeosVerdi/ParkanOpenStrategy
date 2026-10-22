@@ -3,6 +3,7 @@
 #include "res/ctld.hpp"
 
 #include <cfloat>
+#include <cstring>
 
 namespace parkan {
 
@@ -20,7 +21,8 @@ std::unique_ptr<LiveUnit> LiveUnit::load(AssetLibrary& lib, const mission::TmaOb
     std::unique_ptr<LiveUnit> u(new LiveUnit);
     u->placement = &o;
     u->model = std::move(*model);
-    const Ctld ctld = decode_ctld(ce->data);
+    u->ctld = decode_ctld(ce->data);
+    const Ctld& ctld = u->ctld;
     const std::string base = u->model.ctl_entry.substr(0, u->model.ctl_entry.rfind('.'));
     if (const NResEntry* pe = lib.find(u->model.ctl_archive, base + ".cpt")) u->points = decode_ctpt(pe->data);
     const ModelAsset& chassis = u->model.parts.front().model;
@@ -68,7 +70,34 @@ Vec3 LiveUnit::settle(float now_ms, const TerrainGround& ground, const StaticCol
         dz = g ? g->z - p.z : 0.f;
     }
     motion->apply_offset({0, 0, dz});
-    for (auto [c, gap] : clearance) motion->set_contact_touch(c, gap + dz < 0.1f);
+    // Touch-downs: a constraint flagged 0x1000 says the foot ends this motion step on the ground. When
+    // the previous step's constraint did not (the foot was lifted), the foot lands during this step and
+    // its touch-down list fires once, when it reaches the ground (FollowGround 1001a450; the landing
+    // test is inferred from the flags — the original's per-contact state is not decoded).
+    touchdowns.clear();
+    const std::size_t n = motion->contacts().size();
+    landing_.resize(n, false);
+    down_at_end_.resize(n, true);
+    if (motion->step_start() != last_step_) {
+        last_step_ = motion->step_start();
+        for (std::size_t c = 0; c < n && c < motion->live().contacts.size(); ++c) {
+            const bool down = (motion->live().contacts[c].flags & 0x1000) != 0;
+            landing_[c] = down && !down_at_end_[c];
+            down_at_end_[c] = down;
+        }
+    }
+    for (auto [c, gap] : clearance) {
+        const bool touch = gap + dz < 0.1f;
+        motion->set_contact_touch(c, touch);
+        if (touch && landing_[c] && c < motion->live().contacts.size()) {
+            landing_[c] = false;
+            const auto& k = motion->live().contacts[c];
+            const auto pi = motion->contacts()[c].point;
+            if (k.event_list >= 0)
+                touchdowns.push_back({k.event_list, (f.matrix * chassis.node_world[points[pi].part]).transform_point(points[pi].pos) +
+                                                        Vec3{0, 0, dz}});
+        }
+    }
 
     // CCollManager::Update: out of static walls, inside the landscape box; a ground unit's push
     // (state flag 4) is made horizontal (ApplyCollisionPush).
@@ -79,6 +108,24 @@ Vec3 LiveUnit::settle(float now_ms, const TerrainGround& ground, const StaticCol
     if (dot(push, push) > 0) motion->apply_offset(push);
     frame = motion->interpolate(now_ms);
     return push;
+}
+
+std::optional<std::pair<std::string, std::string>> LiveUnit::touchdown_effect(std::int32_t list) const {
+    if (list < 0 || std::size_t(list) >= ctld.event_lists.size()) return std::nullopt;
+    const CtldEvent* start = nullptr;
+    for (const auto& e : ctld.event_lists[std::size_t(list)])
+        if (e.type == 10 && (!start || (e.flags & 0x10000000))) start = &e;
+    if (!start) return std::nullopt;
+    std::int32_t handle = 0;
+    std::memcpy(&handle, start->raw.data() + 0x10, 4);
+    const std::int32_t create = ctld.situations[0];
+    if (create < 0 || std::size_t(create) >= ctld.event_lists.size()) return std::nullopt;
+    for (const auto& e : ctld.event_lists[std::size_t(create)]) {
+        std::int32_t h = 0;
+        std::memcpy(&h, e.raw.data() + 0x1c, 4);
+        if (e.type == 3 && h == handle && !e.entry.empty()) return std::pair{e.lib, e.entry};
+    }
+    return std::nullopt;
 }
 
 void LiveUnit::pose(std::vector<Mat4>& transforms, float turret_x, float turret_y, bool hidden) {
