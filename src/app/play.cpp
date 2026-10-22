@@ -85,6 +85,12 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     UnitMotion& motion = *hero.motion;
     std::vector<LiveUnit*> live_ptrs;
     for (auto& u : live) live_ptrs.push_back(u.get());
+    // The hero chassis root's rest rotation (its static-pose key), for the camera stabilisation.
+    Mat4 root_rest = Mat4::identity();
+    {
+        const NodePose p = sample_node(hero.model.parts.front().model.mesh, 0, -1);
+        root_rest = Mat4::rotation(p.rot.conjugate()); // AniMesh's local matrix rotates by the conjugate
+    }
 
     // Sound (notes/audio.md): in a mission a random track plays once, then a different random one; the
     // listener is the rendered camera. Not started for --shot.
@@ -241,7 +247,18 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         const ContactPoint &pe = turret_points[std::size_t(rig->camera_eye_point)],
                            &pa = turret_points[std::size_t(rig->camera_axis_point)];
         if (pe.part >= nodes.size() || pa.part >= nodes.size()) return false;
-        const Mat4 me = last_frame.matrix * nodes[pe.part], ma = last_frame.matrix * nodes[pa.part];
+        // Camera stabilisation (port choice): walk clips twist the chassis root (r_h_02: up to ~10° of
+        // yaw per stride) and the turret, mounted under it, swings the view ±8°. The camera is placed
+        // as if the root kept its rest rotation; the model itself still plays the original motion.
+        Mat4 base = last_frame.matrix;
+        if (opt.stabilize_camera) {
+            const Mat4& root_local = hero.model.parts.front().model.node_local[0]; // rotation only (root)
+            Mat4 unroot = Mat4::identity();
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) unroot.at(r, c) = root_local.at(c, r); // inverse of a rotation
+            base = base * root_rest * unroot;
+        }
+        const Mat4 me = base * nodes[pe.part], ma = base * nodes[pa.part];
         const Vec3 eye = me.transform_point(pe.pos);
         Vec3 fwd = normalize(ma.transform_point(pa.vec) - ma.transform_point({}));
         Vec3 up = normalize(me.transform_point(pe.vec) - me.transform_point({}));

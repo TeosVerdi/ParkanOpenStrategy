@@ -51,8 +51,9 @@ int main(int argc, char** argv) {
                 const unsigned k = m.frame_map[mi];
                 std::printf("  frame %4u key %5u", f, k);
                 if (k < m.keys.size())
-                    std::printf(" t=%7.2f pos=(%.3f %.3f %.3f)", m.keys[k].time, m.keys[k].pos[0], m.keys[k].pos[1],
-                                m.keys[k].pos[2]);
+                    std::printf(" t=%7.2f pos=(%.3f %.3f %.3f) q=(%.3f %.3f %.3f %.3f)", m.keys[k].time, m.keys[k].pos[0],
+                                m.keys[k].pos[1], m.keys[k].pos[2], m.keys[k].quat[0], m.keys[k].quat[1], m.keys[k].quat[2],
+                                m.keys[k].quat[3]);
                 std::printf("\n");
             }
             return 0;

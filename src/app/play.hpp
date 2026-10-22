@@ -21,6 +21,7 @@ struct PlayOptions {
     bool demo_strafe = false; // hold "strafe left" from the start
     int camera_preset = 0;    // 0 TURRET view, 1..4 OUTER presets (for --shot checks)
     input::KeyLayout layout = input::KeyLayout::Modern; // --classic-keys: the 2001 layout
+    bool stabilize_camera = true; // --camera-sway: the original's data-driven cockpit sway
 };
 
 int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt);

@@ -102,7 +102,7 @@ int main(int argc, char** argv) {
     std::string view_archive, view_mesh, unit, terrain, mission, shot;
     double start_time = 0;
     int start_state = 0;
-    bool no_fog = false, demo_walk = false, demo_strafe = false, classic_keys = false;
+    bool no_fog = false, demo_walk = false, demo_strafe = false, classic_keys = false, camera_sway = false;
     int camera_preset = 0;
     std::string play, sound_lib, sound_entry;
     int music = -1;
@@ -123,6 +123,8 @@ int main(int argc, char** argv) {
             play = argv[++i];
         } else if (a == "--walk") {
             demo_walk = true;
+        } else if (a == "--camera-sway") {
+            camera_sway = true;
         } else if (a == "--classic-keys") {
             classic_keys = true;
         } else if (a == "--strafe") {
@@ -185,6 +187,7 @@ int main(int argc, char** argv) {
             po.demo_walk = demo_walk;
             po.demo_strafe = demo_strafe;
             po.camera_preset = camera_preset;
+            po.stabilize_camera = !camera_sway;
             po.layout = classic_keys ? parkan::input::KeyLayout::Classic : parkan::input::KeyLayout::Modern;
             rc = parkan::run_play(window, lib, po);
         } else if (!view_mesh.empty()) {

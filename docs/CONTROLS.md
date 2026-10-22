@@ -51,4 +51,6 @@ full value, so Shift switches gait while a movement key is held (the original's 
 | HQ camera move / up-down / rotate | **WASD / Space, Ctrl / Q, E** | arrows / `'` `/` / `,` `.` |
 | Confirm / back | Enter / Esc | Enter / Esc |
 
-Port-only: **F10** toggles a free orbit camera around the hero (debugging aid).
+Port-only: **F10** toggles a free orbit camera around the hero (debugging aid). The cockpit camera is
+stabilised against the walk clips' pelvis twist (the turret is mounted under the chassis root, which
+the walk keys yaw by up to ~10°); `--camera-sway` restores the data-driven sway.
