@@ -11,6 +11,7 @@
 #include "res/terrain.hpp"
 #include "scene/mission_scene.hpp"
 #include "scene/sky.hpp"
+#include "world/collision.hpp"
 #include "world/ground.hpp"
 
 #include <algorithm>
@@ -55,7 +56,17 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     RenderMesh scene = load_mission_render_mesh(lib, opt.mission, nullptr, *hero_index);
     auto hero = load_unit_model(lib, hero_obj.resource);
     if (!hero) throw std::runtime_error("hero design not found: " + hero_obj.resource);
+    // Static colliders: every placed object's faces (the terrain's draws use transform 0).
+    StaticColliders statics;
+    statics.add(scene, 1, std::uint32_t(scene.transforms.size()));
+    statics.finish();
     const std::uint32_t hero_first = append_render_mesh(scene, hero->mesh, Mat4::identity());
+    // The hero's collision sphere: around the chassis's static-pose bounds (inferred; the original's
+    // radius source, CCollObject +0x50, is not traced).
+    const ModelAsset& chassis = hero->parts.front().model;
+    const Vec3 sphere_centre = (chassis.bounds_min + chassis.bounds_max) * 0.5f;
+    const Vec3 ext = chassis.bounds_max - chassis.bounds_min;
+    const float sphere_radius = 0.5f * std::max(ext.x, ext.y);
 
     std::string map_dir = tma.land_path;
     if (auto cut = map_dir.find_last_of("\\/"); cut != std::string::npos) map_dir.resize(cut);
@@ -91,6 +102,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     float mouse_dx = 0, mouse_dy = 0;
 
     double sim_ms = 0;
+    std::size_t pushed_steps = 0;
     Vec3 hero_pos = translation(spawn);
 
     ViewerOptions vo;
@@ -149,6 +161,17 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         }
         motion.apply_offset({0, 0, dz});
         for (auto [c, gap] : clearance) motion.set_contact_touch(c, gap + dz < 0.1f);
+
+        // CCollManager::Update for the hero: out of static walls, inside the landscape box; the push
+        // of a ground unit (state flag 4) is made horizontal (ApplyCollisionPush).
+        const Vec3 centre = motion.interpolate(float(sim_ms)).matrix.transform_point(sphere_centre);
+        Vec3 push = statics.push_sphere(centre, sphere_radius);
+        push = push + contain_in_world_bounds(centre + push, sphere_radius, ground.bounds_min(), ground.bounds_max());
+        if (motion.live().flags & 4) push = horizontal_push(push);
+        if (dot(push, push) > 0) {
+            motion.apply_offset(push);
+            ++pushed_steps;
+        }
     };
 
     vo.animate = [&](double seconds, std::vector<Mat4>& transforms) {
@@ -177,8 +200,8 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     SDL_Log("play: hero %s at (%.0f, %.0f, %.0f), motion graph %s (%zu states)", hero_obj.resource.c_str(), hero_pos.x,
             hero_pos.y, hero_pos.z, hero->ctl_entry.c_str(), ctld.states.size());
     const int rc = run_scene_viewer(window, std::move(scene), vo);
-    SDL_Log("play: hero ended at (%.2f, %.2f, %.2f) after %.0f ms, state %u", hero_pos.x, hero_pos.y, hero_pos.z, sim_ms,
-            motion.current_state());
+    SDL_Log("play: hero ended at (%.2f, %.2f, %.2f) after %.0f ms, state %u; %zu collision pushes; %zu wall triangles",
+            hero_pos.x, hero_pos.y, hero_pos.z, sim_ms, motion.current_state(), pushed_steps, statics.triangle_count());
     return rc;
 }
 

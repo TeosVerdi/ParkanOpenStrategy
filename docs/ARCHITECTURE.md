@@ -114,3 +114,8 @@ Paths inside the data are resolved case-insensitively (`core/paths`).
   mapping) → `UnitMotion::update` → ground offset from the feet → `pose_unit`.
 - Keys are the game's own M1.TBL: arrows walk, `,`/`.` turn, `=`/`-` speed, and so on.
 - `--walk` holds forward (for `--shot` checks); `--time` runs the simulation to that time first.
+- Collision (`world/collision`; control-physics.md "Collision"): positional only. The hero's sphere
+  (around its chassis bounds) is pushed out of the static objects' near-vertical faces
+  (|n.z| < 0.7) and kept inside the landscape box (ContainInWorldBounds), and the push is made
+  horizontal for ground states (flag 4). Unit-vs-unit (SweptSphereTOI + mass² split) is implemented
+  as functions, waiting for other moving units.

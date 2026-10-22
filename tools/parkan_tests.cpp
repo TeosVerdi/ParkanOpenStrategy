@@ -7,6 +7,7 @@
 #include "input/man_manager.hpp"
 #include "input/translate_table.hpp"
 #include "mission/scheme.hpp"
+#include "world/collision.hpp"
 #include "mission/ske.hpp"
 #include "res/library.hpp"
 #include "scene/model.hpp"
@@ -395,6 +396,41 @@ void test_man_manager() {
     CHECK(c.get(0, 0, kMcmdRotateZ) == 0.f);
 }
 
+void test_collision() {
+    // Head-on spheres: centres 10 apart closing at 8 per tick, radii 1 + 1 → contact at t = 1.
+    auto t = swept_sphere_toi({0, 0, 0}, {4, 0, 0}, 1, {10, 0, 0}, {6, 0, 0}, 1);
+    CHECK(t && std::abs(*t - 1.f) < 1e-5f);
+    CHECK(!swept_sphere_toi({0, 0, 0}, {1, 0, 0}, 1, {10, 0, 0}, {9, 0, 0}, 1));
+    CHECK(swept_sphere_toi({0, 0, 0}, {0, 0, 0}, 1, {1.5f, 0, 0}, {1.5f, 0, 0}, 1) == 0.f); // overlapping
+    // Squared-mass split: a twice as heavy unit takes a fifth of the push.
+    auto [pa, pb] = split_push({5, 0, 0}, 2, 1);
+    CHECK(std::abs(pa.x + 1.f) < 1e-6f && std::abs(pb.x - 4.f) < 1e-6f);
+    // Horizontal push: the vertical part folds into the horizontal one (×|p|/|p_xy|, at most 4).
+    const Vec3 h = horizontal_push({3, 0, 4});
+    CHECK(std::abs(h.x - 5.f) < 1e-5f && h.z == 0.f);
+    CHECK(horizontal_push({0, 0, 1}).x == 0.f);
+    // Containment: a sphere poking 2 past x = 0 comes back to the radius, then the soft border pull.
+    const Vec3 c = contain_in_world_bounds({-1, 500, 10}, 1, {0, 0, 0}, {1000, 1000, 100});
+    CHECK(std::abs(c.x - (2.f + 3 * 0.0125f * 79.f)) < 1e-4f);
+    // A wall at x = 0 (vertical quad) pushes a sphere at x = 0.5, r = 1 out to x = 1.
+    RenderMesh wall;
+    for (auto [y, z] : {std::pair{-5.f, -5.f}, {5.f, -5.f}, {5.f, 5.f}, {-5.f, 5.f}}) {
+        RenderVertex v{};
+        v.pos[0] = 0, v.pos[1] = y, v.pos[2] = z;
+        wall.vertices.push_back(v);
+    }
+    wall.indices = {0, 1, 2, 0, 2, 3};
+    wall.transforms.push_back(Mat4::translation({0, 0, 0}));
+    wall.draws.push_back({1, 0, 6, 0, -1, -1, 0});
+    StaticColliders s;
+    s.add(wall, 1, 2);
+    s.finish();
+    CHECK(s.triangle_count() == 2);
+    const Vec3 p = s.push_sphere({0.5f, 0, 0}, 1);
+    CHECK(std::abs(p.x - 0.5f) < 1e-5f && std::abs(p.y) < 1e-6f);
+    CHECK(dot(s.push_sphere({3, 0, 0}, 1), Vec3{1, 1, 1}) == 0.f);
+}
+
 void test_corpus(const std::filesystem::path& game) {
     test_unit_motion(game);
 
@@ -455,6 +491,7 @@ int main(int argc, char** argv) {
     test_scheme();
     test_input();
     test_man_manager();
+    test_collision();
     if (argc > 1) test_corpus(argv[1]);
     std::printf(g_failures ? "%d FAILURES\n" : "all passed\n", g_failures);
     return g_failures ? 1 : 0;

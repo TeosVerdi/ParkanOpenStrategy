@@ -25,6 +25,7 @@ add_library(parkan_core STATIC
   src/scene/mission_scene.cpp
   src/scene/sky.cpp
   src/world/ground.cpp
+  src/world/collision.cpp
   src/res/terrain.cpp
   src/ai/script_program.cpp
   src/ai/formula.cpp
