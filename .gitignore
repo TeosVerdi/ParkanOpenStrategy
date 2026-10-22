@@ -1,0 +1,4 @@
+build*/
+.DS_Store
+*.app
+compile_commands.json
