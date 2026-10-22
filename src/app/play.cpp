@@ -169,12 +169,15 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         forward = std::clamp(forward, -1.f, 1.f);
         // Strafing (ExecuteBinding LEFT/RIGHT): walk (throttle.y = ±1) with an attitude offset of ±90°,
         // ±45° while also walking forward or back; the motion graph sees a plain walk request.
-        const bool left = commands.get(0, 0, kMcmdLeft) > 0.5f || opt.demo_strafe, right = commands.get(0, 0, kMcmdRight) > 0.5f;
+        // The LEFT/RIGHT value is the strafe throttle (1 in the original tables; the modern layout walks
+        // at 0.5 and sprints at 1 with Shift).
+        const float left_v = opt.demo_strafe ? 1.f : commands.get(0, 0, kMcmdLeft), right_v = commands.get(0, 0, kMcmdRight);
+        const bool left = left_v > 0, right = right_v > 0;
         float heading = 0;
         if (left != right) {
             const float k = forward != 0 ? 0.5f * (forward < 0 ? -1.f : 1.f) : 1.f;
             heading = (left ? 1.f : -1.f) * k * 1.5707963f;
-            if (forward == 0) forward = 1;
+            if (forward == 0) forward = std::max(left_v, right_v);
         }
         motion.set_attitude_offset({0, 0, heading});
         motion.set_throttle({0, forward, commands.get(0, 0, kMcmdUp) + commands.get(0, 0, kMcmdDown)});

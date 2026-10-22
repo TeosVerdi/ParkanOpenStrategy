@@ -12,7 +12,7 @@ std::uint16_t sc(const char* name) { return scan_from_name(name).value(); }
 
 // Modern layout as a substitution from the shipped keys and from their MacBook-remapped forms
 // (mac_keymap.py / apply_mac_defaults). Applied simultaneously: LSHIFT (free-look modifier) moves to
-// the middle button while `\` (full speed) moves to LSHIFT.
+// Option while `\` (cruise at full speed) moves to C; Shift becomes the sprint modifier below.
 const std::map<std::uint16_t, std::uint16_t>& modern_vehicle_map() {
     static const std::map<std::uint16_t, std::uint16_t> m = {
         {sc("SCAN_G_UP"), sc("SCAN_W")},         {sc("SCAN_G_DOWN"), sc("SCAN_S")},
@@ -20,11 +20,11 @@ const std::map<std::uint16_t, std::uint16_t>& modern_vehicle_map() {
         {sc("SCAN_COMMA"), sc("SCAN_Q")},        {sc("SCAN_DOT"), sc("SCAN_E")},
         {sc("SCAN_G_PGUP"), sc("SCAN_BLANK")},   {sc("SCAN_QUOTE"), sc("SCAN_BLANK")},
         {sc("SCAN_G_PGDN"), sc("SCAN_LCTRL")},   {sc("SCAN_SLASH"), sc("SCAN_LCTRL")},
-        {sc("SCAN_G_ASTERISK"), sc("SCAN_LSHIFT")}, {sc("SCAN_BSLASH"), sc("SCAN_LSHIFT")},
+        {sc("SCAN_G_ASTERISK"), sc("SCAN_C")},   {sc("SCAN_BSLASH"), sc("SCAN_C")},
         {sc("SCAN_G_SLASH"), sc("SCAN_X")},      {sc("SCAN_BS"), sc("SCAN_X")},
         {sc("SCAN_G_PLUS"), sc("SCAN_W_PLUS")},  {sc("SCAN_G_SUB"), sc("SCAN_W_SUB")},
         {sc("SCAN_G_5"), sc("SCAN_L")},
-        {sc("SCAN_LSHIFT"), kScanMouseMiddle},
+        {sc("SCAN_LSHIFT"), sc("SCAN_LALT")},
     };
     return m;
 }
@@ -85,6 +85,19 @@ void apply_layout(std::vector<Binding>& table, KeyLayout layout) {
         if (auto it = m.find(b.key); it != m.end()) b.key = it->second;
         if (auto it = m.find(b.modifier); it != m.end()) b.modifier = it->second;
     }
+    // Sprint: the movement keys walk at half throttle; with Shift held the same keys give the
+    // original's full value. Each movement line gets a Shift twin (press and release), so the
+    // modifier switching of CManManager (UpdateModifierBindings) changes gait while a key is held.
+    std::vector<Binding> sprint;
+    for (auto& b : table) {
+        const bool move = b.cls == 0 && (b.cmd == kMcmdWalkF || b.cmd == kMcmdWalkB || b.cmd == kMcmdLeft || b.cmd == kMcmdRight);
+        if (!move || b.device != Device::Key || b.modifier != 0) continue;
+        Binding fast = b;
+        fast.modifier = sc("SCAN_LSHIFT");
+        sprint.push_back(fast);
+        b.value *= 0.5f;
+    }
+    table.insert(table.end(), sprint.begin(), sprint.end());
 }
 
 std::optional<UiKey> ui_key(std::string_view command, KeyLayout layout) {

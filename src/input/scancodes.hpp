@@ -16,7 +16,8 @@ std::optional<std::uint16_t> scan_from_name(std::string_view name);
 std::string_view scan_name(std::uint16_t code); // empty when unnamed
 
 // USB HID keyboard usage (= SDL_Scancode) → scan code; kScanNull for keys the original cannot see
-// (Alt/Option and Command: WM_SYSKEYDOWN is ignored, and Windows keys are unbound).
+// (Command/Windows keys). Alt/Option, which the original ignored (WM_SYSKEYDOWN), maps to the
+// port-added SCAN_LALT/SCAN_RALT.
 std::uint16_t scan_from_hid(int usage);
 
 } // namespace parkan::input

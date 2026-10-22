@@ -26,6 +26,10 @@
 using namespace parkan;
 using namespace parkan::ai;
 
+// tools/ai_tests.cpp: the unit AI runtime (each returns its failure count).
+int ai_unit_tests();
+int ai_corpus_tests(const std::filesystem::path& game);
+
 namespace {
 
 int g_failures = 0;
@@ -221,7 +225,8 @@ void test_input() {
     CHECK(scan_from_hid(0x04) == 0x1e);  // A
     CHECK(scan_from_hid(0x52) == 0x148); // Up arrow: extended (gray) G_UP
     CHECK(scan_from_hid(0x4b) == 0x149); // Page Up (Fn+Up on a Mac)
-    CHECK(scan_from_hid(0xe2) == 0);     // Option: unbindable, as Alt was
+    CHECK(scan_from_hid(0xe2) == 0x038); // Option: the port-added SCAN_LALT
+    CHECK(scan_from_hid(0xe3) == 0);     // Command: unbound
     const auto t = parse_translate_table(
         "// comment\r\nKEY   SCAN_NULL SCAN_G_PGUP 1 CICLS_UNKNOWN MCMD_UP  1.0 0 0 0.0 0 // fly up\r\n"
         "Command % not implemented for device\r\n"
@@ -528,18 +533,37 @@ void test_audio_corpus(const std::filesystem::path& game) {
 // from the shipped (Num*) and the MacBook-remapped (\\) full-speed key alike, and is idempotent.
 void test_keymap() {
     using namespace parkan::input;
-    {
-        auto t = parse_translate_table("KEY SCAN_NULL SCAN_G_UP 1 CICLS_UNKNOWN MCMD_WALK_F 1.0 0 0 0.0 0\n"
-                                       "KEY SCAN_NULL SCAN_G_ASTERISK 1 CICLS_UNKNOWN MCMD_FORWARD 1.0 0 0 0.0 0\n"
-                                       "KEY SCAN_NULL SCAN_BSLASH 1 CICLS_UNKNOWN MCMD_FORWARD 1.0 0 0 0.0 0\n"
-                                       "MOUSE SCAN_LSHIFT SCAN_MOUSE_X 1 CICLS_CAMERA MCMD_ANGLE_X 0.1 1 MAN_WRAP 0.0 0\n");
-        apply_layout(t, KeyLayout::Modern);
-        CHECK(t[0].key == *scan_from_name("SCAN_W"));
-        CHECK(t[1].key == *scan_from_name("SCAN_LSHIFT") && t[2].key == *scan_from_name("SCAN_LSHIFT"));
-        CHECK(t[3].modifier == kScanMouseMiddle);
-        apply_layout(t, KeyLayout::Modern);
-        CHECK(t[1].key == *scan_from_name("SCAN_LSHIFT") && t[3].modifier == kScanMouseMiddle);
-    }
+    auto t = parse_translate_table("KEY SCAN_NULL SCAN_G_UP 1 CICLS_UNKNOWN MCMD_WALK_F 1.0 0 0 0.0 0\n"
+                                   "KEY SCAN_NULL SCAN_G_UP 0 CICLS_UNKNOWN MCMD_WALK_F 0.0 0 0 0.0 0\n"
+                                   "KEY SCAN_NULL SCAN_G_ASTERISK 1 CICLS_UNKNOWN MCMD_FORWARD 1.0 0 0 0.0 0\n"
+                                   "KEY SCAN_NULL SCAN_BSLASH 1 CICLS_UNKNOWN MCMD_FORWARD 1.0 0 0 0.0 0\n"
+                                   "MOUSE SCAN_LSHIFT SCAN_MOUSE_X 1 CICLS_CAMERA MCMD_ANGLE_X 0.1 1 MAN_WRAP 0.0 0\n");
+    apply_layout(t, KeyLayout::Modern);
+    const std::uint16_t w = *scan_from_name("SCAN_W"), shift = *scan_from_name("SCAN_LSHIFT");
+    CHECK(t.size() == 7); // the two W lines got Shift twins
+    CHECK(t[0].key == w && t[0].value == 0.5f && t[0].modifier == 0);
+    CHECK(t[5].key == w && t[5].modifier == shift && t[5].value == 1.f && t[5].on_press);
+    CHECK(t[6].key == w && t[6].modifier == shift && !t[6].on_press);
+    CHECK(t[2].key == *scan_from_name("SCAN_C") && t[3].key == *scan_from_name("SCAN_C"));
+    CHECK(t[4].modifier == *scan_from_name("SCAN_LALT"));
+    apply_layout(t, KeyLayout::Modern); // idempotent
+    CHECK(t.size() == 7 && t[0].value == 0.5f && t[4].modifier == *scan_from_name("SCAN_LALT"));
+
+    // Sprint through the binding runtime: W walks (0.5), Shift while W is held sprints (1), letting go
+    // of Shift walks again, and releasing W with Shift held stops.
+    ManManager m(t);
+    CommandState c;
+    InputEvent w_down[] = {{true, w}}, shift_down[] = {{true, shift}}, shift_up[] = {{false, shift}}, w_up[] = {{false, w}};
+    m.process(w_down, 0, 0, 16, c);
+    CHECK(c.get(0, 0, kMcmdWalkF) == 0.5f);
+    m.process(shift_down, 0, 0, 16, c);
+    CHECK(c.get(0, 0, kMcmdWalkF) == 1.f);
+    m.process(shift_up, 0, 0, 16, c);
+    CHECK(c.get(0, 0, kMcmdWalkF) == 0.5f);
+    m.process(shift_down, 0, 0, 16, c);
+    m.process(w_up, 0, 0, 16, c);
+    CHECK(c.get(0, 0, kMcmdWalkF) == 0.f);
+
     CHECK(ui_key("CMD_JAMES_OUTER_CAMERA", KeyLayout::Modern)->key == *scan_from_name("SCAN_V"));
     CHECK(ui_key("CMD_JAMES_OUTER_CAMERA", KeyLayout::Classic)->key == *scan_from_name("SCAN_C"));
     CHECK(!ui_key("CMD_NO_SUCH", KeyLayout::Modern));
@@ -547,6 +571,7 @@ void test_keymap() {
 
 void test_corpus(const std::filesystem::path& game) {
     test_unit_motion(game);
+    g_failures += ai_corpus_tests(game); // tools/ai_tests.cpp
     test_audio_corpus(game);
 
     // Tut_2's sky at 07:00 (notes/atmosphere-render.md §10): the clock starts at 01:30 and a day lasts
@@ -608,6 +633,7 @@ int main(int argc, char** argv) {
     test_man_manager();
     test_collision();
     test_audio();
+    g_failures += ai_unit_tests();
     if (argc > 1) test_corpus(argv[1]);
     std::printf(g_failures ? "%d FAILURES\n" : "all passed\n", g_failures);
     return g_failures ? 1 : 0;

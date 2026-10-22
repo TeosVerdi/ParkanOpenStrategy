@@ -13,7 +13,7 @@ namespace parkan::input {
 
 enum class KeyLayout {
     Classic, // the 2001 tables as shipped, with keys a MacBook lacks moved (apply_mac_defaults)
-    Modern,  // WASD movement (the port's default); docs/CONTROLS.md
+    Modern,  // WASD movement at half throttle, Shift sprints, Option free look (default); docs/CONTROLS.md
 };
 
 // Rebinds a vehicle table (M1/M2/HERO.TBL) for `layout`. Accepts the shipped tables and tables that

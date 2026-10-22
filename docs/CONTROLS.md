@@ -7,23 +7,28 @@ Both layouts are the original binding tables (`HERO.TBL`, `M1.TBL`, `M2.TBL`) wi
 when they load (`src/input/keymap.cpp`), so every command keeps the original's behaviour (ramps,
 one-shots, mouse smoothing). The game folder is not modified.
 
+Two port additions in the modern layout: **Option** is a bindable key (the original ignored Alt), and
+**sprint**: each movement binding walks at half its original throttle and has a Shift twin with the
+full value, so Shift switches gait while a movement key is held (the original's modifier handling).
+
 ## Driving (hero and warbots)
 
 | Action | Modern | Classic |
 |---|---|---|
-| Walk forward / back | **W / S** | ↑ / ↓ |
-| Strafe left / right | **A / D** | ← / → |
+| Walk forward / back | **W / S** (half throttle) | ↑ / ↓ (full throttle) |
+| Strafe left / right | **A / D** (half throttle) | ← / → |
+| Sprint | **hold Shift** with W/S/A/D (full throttle) | — |
 | Turn (hero) | mouse left/right | mouse left/right |
 | Turn (warbots, keyboard) | **Q / E** | `,` / `.` |
 | Up / down (flyers) | **Space / Left Ctrl** | `'` / `/` (PgUp/PgDn) |
-| Cruise: full speed | **Left Shift** | `\` (Num *) |
+| Cruise: full speed (latches) | **C** | `\` (Num *) |
 | Cruise: faster / slower | `=` / `-` | `=` / `-` (Num + / −) |
 | Cruise: stop | **X** | Backspace (Num /) |
 | Aim (barrel up/down) | mouse up/down | mouse up/down |
 | Turret left/right (warbots) | mouse left/right | mouse left/right |
 | Lock turret to the body | L | L (Num 5) |
-| Free look | **hold middle mouse** + mouse; release recentres | hold Left Shift + mouse |
-| Recentre free look | middle + right mouse | Left Shift + right mouse |
+| Free look | **hold Option** + mouse; release recentres | hold Left Shift + mouse |
+| Recentre free look | Option + right mouse | Left Shift + right mouse |
 | Fire selected weapons | left mouse | left mouse |
 | Select weapon 1–8 / all | 1–8 / 0 | 1–8 / 0 |
 | Infrared / camouflage / repair | N / H / R | N / H / R |

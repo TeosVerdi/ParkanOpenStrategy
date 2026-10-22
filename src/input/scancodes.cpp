@@ -12,6 +12,10 @@ struct Named {
 // World3D ConvertPredicScanCode names (notes/scancodes.tsv; generated). The original ScanCode2Str
 // prints SCAN_JOY_R_X for 0x252/0x253; the parser names used here are the correct ones.
 constexpr Named kNames[] = {
+    // Port additions: the original ignores WM_SYSKEYDOWN, so Alt (Option) had no name; these are its
+    // set-1 codes (left 0x38, right extended 0x138), unused by the original tables.
+    {0x038, "SCAN_LALT"},
+    {0x138, "SCAN_RALT"},
     {0x000, "SCAN_NULL"},
     {0x001, "SCAN_ESC"},
     {0x002, "SCAN_W_1"},
@@ -239,6 +243,8 @@ std::uint16_t scan_from_hid(int usage) {
     if (usage >= 0 && std::size_t(usage) < std::size(kByUsage)) name = kByUsage[usage];
     if (usage == 0xe0) name = "SCAN_LCTRL";
     if (usage == 0xe1) name = "SCAN_LSHIFT";
+    if (usage == 0xe2) name = "SCAN_LALT"; // Option (port addition)
+    if (usage == 0xe6) name = "SCAN_RALT";
     if (usage == 0xe4) name = "SCAN_RCTRL";
     if (usage == 0xe5) name = "SCAN_RSHIFT";
     if (!name) return kScanNull;
