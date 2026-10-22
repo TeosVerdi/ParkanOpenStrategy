@@ -490,13 +490,14 @@ void test_audio() {
 }
 
 void test_audio_corpus(const std::filesystem::path& game) {
-    // Every SWAV decodes (audio.md §1.2: 167 + 232 entries, all 22050 Hz).
+    // Every SWAV decodes (audio.md §1.2: 167 + 232 entries, all 22050 Hz). The English release's
+    // voices.lib has its own recordings: 234 entries, 2072 s (notes/releases.md).
     AssetLibrary lib(game);
-    int entries = 0, failed = 0;
+    int entries[2] = {}, failed = 0;
     double seconds[2] = {};
     for (int i = 0; i < 2; ++i)
         for (const auto& e : lib.archive(i ? "voices.lib" : "sounds.lib").entries()) {
-            ++entries;
+            ++entries[i];
             try {
                 const Pcm p = decode_swav(e.data);
                 if (p.rate != 22050 || !p.frames()) ++failed;
@@ -506,8 +507,9 @@ void test_audio_corpus(const std::filesystem::path& game) {
                 std::printf("  FAILED %s: %s\n", e.name.c_str(), ex.what());
             }
         }
-    CHECK(entries == 399 && failed == 0);
-    CHECK(std::abs(seconds[0] - 293) < 1 && std::abs(seconds[1] - 2580) < 1);
+    const bool english = entries[1] == 234;
+    CHECK(entries[0] == 167 && entries[1] == (english ? 234 : 232) && failed == 0);
+    CHECK(std::abs(seconds[0] - 293) < 1 && std::abs(seconds[1] - (english ? 2072 : 2580)) < 1);
     // FX sound commands: 517 in 509 effects, modes 0 ×411 / 2 ×106; one entry is missing from sounds.lib.
     int effects = 0, sounds = 0, loops = 0;
     std::set<std::string> missing;
@@ -526,7 +528,7 @@ void test_audio_corpus(const std::filesystem::path& game) {
     const auto light = load_fx_sounds(lib, "env_lightning");
     CHECK(light.size() == 1 && light[0].entry == "atm_light1.wav" && light[0].min_distance == 100.f &&
           light[0].max_distance == 1500.f && !light[0].loop());
-    std::printf("  %d SWAV entries, %.1f s + %.1f s; %d FX sounds\n", entries, seconds[0], seconds[1], sounds);
+    std::printf("  %d SWAV entries, %.1f s + %.1f s; %d FX sounds\n", entries[0] + entries[1], seconds[0], seconds[1], sounds);
 }
 
 // Layouts: the modern one moves movement to WASD and the free-look modifier to the middle button,

@@ -75,8 +75,13 @@ The target is behavioural fidelity on a modern platform.
 ## Quick start
 
 You need macOS on Apple silicon or Intel, Xcode command-line tools and
-[Homebrew](https://brew.sh), plus an installed copy of *Parkan: Iron Strategy* (the GOG Russian
-release; CrossOver or Wine is fine just to unpack it).
+[Homebrew](https://brew.sh), plus an installed copy of *Parkan: Iron Strategy* from GOG (CrossOver
+or Wine is fine just to unpack it). Both GOG releases work:
+
+| Release | GOG build | Notes |
+|---|---|---|
+| Russian | 2.0.0.4 | the reference build; the later patch (tutorial 4 fix, some research costs) |
+| English | 2.0.0.3 | translated text and voices; identical gameplay DLLs |
 
 ```sh
 brew install cmake ninja sdl3
@@ -84,7 +89,8 @@ cmake -S . -B build -G Ninja && cmake --build build
 ```
 
 The port looks for the game data in this order: the first argument, then `$PARKAN_DATA`, then the
-default CrossOver bottle path. Paths inside the data are matched case-insensitively.
+default CrossOver bottle path (`--lang en` picks the English install there). Paths inside the data
+are matched case-insensitively.
 
 ```sh
 export PARKAN_DATA="$HOME/Library/Application Support/CrossOver/Bottles/ParkanIS/drive_c/GOG Games/Parkan - Iron Strategy"
@@ -97,7 +103,7 @@ $P --view bases.rlb r_l_01.msh --state 39               # model viewer, motion s
 $P --terrain DATA/MAPS/Tut_2                             # landscape viewer
 ```
 
-Useful flags: `--classic-keys` (the 2001 layout), `--time <s>` (simulate to that time first),
+Useful flags: `--lang en`, `--classic-keys` (the 2001 layout), `--time <s>` (simulate to that time first),
 `--no-fog`, `--camera-sway` (the original's walk sway) and `--shot out.bmp` (render one frame
 off-screen and exit; this is how visual changes are checked).
 

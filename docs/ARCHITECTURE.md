@@ -66,7 +66,9 @@ offscreen to a BMP and exits, which is how visual changes get checked.
 formula and runs every event of every shipped script against a stub host.
 
 **Game data.** It comes from `argv[1]`, else `$PARKAN_DATA`, else the default CrossOver path
-`~/Library/Application Support/CrossOver/Bottles/ParkanIS/drive_c/GOG Games/Parkan - Iron Strategy`.
+`~/Library/Application Support/CrossOver/Bottles/ParkanIS/drive_c/GOG Games/Parkan - Iron Strategy`
+(Russian GOG 2.0.0.4; `--lang en`, or no Russian install, picks `… - ENG`, English 2.0.0.3). Both
+releases pass `parkan-check` and `parkan-tests`; their differences are in notes/releases.md.
 Paths inside the data are resolved case-insensitively (`core/paths`).
 
 ## Modules (original binary → port directory → spec)

@@ -11,6 +11,7 @@
 //                                                   mission scene: terrain, placed objects, sky, lighting
 //   parkan --sound <lib> <entry> [<game dir>]                         play one sample (e.g. sounds.lib i_button.wav)
 //   parkan --music <n> [<game dir>]                                   play CD index n (MUSIC/Track{n+1:02}.ogg)
+//   --lang en                                       use the English GOG install when no game dir is given
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
@@ -33,12 +34,17 @@
 
 namespace {
 
-// Data directory: the positional argument, else $PARKAN_DATA, else the GOG install inside CrossOver.
-std::filesystem::path default_game_dir() {
+// Data directory: the positional argument, else $PARKAN_DATA, else a GOG install inside CrossOver:
+// the Russian release (2.0.0.4), or the English one (2.0.0.3) with `--lang en` or when it is the only
+// one installed (notes/releases.md).
+std::filesystem::path default_game_dir(bool english) {
     if (const char* env = std::getenv("PARKAN_DATA")) return env;
     const char* home = std::getenv("HOME");
-    return std::filesystem::path(home ? home : "") /
-           "Library/Application Support/CrossOver/Bottles/ParkanIS/drive_c/GOG Games/Parkan - Iron Strategy";
+    const auto gog = std::filesystem::path(home ? home : "") / "Library/Application Support/CrossOver/Bottles/ParkanIS/drive_c/GOG Games";
+    const auto ru = gog / "Parkan - Iron Strategy", en = gog / "Parkan - Iron Strategy - ENG";
+    if (english) return en;
+    std::error_code ec;
+    return !std::filesystem::exists(ru, ec) && std::filesystem::exists(en, ec) ? en : ru;
 }
 
 int run_placeholder() {
@@ -98,7 +104,8 @@ int run_audio(const std::filesystem::path& game, const std::string& lib_name, co
 } // namespace
 
 int main(int argc, char** argv) {
-    std::filesystem::path game = default_game_dir();
+    std::filesystem::path game;
+    bool english = false;
     std::string view_archive, view_mesh, unit, terrain, mission, shot;
     double start_time = 0;
     int start_state = 0;
@@ -145,10 +152,13 @@ int main(int argc, char** argv) {
             start_time = std::atof(argv[++i]);
         } else if (a == "--shot" && i + 1 < argc) {
             shot = argv[++i];
+        } else if (a == "--lang" && i + 1 < argc) {
+            english = std::string_view(argv[++i]) == "en";
         } else {
             game = a;
         }
     }
+    if (game.empty()) game = default_game_dir(english);
     if (!parkan::resolve_path(game, "MISSIONS")) {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Parkan",
                                  ("Game data not found in:\n" + game.string() +
