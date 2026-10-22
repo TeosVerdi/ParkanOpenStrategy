@@ -18,6 +18,7 @@
 #include "res/nres.hpp"
 #include "res/swav.hpp"
 #include "res/terrain.hpp"
+#include "res/textres.hpp"
 #include "res/landmap.hpp"
 #include "ai/pathfind.hpp"
 #include "world/ground.hpp"
@@ -425,6 +426,31 @@ int check_ground(const fs::path& game) {
     return bad_maps;
 }
 
+// TextRes.dll's string tables (the game's Russian text).
+int check_textres(const fs::path& game) {
+    auto p = resolve_path(game, "DATA/TextRes.dll");
+    if (!p) {
+        std::printf("textres: TextRes.dll missing\n");
+        return 1;
+    }
+    try {
+        TextRes t = TextRes::from_pe(read_file(*p));
+        if (auto cfg = resolve_path(game, "DATA/TextRes.cfg")) {
+            const Bytes b = read_file(*cfg);
+            t.load_names({reinterpret_cast<const char*>(b.data()), b.size()});
+        }
+        if (t.get(std::string_view("MIS_OBJ")).empty()) throw std::runtime_error("MIS_OBJ not resolved through TextRes.cfg");
+        std::size_t bytes = 0;
+        for (const auto& [id, s] : t.all()) bytes += s.size();
+        std::printf("textres: %zu strings (ids %u..%u), %zu UTF-8 bytes\n", t.size(), t.all().begin()->first,
+                    t.all().rbegin()->first, bytes);
+        return t.size() ? 0 : 1;
+    } catch (const std::exception& ex) {
+        std::printf("textres: FAIL %s\n", ex.what());
+        return 1;
+    }
+}
+
 // The vehicle-control binding tables parse with every name known.
 int check_bindings(const fs::path& game) {
     int failed = 0;
@@ -456,7 +482,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     fs::path game = argv[1];
-    int bad = check_scripts(game) + check_research(game) + check_missions(game) + check_schemes(game) + check_bindings(game) + check_ground(game) + check_landmaps(game) +
+    int bad = check_scripts(game) + check_research(game) + check_missions(game) + check_schemes(game) + check_bindings(game) + check_ground(game) + check_textres(game) + check_landmaps(game) +
               check_assets(game) + check_audio(game);
     return bad ? 1 : 0;
 }

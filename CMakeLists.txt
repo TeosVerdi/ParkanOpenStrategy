@@ -17,6 +17,7 @@ add_library(parkan_core STATIC
   src/res/mesh.cpp
   src/res/material.cpp
   src/res/library.cpp
+  src/res/textres.cpp
   src/res/ctld.cpp
   src/res/swav.cpp
   src/res/fx.cpp
