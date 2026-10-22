@@ -18,6 +18,8 @@ add_library(parkan_core STATIC
   src/res/material.cpp
   src/res/library.cpp
   src/res/textres.cpp
+  src/res/tft.cpp
+  src/ui/hud_text.cpp
   src/res/ctld.cpp
   src/res/swav.cpp
   src/res/fx.cpp

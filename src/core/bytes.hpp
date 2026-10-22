@@ -73,5 +73,7 @@ std::string_view cstr_at(std::span<const std::uint8_t> pool, std::size_t off);
 
 // Windows-1251 (the game's text encoding) to UTF-8.
 std::string cp1251_to_utf8(std::string_view s);
+// UTF-8 to Windows-1251 (for the game's fonts, indexed by cp1251 byte); unmappable characters become '?'.
+std::string utf8_to_cp1251(std::string_view s);
 
 } // namespace parkan

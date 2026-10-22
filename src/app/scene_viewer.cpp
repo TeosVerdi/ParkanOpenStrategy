@@ -105,6 +105,7 @@ struct Gpu {
     SDL_GPUBuffer* vbuf = nullptr;
     SDL_GPUBuffer* ibuf = nullptr;
     SDL_GPUSampler* sampler = nullptr;
+    SDL_GPUSampler* sampler_point = nullptr; // overlay: bitmap fonts stay sharp when scaled
     SDL_GPUTexture* white = nullptr;
     SDL_GPUTexture* depth = nullptr;
     Uint32 depth_w = 0, depth_h = 0;
@@ -262,6 +263,11 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
         si.max_lod = 16;
         si.address_mode_u = si.address_mode_v = si.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
         g.sampler = SDL_CreateGPUSampler(g.device, &si);
+        si.min_filter = si.mag_filter = SDL_GPU_FILTER_NEAREST;
+        si.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+        si.max_lod = 0;
+        si.address_mode_u = si.address_mode_v = si.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        g.sampler_point = SDL_CreateGPUSampler(g.device, &si);
         const Uint32 white = 0xFFFFFFFF;
         g.white = make_texture(g.device, 1, 1, &white);
     }
@@ -491,7 +497,7 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
                 const FragUniforms fu{{0, 0, 1, 0}, {1, 0, 0, 0}, {1, 1, 1, 1}, {0, 0, 0, 1}};
                 SDL_PushGPUFragmentUniformData(cb, 0, &fu, sizeof fu);
                 SDL_GPUTexture* t = tex >= 0 && std::size_t(tex) < g.overlay_tex.size() ? g.overlay_tex[std::size_t(tex)] : g.white;
-                SDL_GPUTextureSamplerBinding tb[2] = {{t, g.sampler}, {g.white, g.sampler}};
+                SDL_GPUTextureSamplerBinding tb[2] = {{t, g.sampler_point}, {g.white, g.sampler_point}};
                 SDL_BindGPUFragmentSamplers(rp, 0, tb, 2);
                 SDL_DrawGPUPrimitives(rp, count, 1, first, 0);
                 first += count;
@@ -596,6 +602,7 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
     if (g.depth) SDL_ReleaseGPUTexture(g.device, g.depth);
     SDL_ReleaseGPUTexture(g.device, g.white);
     SDL_ReleaseGPUSampler(g.device, g.sampler);
+    SDL_ReleaseGPUSampler(g.device, g.sampler_point);
     SDL_ReleaseGPUGraphicsPipeline(g.device, g.pipeline);
     SDL_ReleaseGPUGraphicsPipeline(g.device, g.pipeline_blend);
     SDL_ReleaseGPUGraphicsPipeline(g.device, g.pipeline_sky);

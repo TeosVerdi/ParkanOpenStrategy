@@ -44,7 +44,7 @@ full value, so Shift switches gait while a movement key is held (the original's 
 | Autopilot | **P** | A |
 | Wingman menu | `` ` `` | `` ` `` |
 | Satellite map, map transparency | M, `[` `]` | M, `[` `]` |
-| Mission objectives | **O** | F12 |
+| Mission objectives (live in `--play`) | **O** | F12 |
 | Quick save / load | **F5 / F9** | F7 / F8 |
 | Chat terminal / new message | F4 / **Y** | F4 / F5 |
 | Help, pager, game menu | F1, F2, F3 | F1, F2, F3 |

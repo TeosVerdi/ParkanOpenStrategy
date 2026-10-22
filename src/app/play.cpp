@@ -19,6 +19,12 @@
 #include "ai/ai_unit.hpp"
 #include "res/landmap.hpp"
 #include "world/ground.hpp"
+#include "game/mission_runtime.hpp"
+#include "res/textres.hpp"
+#include "res/tft.hpp"
+#include "ui/hud_text.hpp"
+
+#include <set>
 
 #include <algorithm>
 #include <cfloat>
@@ -44,6 +50,39 @@ std::optional<std::size_t> find_hero(const mission::Tma& t) {
     for (std::size_t i = 0; i < t.objects.size(); ++i)
         if (contains_ci(t.objects[i].resource, "\\HERO\\") && contains_ci(t.objects[i].resource, ".dat")) return i;
     return std::nullopt;
+}
+
+// The script world's handle on a live unit: orders go to its brain; the player's hero takes none.
+class UnitAdapter final : public game::UnitControl {
+public:
+    UnitAdapter(const LiveUnit& unit, ai::AiUnit* brain) : unit_(unit), brain_(brain) {}
+    bool give_order(const game::UnitOrder& o, int mode) override {
+        if (!brain_) return false;
+        // ai::Order has no LogicID target yet: attack/follow/enter orders arrive without their target.
+        brain_->give_order({o.type, float(o.param), o.target_kind, o.place}, mode);
+        return true;
+    }
+    std::uint32_t current_order() const override { return brain_ ? brain_->current_order() : 0; }
+    Vec3 position() const override { return unit_.position(); }
+    float speed() const override { return brain_ ? brain_->walker().max_speed : 0; }
+
+private:
+    const LiveUnit& unit_;
+    ai::AiUnit* brain_;
+};
+
+// The key bound to a UI command, as the in-game text names it (the SCAN_ name without its prefix).
+std::string key_label(std::string_view command, input::KeyLayout layout) {
+    const auto k = input::ui_key(command, layout);
+    if (!k) return "?";
+    std::string_view n = input::scan_name(k->key);
+    if (n.starts_with("SCAN_")) n.remove_prefix(5);
+    return std::string(n);
+}
+
+std::string with_key(std::string text, const std::string& key) {
+    if (auto p = text.find("%s"); p != std::string::npos) text.replace(p, 2, key);
+    return text;
 }
 
 } // namespace
@@ -116,13 +155,6 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         }
     }
 
-    // The hero chassis root's rest rotation (its static-pose key), for the camera stabilisation.
-    Mat4 root_rest = Mat4::identity();
-    {
-        const NodePose p = sample_node(hero.model.parts.front().model.mesh, 0, -1);
-        root_rest = Mat4::rotation(p.rot.conjugate()); // AniMesh's local matrix rotates by the conjugate
-    }
-
     // Sound (notes/audio.md): in a mission a random track plays once, then a different random one; the
     // listener is the rendered camera. Not started for --shot.
     std::unique_ptr<audio::AudioEngine> sound;
@@ -132,6 +164,118 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         else sound->play_random_music(false);
     }
     std::size_t footsteps = 0;
+
+    // The mission's strategy layer (notes/script-vm.md): one SuperAI per clan running the clan's script;
+    // its orders reach the brains through UnitAdapter, its messages and objectives the HUD below.
+    std::unique_ptr<game::MissionRuntime> runtime;
+    std::vector<std::unique_ptr<UnitAdapter>> adapters;
+    try {
+        runtime = game::MissionRuntime::load(lib.game_dir(), opt.mission);
+    } catch (const std::exception& ex) {
+        SDL_Log("play: no mission scripts (%s)", ex.what());
+    }
+    if (runtime) {
+        runtime->world().map_max_x = ground.bounds_max().x, runtime->world().map_max_y = ground.bounds_max().y;
+        for (std::size_t i = 0; i < live.size(); ++i) {
+            adapters.push_back(std::make_unique<UnitAdapter>(*live[i], brains[i].get()));
+            runtime->world().attach(live[i]->placement->identity, adapters.back().get());
+        }
+    }
+
+    // In-mission text (notes/rsli-font.md §3): mission texts from TextRes, the HUD's own strings from
+    // iron3d.dll's string table; both are drawn in the game's fonts by cp1251 byte.
+    TextRes texts, ui_strings;
+    if (auto p = resolve_path(lib.game_dir(), "DATA/TextRes.dll")) texts = TextRes::from_pe(read_file(*p));
+    if (auto p = resolve_path(lib.game_dir(), "DATA/TextRes.cfg")) {
+        const Bytes b = read_file(*p);
+        texts.load_names({reinterpret_cast<const char*>(b.data()), b.size()});
+    }
+    if (auto p = resolve_path(lib.game_dir(), "iron3d.dll")) ui_strings = TextRes::from_pe(read_file(*p));
+    auto ui_text = [&](std::uint32_t id) { return utf8_to_cp1251(ui_strings.get(id)); };
+    // Fonts: GAME_FONT (gf_*) for the pager, MENU_FONT (mf_*) for the objectives; one set per resolution.
+    struct FontSet {
+        int size;
+        TftFont game, menu;
+    };
+    std::vector<FontSet> font_sets;
+    std::vector<ModelTexture> font_textures;
+    for (int size : {640, 800, 1024}) {
+        try {
+            const auto& a = lib.archive("UI/font.lib");
+            const NResEntry *g = a.find_name("gf_" + std::to_string(size) + ".tft"), *m = a.find_name("mf_" + std::to_string(size) + ".tft");
+            if (!g || !m) continue;
+            font_sets.push_back({size, decode_tft(g->data), decode_tft(m->data)});
+            for (const TftFont* f : {&font_sets.back().game, &font_sets.back().menu})
+                font_textures.push_back({"font", f->atlas_width, f->atlas_height, f->rgba});
+        } catch (const std::exception& ex) {
+            SDL_Log("play: fonts: %s", ex.what());
+            break;
+        }
+    }
+    // Message sources: messages.cfg (`info_system` picks the header) and the voice table, which maps a
+    // voice key to a voices.lib entry in mission.cfg's resource objects.
+    std::set<std::uint32_t> info_messages;
+    std::map<std::string, std::string> voice_entries;
+    if (auto p = resolve_path(*dir, "messages.cfg")) {
+        const Bytes b = read_file(*p);
+        for (const auto& o : game::parse_cfg({reinterpret_cast<const char*>(b.data()), b.size()})) {
+            const std::string *idx = o.get("message_index"), *info = o.get("info_system");
+            if (idx && info && *info == "true") info_messages.insert(std::uint32_t(std::atoi(idx->c_str())));
+        }
+    }
+    if (auto p = resolve_path(*dir, "mission.cfg")) {
+        const Bytes b = read_file(*p);
+        for (const auto& o : game::parse_cfg({reinterpret_cast<const char*>(b.data()), b.size()}))
+            if (const std::string* l = o.get("library"); l && contains_ci(*l, "voices.lib"))
+                for (const auto& [k, v] : o.entries) voice_entries[k] = v;
+    }
+    std::optional<ui::PagerMessage> pager;
+    std::set<std::uint32_t> messages_seen;
+    bool objectives_visible = false;
+    double objectives_shown_ms = 0;
+    bool objectives_auto_hide = false;
+    const std::string help_key = key_label("CMD_HELP", opt.layout), objectives_key = key_label("CMD_JAMES_MISSION_OBJ", opt.layout);
+    double sim_ms = 0;
+    if (runtime) {
+        runtime->set_event_sink([&](const game::MissionEvent& e) {
+            SDL_Log("play: %.1f s clan %u: %s %u %s", sim_ms / 1000, e.clan, game::to_string(e.type), e.id, e.text.c_str());
+            using T = game::MissionEvent::Type;
+            if (e.type == T::Message) {
+                // ShowScriptMessageByIndex: the first showing has the text and its voice; a repeat says
+                // "you already received this message" (6170) with the pager-log footer (6223).
+                const auto& msgs = runtime->config().messages;
+                const auto it = msgs.find(e.id);
+                ui::PagerMessage m;
+                m.header = ui_text(info_messages.count(e.id) ? 6214 : 3057);
+                m.more_footer = with_key(ui_text(6208), help_key);
+                if (messages_seen.insert(e.id).second) {
+                    m.body = it != msgs.end() ? utf8_to_cp1251(texts.get(std::string_view(it->second.text_resource))) : std::string();
+                    if (sound && it != msgs.end())
+                        if (auto v = voice_entries.find(it->second.voice_resource); v != voice_entries.end())
+                            sound->play({"voices.lib", v->second});
+                } else {
+                    m.body = ui_text(6170) + "\n" + with_key(ui_text(6223), help_key);
+                }
+                m.shown_ms = sim_ms;
+                pager = std::move(m);
+            } else if (e.type == T::ObjectiveComplete || e.type == T::ObjectiveFailed) {
+                // PostComputerPagerText: "from: the central computer" with 5040 / 5041.
+                pager = ui::PagerMessage{ui_text(1541), ui_text(e.type == T::ObjectiveComplete ? 5040 : 5041), {}, sim_ms};
+            } else if (e.type == T::MissionComplete || e.type == T::MissionFailed) {
+                objectives_visible = true, objectives_auto_hide = false; // the end screens are not ported yet
+            }
+        });
+        // Assumed: initGame shows the objectives at the start and lets them hide after 7 s.
+        objectives_visible = !runtime->config().primary_objectives.empty(), objectives_auto_hide = true;
+    }
+
+    // The hero chassis root's rest rotation (its static-pose key), for the camera stabilisation.
+    Mat4 root_rest = Mat4::identity();
+    {
+        const NodePose p = sample_node(hero.model.parts.front().model.mesh, 0, -1);
+        root_rest = Mat4::rotation(p.rot.conjugate()); // AniMesh's local matrix rotates by the conjugate
+    }
+
 
     // Input: the hero is driven through HERO.TBL (iron3d loads it for the hero; warbots use M1/M2),
     // rebound to the chosen layout (docs/CONTROLS.md).
@@ -146,7 +290,6 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     std::vector<input::InputEvent> events;
     float mouse_dx = 0, mouse_dy = 0;
 
-    double sim_ms = 0;
     float last_angle_z = 0.5f;
     // Cameras: 0 = TURRET view (first person, the default), 1..4 = OUTER presets (JAMES_OUTER_CAMERA
     // cycles them: V modern, C classic), -1 = the port's debug orbit (F10).
@@ -178,6 +321,11 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 outer_preset = (outer_preset + 1) % 5;
                 if (outer_preset != 0) camera_mode = 1;
                 outer_blend_start = sim_ms;
+            }
+            const auto obj_key = input::ui_key("CMD_JAMES_MISSION_OBJ", opt.layout);
+            if (ev.type == SDL_EVENT_KEY_DOWN && obj_key && input::scan_from_hid(int(ev.key.scancode)) == obj_key->key) {
+                objectives_visible = !objectives_visible; // JAMES_MISSION_OBJ toggles; no auto-hide then
+                objectives_auto_hide = false;
             }
             if (ev.type == SDL_EVENT_KEY_DOWN && ev.key.scancode == SDL_SCANCODE_F10) // port debug orbit
                 camera_mode = camera_mode < 0 ? 0 : -1;
@@ -241,6 +389,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (u.get() == &hero && dot(push, push) > 0) ++pushed_steps;
         }
         collide_units(live_ptrs, float(sim_ms));
+        if (runtime) runtime->update(std::uint32_t(sim_ms));
         // Footsteps: a touch-down starts its step effect (step_h* by surface; the default surface's
         // entry until surfaces are decoded); the effect's sound commands play at the foot.
         for (auto& u : live)
@@ -331,6 +480,36 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (sound) sound->set_listener(cam.eye, fwd, up);
         }
         return true;
+    };
+
+    // HUD text. Positions are in the 640×480 virtual screen; the font set is chosen by the window's size
+    // in points and its glyphs scaled by the pixel density (ui/hud_text.hpp).
+    vo.overlay_textures = std::move(font_textures);
+    vo.overlay = [&](OverlayFrame& f) {
+        if (font_sets.empty()) return;
+        const ui::VirtualScreen vs{float(f.width), float(f.height), f.scale};
+        const int want = ui::nearest_font_set(float(f.width) / f.scale, float(f.height) / f.scale);
+        std::size_t k = 0;
+        while (k + 1 < font_sets.size() && font_sets[k].size != want) ++k;
+        const ui::HudFont game_font{&font_sets[k].game, std::int32_t(2 * k)}, menu_font{&font_sets[k].menu, std::int32_t(2 * k + 1)};
+        if (pager && sim_ms - pager->shown_ms >= ui::kPagerLifetimeMs) pager.reset();
+        if (objectives_visible && objectives_auto_hide && sim_ms - objectives_shown_ms >= ui::kObjectivesAutoHideMs)
+            objectives_visible = false;
+        if (pager) ui::draw_pager(f, vs, game_font, *pager);
+        if (objectives_visible && runtime) {
+            ui::ObjectivesScreen o;
+            o.title = ui_text(3062), o.bonus_title = ui_text(3061), o.footer = with_key(ui_text(1017), objectives_key);
+            o.state_word[0] = ui_text(1014), o.state_word[1] = ui_text(1027), o.state_word[2] = ui_text(1015);
+            const auto& cfg = runtime->config();
+            const auto& st = runtime->objectives();
+            for (std::size_t i = 0; i < cfg.primary_objectives.size(); ++i)
+                o.primary.push_back({utf8_to_cp1251(cfg.primary_objectives[i]), i < st.size() ? st[i] : 0});
+            for (std::size_t i = 0; i < cfg.bonus_objectives.size(); ++i) {
+                const std::size_t j = cfg.primary_objectives.size() + i;
+                o.bonus.push_back({utf8_to_cp1251(cfg.bonus_objectives[i]), j < st.size() ? st[j] : 0});
+            }
+            ui::draw_objectives(f, vs, menu_font, o);
+        }
     };
 
     // Sky and lighting of the mission.

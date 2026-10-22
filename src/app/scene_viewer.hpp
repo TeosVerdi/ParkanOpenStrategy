@@ -4,6 +4,7 @@
 
 #include "scene/render_mesh.hpp"
 #include "scene/sky.hpp"
+#include "ui/overlay.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -16,19 +17,6 @@ struct SkyFrame {
     SceneLighting lighting;
     Vec3 cloud_color{1, 1, 1};
     double ms = 0; // sky clock (UV scrolling)
-};
-
-// Screen-space 2D drawing (HUD, text), in pixels from the top-left corner of the drawable.
-struct OverlayQuad {
-    float x0, y0, x1, y1;
-    float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
-    std::uint8_t rgba[4] = {255, 255, 255, 255};
-    std::int32_t texture = -1; // into ViewerOptions::overlay_textures; -1 = solid colour
-};
-struct OverlayFrame {
-    std::uint32_t width = 0, height = 0; // drawable size in pixels
-    float scale = 1;                     // pixels per point (Retina: 2)
-    std::vector<OverlayQuad> quads;      // drawn in order, alpha-blended
 };
 
 struct ViewerOptions {

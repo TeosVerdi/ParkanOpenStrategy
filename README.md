@@ -18,12 +18,13 @@ rebuilt from a full decompilation of the original Windows binaries, running nati
 </tr>
 <tr>
 <td><img src="docs/images/warbot.jpg" alt="A unit design assembled from its scheme: chassis, turret and twin guns"></td>
-<td><img src="docs/images/terrain.jpg" alt="The Tut_2 landscape with the original terrain shading"></td>
+<td><img src="docs/images/objectives.jpg" alt="Tut_2 in English: the instructor's message and the objectives screen in the game's own font"></td>
 </tr>
 </table>
 
 <sub>Rendered by the port from the original GOG data: cockpit view in Campaign 0, a Campaign 2 sky,
-a warbot assembled from its <code>.dat</code> design, and the Tut_2 landscape.</sub>
+a warbot assembled from its <code>.dat</code> design, and Tut_2's first message and objectives
+(English release).</sub>
 
 </div>
 
@@ -51,8 +52,9 @@ The target is behavioural fidelity on a modern platform.
 
 ## Status
 
-> Early but playable: you can walk the hero around every campaign map while the computer-controlled
-> units go about their business. There are no weapons, no HUD and no base building yet.
+> Early but playable: you can walk the hero around every campaign map while enemy clans run their
+> mission scripts and order their robots around. Tutorials talk to you and track objectives. There
+> are no weapons, no combat HUD and no base building yet.
 
 | Area | State |
 |---|---|
@@ -67,8 +69,8 @@ The target is behavioural fidelity on a modern platform.
 | Input: the original binding tables plus a modern WASD layout | ✅ ([controls](docs/CONTROLS.md)) |
 | Audio: 399 sounds, effects, 3D positioning, the CD soundtrack | ✅ |
 | Unit AI: path search, walker, pilots, animal migration | 🟡 movement only; no attack or follow yet |
-| Mission scripts (script VM, 73 handlers, strategist AI per clan) | 🟡 VM and formulas done; handlers in progress |
-| Game text (TextRes, 172 Russian strings) | ✅ loaded · 🟡 game font and on-screen text in progress |
+| Mission scripts: script VM, a strategist AI per clan, 73 handlers | 🟡 61 handlers; enemy clans give patrol and move orders, tutorials send messages and objectives |
+| Game text in the game's fonts: message panel, objectives screen (Russian and English) | ✅ |
 | Weapons, damage, HUD, base building, research UI, menus | ⬜ not started |
 | Multiplayer (DirectPlay) | ⬜ partly mapped in Ghidra, not ported |
 
@@ -167,18 +169,18 @@ place in the code.
 | `AniMesh`, `Control` | `src/scene/model`, `src/control/` | skeletal sampling, motion graphs, unit physics, turrets |
 | `World3D` | `src/world/` | live units, ground probe, collisions |
 | `ArealMap`, `Behavior`, `Wizard` | `src/ai/` | areas and path search, walkers, pilots, unit behaviour |
-| `ai` | `src/ai/script_*`, `formula` | the mission script VM and formula compiler |
+| `ai` | `src/ai/script_*`, `formula`, `src/game/` | the mission script VM, the clan strategist (SuperAI), the world model |
 | `MisLoad` | `src/mission/` | missions (TMA), unit schemes, research tree, skies |
 | `Joystick`, `World3D` input | `src/input/` | scan codes, binding tables, man-manager rules, keymaps |
 | Ngi32 sound | `src/audio/` | SDL3 mixer, 3D sound, effects, Ogg music |
-| `iron3d` | `src/app/` | play mode, viewers (game shell to come) |
+| `iron3d` | `src/app/`, `src/ui/` | play mode, viewers, the message panel and objectives screen |
 
 `parkan_core` holds everything except the platform layer and contains no SDL. The renderer uses
 SDL_GPU with Metal shaders. More detail is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ```
 port/
-├── src/            engine: core, res, mission, scene, control, world, ai, input, audio, app
+├── src/            engine: core, res, mission, scene, control, world, ai, game, input, audio, ui, app
 ├── tools/          parkan-check (corpus), parkan-tests, parkan-dump (inspect any resource)
 ├── docs/           ARCHITECTURE.md, CONTROLS.md, images/
 └── third_party/    stb_vorbis (public domain)

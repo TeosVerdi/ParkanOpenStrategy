@@ -14,6 +14,8 @@
 #include "res/fx.hpp"
 #include "res/library.hpp"
 #include "res/swav.hpp"
+#include "res/tft.hpp"
+#include "ui/hud_text.hpp"
 #include "scene/model.hpp"
 
 #include <cmath>
@@ -574,7 +576,43 @@ void test_keymap() {
     CHECK(!ui_key("CMD_NO_SUCH", KeyLayout::Modern));
 }
 
+void test_text() {
+    // cp1251 round trip, the encoding the game fonts are indexed by.
+    const std::string ru = "\xc7\xe0\xe4\xe0\xf7\xe0 \xb8 \xb9 ok"; // "Задача ё № ok"
+    CHECK(utf8_to_cp1251(cp1251_to_utf8(ru)) == ru);
+    CHECK(utf8_to_cp1251("\xe2\x82\xac") == "\x88"); // € → 0x88
+    CHECK(utf8_to_cp1251("\xe4\xb8\xad") == "?");     // no cp1251 code
+    // WrapTextToLines on a font whose every glyph is 5 wide with spacing 1 (6 px per character).
+    TftFont f;
+    for (auto& g : f.glyphs) g.w = 5;
+    f.spacing = 1;
+    const ui::VirtualScreen vs;
+    const auto lines = ui::wrap_text(vs, f, "aaa bbb ccc\ndd", 6 * 7);
+    CHECK(lines.size() == 3 && lines[0] == "aaa bbb" && lines[1] == "ccc" && lines[2] == "dd");
+    CHECK(ui::nearest_font_set(1024, 768) == 1024 && ui::nearest_font_set(700, 500) == 640 && ui::nearest_font_set(2048, 1536) == 1024);
+}
+
+void test_fonts_corpus(const std::filesystem::path& game) {
+    // ui/font.lib (notes/rsli-font.md §2.4): GAME/TOOL/MENU_FONT × 640/800/1024, spacing 1, 165 glyphs.
+    AssetLibrary lib(game);
+    const auto& a = lib.archive("UI/font.lib");
+    int fonts = 0;
+    for (const auto& e : a.entries()) {
+        const TftFont f = decode_tft(e.data);
+        ++fonts;
+        int drawn = 0;
+        for (const auto& g : f.glyphs) drawn += !(g.u0 == 0 && g.v0 == 0 && g.u1 < 0.001f);
+        CHECK(f.spacing == 1 && drawn == 165);
+        CHECK(e.data.size() == 0x1034 + 1024 + std::size_t(f.atlas_width) * f.atlas_height);
+        CHECK(std::abs(f.v_height - float(f.height + 1) / float(f.atlas_height)) < 1e-6f);
+    }
+    CHECK(fonts == 9);
+    const TftFont gf = decode_tft(a.find_name("gf_1024.tft")->data), mf = decode_tft(a.find_name("mf_1024.tft")->data);
+    CHECK(gf.max_width == 13 && gf.height == 11 && mf.max_width == 18 && mf.height == 19);
+}
+
 void test_corpus(const std::filesystem::path& game) {
+    test_fonts_corpus(game);
     test_unit_motion(game);
     g_failures += ai_corpus_tests(game); // tools/ai_tests.cpp
     g_failures += game_corpus_tests(game); // tools/game_tests.cpp
@@ -639,6 +677,7 @@ int main(int argc, char** argv) {
     test_man_manager();
     test_collision();
     test_audio();
+    test_text();
     g_failures += ai_unit_tests();
     g_failures += game_unit_tests();
     if (argc > 1) test_corpus(argv[1]);

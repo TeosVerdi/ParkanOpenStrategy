@@ -82,7 +82,8 @@ Paths inside the data are resolved case-insensitively (`core/paths`).
 | Terrain | `res/terrain` (Land.msh), `scene/render_mesh`; atmosphere/sky to do | FParkan tomes/04-world, 05-render | LOD0 renders |
 | AniMesh, Control | `scene/model` (static pose) → `anim/` motion graph, mover | control-physics.md, formats-wea-cpt-ndp.md | static models render |
 | Behavior | `behavior/` unit brains, orders, tasks | behaviour-data.md | — |
-| ai | `ai/` SuperAI, script VM | script-vm.md, script-handlers-a/b.md | loader, formulas, interpreter done; handlers (`ScriptHost`) to do |
+| ai | `ai/` script VM; `game/` world model, SuperAI per clan, MissionRuntime | script-vm.md, script-handlers-a/b.md | VM done; 61/73 handlers, 12 neutral (super_ai.hpp); wired into play |
+| iron3d HUD text | `res/tft`, `ui/hud_text` (pager, objectives screen) | rsli-font.md | done for the pager and objectives; frame art inferred |
 | MisLoad, ArealMap | `mission/` TMA, research | research-tree.md, mission-data.md, FParkan tma | TMA, schemes + research done; missions render |
 | iron3d | `game/`, `shell/` | ui-shell.md | — |
 
