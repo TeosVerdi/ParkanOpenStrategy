@@ -69,6 +69,14 @@ Vec3 LiveUnit::settle(float now_ms, const TerrainGround& ground, const StaticCol
         auto g = ground.probe(p);
         dz = g ? g->z - p.z : 0.f;
     }
+    if (!(motion->live().flags & 4)) {
+        // Flyers (state flag 4 clear): FollowGround only keeps a minimum clearance above the ground
+        // (its constant is not resolved; 1 m, as in tools/ai_tests.cpp).
+        const Vec3 p = translation(f.matrix);
+        auto g = ground.probe(p + Vec3{0, 0, 1000}, 2000.f);
+        dz = g ? std::max(0.f, g->z + 1.f - p.z) : 0.f;
+        clearance.clear();
+    }
     motion->apply_offset({0, 0, dz});
     // Touch-downs: a constraint flagged 0x1000 says the foot ends this motion step on the ground. When
     // the previous step's constraint did not (the foot was lifted), the foot lands during this step and

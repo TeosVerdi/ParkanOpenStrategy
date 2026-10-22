@@ -16,6 +16,8 @@
 #include "scene/sky.hpp"
 #include "world/collision.hpp"
 #include "world/live_unit.hpp"
+#include "ai/ai_unit.hpp"
+#include "res/landmap.hpp"
 #include "world/ground.hpp"
 
 #include <algorithm>
@@ -85,6 +87,35 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     UnitMotion& motion = *hero.motion;
     std::vector<LiveUnit*> live_ptrs;
     for (auto& u : live) live_ptrs.push_back(u.get());
+    // Computer-controlled units (notes/unit-ai-runtime.md): every live unit but the hero gets a brain.
+    // Animals migrate in their clan's areals (data.tma mode-0 clans); other units hold until ordered.
+    LandMap land_map;
+    if (auto lm = resolve_path(lib.game_dir(), map_dir + "/Land.map")) land_map = decode_landmap(read_file(*lm));
+    land_map.set_bounds(ground.bounds_min().x, ground.bounds_min().y, ground.bounds_max().x, ground.bounds_max().y);
+    const ai::ArealGraph graph = ai::ArealGraph::build(land_map);
+    ai::MsvcRand rng{1}; // the CRT's rand(), shared by every brain
+    std::vector<std::unique_ptr<ai::ClanMigration>> migrations(tma.clans.size());
+    std::vector<std::unique_ptr<ai::AiUnit>> brains(live.size());
+    for (std::size_t i = 0; i < live.size(); ++i) {
+        if (i == hero_slot) continue;
+        const mission::TmaObject& o = *live[i]->placement;
+        const bool animal = contains_ci(o.resource, "\\ANIMAL\\");
+        // Animals are flyers here (chas_fly: CanFly 1, WalkChassis 0; their chassis sheets are not
+        // traced — tools/ai_tests.cpp), robots walk.
+        ai::AiUnitConfig cfg;
+        if (animal) cfg = {true, false, true};
+        brains[i] = std::make_unique<ai::AiUnit>(*live[i]->motion, land_map, graph, [&rng] { return rng(); }, cfg);
+        brains[i]->set_ground_height([&ground](float x, float y) {
+            auto g = ground.probe({x, y, 1000}, 2000.f);
+            return g ? g->z : 0.f;
+        });
+        if (animal && o.ai_index < tma.clans.size() && !tma.clans[o.ai_index].spatial.empty()) {
+            auto& mig = migrations[o.ai_index];
+            if (!mig) mig = std::make_unique<ai::ClanMigration>(ai::ClanMigration{tma.clans[o.ai_index].spatial, {}, -1});
+            brains[i]->set_migration(mig.get());
+        }
+    }
+
     // The hero chassis root's rest rotation (its static-pose key), for the camera stabilisation.
     Mat4 root_rest = Mat4::identity();
     {
@@ -201,7 +232,10 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             motion.set_angular_command({0, 0, commands.get(0, 0, kMcmdRotateZ)});
         }
         sim_ms = to_ms;
-        for (auto& u : live) u->motion->update(float(sim_ms));
+        for (std::size_t i = 0; i < live.size(); ++i) {
+            if (brains[i]) brains[i]->update(float(sim_ms)); // brain tick + motion update (pilot inside)
+            else live[i]->motion->update(float(sim_ms));
+        }
         for (auto& u : live) {
             const Vec3 push = u->settle(float(sim_ms), ground, statics);
             if (u.get() == &hero && dot(push, push) > 0) ++pushed_steps;
@@ -316,7 +350,16 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     const Vec3 start_pos = hero.position();
     SDL_Log("play: hero %s at (%.0f, %.0f, %.0f), motion graph %s; %zu live units", tma.objects[*hero_index].resource.c_str(),
             start_pos.x, start_pos.y, start_pos.z, hero.model.ctl_entry.c_str(), live.size());
+    std::vector<Vec3> unit_start;
+    for (auto& u : live) unit_start.push_back(u->position());
     const int rc = run_scene_viewer(window, std::move(scene), vo);
+    for (std::size_t i = 0; i < live.size(); ++i) {
+        const Vec3 a = unit_start[i], b = live[i]->position();
+        SDL_Log("play: unit %zu %s moved %.1f m (order %u, state %u, moving %d, v=(%.2f %.2f %.2f), z %.1f)", i,
+                live[i]->placement->resource.c_str(), std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y)),
+                brains[i] ? brains[i]->current_order() : 0u, live[i]->motion->current_state(), brains[i] ? int(brains[i]->moving()) : -1,
+                live[i]->motion->velocity().x, live[i]->motion->velocity().y, live[i]->motion->velocity().z, b.z);
+    }
     const Vec3 hero_pos = hero.position();
     SDL_Log("play: hero ended at (%.2f, %.2f, %.2f) after %.0f ms, state %u; %zu collision pushes; %zu wall triangles; "
             "%zu footsteps",
