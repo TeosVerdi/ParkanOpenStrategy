@@ -417,6 +417,83 @@ struct PatrolTask : Task {
     }
 };
 
+// M_Task_Search (order 0x11 "захват", 0x80 bytes) in its capture mode: a small warbot walks into a
+// building of another clan; the building's capture door does the capture (Terrain 100335d0) and the
+// task ends when the building's clan is the unit's ("] captured", 10030474).
+// SetTarget (10030110): by LogicID (0x201) — only for size class < 3 (property 0x201) and a building of
+// another clan that is not a teleport (type 0x80000200), else refused; by type mask (0x203) 0x80000000 —
+// any building (size class < 3); mask 0x10000000 (minerals, the explorer's search) and 0x204 are other
+// modes of the class, not ported (refused).
+// OnBehaviourTakt (10030300): with a target, the task goes on while the target exists with another clan;
+// otherwise a given target ends it, a searched one is replaced (slot 0x3c). While the walker moves it
+// waits; when the walker is idle the first time it sets +0x7c and re-issues the go command (slot 0x3c,
+// MakeGoCommand: the building's hallway to an entry vertex — port: the capture volume's centre,
+// SeenObject::entry); later idle ticks re-issue it as long as the building is not yet the unit's.
+// Port choices: the searched target is the nearest non-own, non-teleport building with a capture
+// volume within 3000 m (inferred: slot 0x3c's choice is not decoded); the fire mode is StartTask's
+// {2 at will, −1, 0.5}.
+struct CaptureTask : Task {
+    using Task::Task;
+    bool capture = false;             // +0x5c
+    bool given = false;               // +0x60: a target given by the order
+    std::uint32_t target = kNoObject; // +0x6c
+    bool arrived = false;             // +0x7c
+
+    bool set_target(Behaviour& b) override {
+        if (order.target_kind == kTargetBuilding) {
+            if (order.target_id == kNoObject || !(order.target_id & kBuildingBit) || b.self.size_class >= 3) return false;
+            capture = true;
+            const auto o = b.object(order.target_id);
+            if (!o || o->clan == b.self.clan || o->type == kTypeTeleport) return false;
+            target = order.target_id, given = true;
+            return true;
+        }
+        if (order.target_kind == kTargetMask && (order.mask & kBuildingBit) && !(order.mask & 0x10000000) && b.self.size_class < 3) {
+            capture = true, given = false;
+            return true;
+        }
+        return false; // the explorer's mineral search / no target: NOT IMPLEMENTED
+    }
+    std::uint32_t pick(const Behaviour& b, Vec3 pos) const {
+        if (!b.world) return kNoObject;
+        std::vector<std::uint32_t> near;
+        b.world->objects_near(pos, 3000, near);
+        float best = 1e10f;
+        std::uint32_t lid = kNoObject;
+        for (const std::uint32_t id : near) {
+            const auto o = b.object(id);
+            if (!o || !o->building() || !o->entry || o->clan == b.self.clan || o->type == kTypeTeleport) continue;
+            const float d = dist2d(pos, *o->entry);
+            if (d < best) best = d, lid = id;
+        }
+        return lid;
+    }
+    bool go(Behaviour& b, const UnitState& st) { // slot 0x3c
+        if (!given) target = pick(b, st.pos);
+        const auto o = target == kNoObject ? std::nullopt : b.object(target);
+        if (!o) return false;
+        return b.walker.set_target(o->entry ? *o->entry : o->pos, b.go_speed());
+    }
+    bool start(Behaviour& b, const UnitState& st) override { // 10030280
+        b.set_fire_mode(kFireAtWill, kNoObject, 0.5f);
+        arrived = false;
+        return go(b, st);
+    }
+    bool takt(Behaviour& b, const UnitState& st) override {
+        if (capture && target != kNoObject) {
+            const auto o = b.object(target);
+            if (!o || o->clan == b.self.clan) { // captured (or gone)
+                if (given) return false;
+                target = kNoObject, arrived = false;
+                return go(b, st);
+            }
+        }
+        if (!b.walker.idle()) return true;
+        if (!arrived) arrived = true;
+        return go(b, st);
+    }
+};
+
 // Orders whose tasks are not ported: they cannot start, so the stack drops them.
 struct NotImplementedTask : Task {
     using Task::Task;
@@ -435,6 +512,7 @@ std::unique_ptr<Task> make_task(const Order& o) { // MTaskStack::CreateTaskFromO
     case kOrderPatrol: return std::make_unique<PatrolTask>(o);
     case kOrderMigrate: return std::make_unique<MigrateTask>(o);
     case kOrderFollow: return std::make_unique<FollowTask>(o);
+    case kOrderCapture: return std::make_unique<CaptureTask>(o);
     default: return std::make_unique<NotImplementedTask>(o);
     }
 }

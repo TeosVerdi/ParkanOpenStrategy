@@ -40,6 +40,7 @@ add_library(parkan_core STATIC
   src/world/ground.cpp
   src/world/collision.cpp
   src/world/live_unit.cpp
+  src/world/building.cpp
   src/res/weapons.cpp
   src/combat/damage.cpp
   src/combat/gun.cpp
@@ -81,7 +82,7 @@ target_link_libraries(parkan-check PRIVATE parkan_core stb_vorbis)
 add_executable(parkan-dump tools/parkan_dump.cpp)
 target_link_libraries(parkan-dump PRIVATE parkan_core)
 
-add_executable(parkan-tests tools/parkan_tests.cpp tools/ai_tests.cpp tools/game_tests.cpp tools/fx_tests.cpp tools/combat_tests.cpp tools/hud_tests.cpp tools/end_tests.cpp)
+add_executable(parkan-tests tools/parkan_tests.cpp tools/ai_tests.cpp tools/game_tests.cpp tools/fx_tests.cpp tools/combat_tests.cpp tools/hud_tests.cpp tools/end_tests.cpp tools/building_tests.cpp)
 target_link_libraries(parkan-tests PRIVATE parkan_core)
 enable_testing()
 add_test(NAME unit COMMAND parkan-tests)

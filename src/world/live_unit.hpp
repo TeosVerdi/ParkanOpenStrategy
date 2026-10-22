@@ -18,10 +18,18 @@ class LiveUnit {
 public:
     // A unit design placed by the TMA. nullptr when its chassis has no motion graph (it cannot move).
     static std::unique_ptr<LiveUnit> load(AssetLibrary& lib, const mission::TmaObject& o, const TerrainGround& ground);
+    // A building (data.tma kind 0: a UNITS\BUILDS scheme whose root is an objects.rlb FORT record): the
+    // body of Terrain's CBuilding (ctor 100324d0). The FORT names the agent prototype (a BTLU record,
+    // AniMesh LoadAgent) whose CTLD / CTPT / NDPR are the building's (notes/buildings.md §1). It has no
+    // motion (`motion` is null) and stands at its TMA placement; doors move through `device_frames`.
+    // nullptr when the scheme or its prototypes cannot be read.
+    static std::unique_ptr<LiveUnit> load_building(AssetLibrary& lib, const mission::TmaObject& o);
 
     const mission::TmaObject* placement = nullptr;
     UnitModel model;
-    std::unique_ptr<UnitMotion> motion; // refers to model's chassis mesh: LiveUnit never moves in memory
+    std::unique_ptr<UnitMotion> motion; // refers to model's chassis mesh: LiveUnit never moves in memory;
+                                        // null for a building
+    bool is_static() const { return !motion; }
     std::vector<ContactPoint> points;   // chassis CTPT
     // The turret (first component with a turret device) and its marker points.
     std::size_t turret_part = 0;
@@ -66,6 +74,9 @@ public:
         float frame = 0;
     };
     std::vector<JointFrame> joint_frames;
+    // The same for the unit's own non-weapon devices (building doors), kept by their owner (combat
+    // clears joint_frames every step).
+    std::vector<JointFrame> device_frames;
     // Transforms not drawn (collapsed): parts thrown off as debris (DetachPartDebris), set by combat.
     std::vector<bool> detached;
     // Port option (the player's unit): mount the turret and its guns as if the chassis root kept its

@@ -35,6 +35,10 @@ struct SeenObject {
     // from control properties 0x36 / 0x26 and behaviour property 0x204). Only the target scores read
     // them (10001010, 1002d390, 100255a0, 100256e0); zeros give the plain distance scores.
     float rec18 = 0, rec1c = 0, armour = 0, weapon = 0;
+    // Buildings with a capture door: the point a capturer walks to. Port stand-in for the "go inside
+    // building" leg (MakeGoCommand kind 0x201 → entry vertex 10001270 → the building's hallway graph,
+    // not ported): the centre of the capture volume (Terrain 10034d70), on the ground.
+    std::optional<Vec3> entry;
 
     bool building() const { return (logic_id & kBuildingBit) != 0; }
 };

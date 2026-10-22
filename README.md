@@ -54,8 +54,9 @@ The target is behavioural fidelity on a modern platform.
 
 > Early but playable: you can walk the hero around every campaign map and fight with the original
 > cockpit HUD. Guns, bullets, damage, deaths and explosions work, enemy robots engage you, and the
-> mission scripts notice your kills. Tutorials talk to you and track objectives. There is no building
-> capture, no base building and no menu shell yet.
+> mission scripts notice your kills. Buildings take damage, burn down and can be captured by walking onto
+> their capture lift. Tutorials talk to you and track objectives. There is no base building and no menu
+> shell yet.
 
 | Area | State |
 |---|---|
@@ -73,7 +74,8 @@ The target is behavioural fidelity on a modern platform.
 | Mission scripts: script VM, a strategist AI per clan, 73 handlers | 🟡 61 handlers; enemy clans give patrol and move orders, tutorials send messages and objectives |
 | Game text in the game's fonts: message panel, objectives screen (Russian and English) | ✅ |
 | Weapons: 158 guns, 66 bullet types, ammo and energy, barrel cycle, sight convergence | ✅ (homing missiles and shields to come) |
-| Damage and death: per-part hit points, direct and splash hits, armour, explosions, removal | ✅ (buildings and capture to come) |
+| Damage and death: per-part hit points, direct and splash hits, armour, explosions, removal | ✅ |
+| Buildings: 167 placed buildings as targets, doors, capture lifts, owner change, the AI capture order | ✅ (building screens, building guns, debris to come) |
 | Visual effects: 923 effects (sprites, beams, trails, bursts, debris, lights) | ✅ |
 | Cockpit HUD: sight, radar, unit panels, status lamps, weapon rows, lock-on, satellite map | ✅ (targeter 3D view, wingman menu, HUD sounds to come) |
 | Base building, research UI, menus, game shell | ⬜ not started |

@@ -1,10 +1,11 @@
-// Weapons → bullets → damage → death for the live units of a mission: each unit's gun devices and
+// Weapons → bullets → damage → death for the live units and the buildings of a mission (a building is
+// a combatant over a static LiveUnit, LiveUnit::load_building; notes/buildings.md §2): each unit's gun devices and
 // damage parts, the bullets in flight, the damage queue and removal. Spec: notes/weapons-damage.md
 // (§7 is the recipe this follows); the pieces are combat/gun.hpp and combat/damage.hpp.
 //
 // Port choices and approximations (inferred where marked):
 // - hit test: the bullet's swept segment against the landscape (TerrainGround::trace), the static
-//   scene's triangles (TraceMesh) and the posed triangles of every live unit (the face hit names the
+//   scene's triangles (TraceMesh) and the posed triangles of every live unit and building (the face hit names the
 //   object and mesh part, as Terrain's TraceRay does); units that are dead have left collision;
 // - seekers (device 0x11) are not flown: guided bullets fly straight. The gun's lock-on gate
 //   (param 9/10) is kept, so guided guns need a target (set_target);
@@ -72,12 +73,23 @@ public:
     Vec3 centre() const;      // world bounding-sphere centre
     Vec3 aim_centre() const;  // the root part's mesh sphere centre (the point to aim at), else centre()
     float radius() const { return bound_radius_; }
+    // A building (Terrain CBuilding over a BTLU agent; notes/buildings.md): a static body, no motion.
+    bool building() const { return unit && unit->is_static(); }
 
 private:
     friend class CombatWorld;
     Vec3 bound_centre_{}; // in the unit frame
     float bound_radius_ = 1;
     float next_slow_tick_ = 0;
+    // Buildings: the world-space triangles of each draw, rebuilt when its node matrix changes (doors),
+    // with a bounding sphere per draw for the segment test (port: the meshes are large and static).
+    struct DrawCache {
+        Mat4 matrix{};
+        std::vector<Vec3> verts; // 3 per triangle
+        Vec3 centre{};
+        float radius = -1;
+    };
+    mutable std::vector<DrawCache> draw_cache_;
 };
 
 struct Bullet {

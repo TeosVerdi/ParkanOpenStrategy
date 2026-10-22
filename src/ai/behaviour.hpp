@@ -3,7 +3,8 @@
 // 10017e70, InsertInterrupt 100179c0, MTaskStack::CreateInterruptTask 10034510), the observer at
 // MB+0x4a8 (100234e0 / 10023240) and the tasks M_Task_Stop (10031db0 / 10031e10), M_Task_StayGround
 // (10031ca0..), M_Task_Go (1002b3c0..1002b670), M_Task_Attack (10026a30..10028310), M_Task_Follow
-// (1002acd0..1002ae20), M_Task_Migrate (1002c640..1002cba0) and M_Task_Patrol (1002d250..). The fire
+// (1002acd0..1002ae20), M_Task_Migrate (1002c640..1002cba0), M_Task_Patrol (1002d250..) and the capture
+// mode of M_Task_Search (10030110..10030300, notes/buildings.md §3.6). The fire
 // control (MB+0x35c) is ai/fire_control.hpp. Spec: notes/unit-ai-runtime.md §1, §2.1, §4.
 //
 // NOT IMPLEMENTED (tasks that cannot start, so the order is dropped as "Cannot StartTask"): every other
@@ -35,11 +36,13 @@ enum OrderType : std::uint32_t {
     kOrderSearch = 5,
     kOrderBuild = 7,
     kOrderMigrate = 0xf,
+    kOrderCapture = 0x11, // ORDER_ROBOT_CAPTURE: M_Task_Search ("захват")
     kOrderStayGround = 0x15,
     kOrderFollow = 0x16,
 };
 // 0x201 = by LogicID (a unit, or a building when bit 31 is set), 0x202 = a place, 0x204 = none.
-enum TargetKind : std::uint32_t { kTargetBuilding = 0x201, kTargetPlace = 0x202, kTargetNone = 0x204 };
+enum TargetKind : std::uint32_t { kTargetBuilding = 0x201, kTargetPlace = 0x202, kTargetMask = 0x203, kTargetNone = 0x204 };
+inline constexpr std::uint32_t kTypeTeleport = 0x80000200;
 inline constexpr std::uint32_t kTargetLogicId = kTargetBuilding;
 
 // The task limits (Order+0x110, 7 dwords; MTask::SetLimits 100014c0 copies them to task+0x2c, ai.dll
@@ -61,6 +64,7 @@ struct Order {
     std::uint32_t target_kind = kTargetNone;
     Vec3 place{};                        // kind 0x202
     std::uint32_t target_id = kNoObject; // kind 0x201 (Order+0x10)
+    std::uint32_t mask = 0;              // kind 0x203: an ObjectTypeCode mask (0x80000000 buildings)
     TaskLimits limits{};
 };
 
@@ -94,6 +98,7 @@ struct SelfInfo {
     std::uint32_t type = 0;     // ObjectTypeCode
     bool can_targeting = true;  // BehProfession CanTargeting (+0xc): the fire threshold 0.45 (else 0.85)
     bool has_weapons = true;    // QI(0x204) slot 4 property 5 != 0: interrupt attacks, Follow's slot 12
+    std::uint32_t size_class = 0; // property 0x201: 1 T, 2 S, 3 M, 4 L (only < 3 capture buildings)
     bool animal() const { return type == kTypeAnimal; }
     bool building() const { return (logic_id & kBuildingBit) != 0; }
 };

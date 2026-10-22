@@ -6,6 +6,7 @@
 //   parkan --terrain <map dir> [--shot <out.bmp>] [<game dir>]        terrain viewer (e.g. DATA/MAPS/Tut_2)
 //   parkan --unit <scheme .dat> [--shot <out.bmp>] [<game dir>]      unit design (e.g. UNITS/AUTO/swlklas.dat)
 //   parkan --play <mission dir> [--classic-keys] [--time <s>] [--no-fog] [--walk] [--fire] [--aim] [--shot <out.bmp>] [<game dir>]
+//        [--goto x,y[,heading°]] [--target <hex LogicID>] [--damage-mult k]   port debug aids (buildings)
 //                                                   drive the mission's hero (M1.TBL keys; --walk holds forward,
 //                                                   --fire holds LMB with every gun selected, --aim turns to the
 //                                                   nearest hostile unit and aims the bullets at it)
@@ -118,6 +119,7 @@ int main(int argc, char** argv) {
     std::string play, sound_lib, sound_entry, effect;
     int music = -1;
     float pitch = -1; // camera elevation override (radians); negative = the mode's default
+    parkan::PlayOptions debug_play; // --goto / --target / --damage-mult (port debug aids)
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--view" && i + 2 < argc) {
@@ -136,6 +138,16 @@ int main(int argc, char** argv) {
             play = argv[++i];
         } else if (a == "--walk") {
             demo_walk = true;
+        } else if (a == "--goto" && i + 1 < argc) {
+            float x = 0, y = 0, h = 0;
+            const int n = std::sscanf(argv[++i], "%f,%f,%f", &x, &y, &h);
+            if (n >= 2) debug_play.goto_xy = std::pair{x, y};
+            if (n == 3) debug_play.goto_heading = h;
+        } else if (a == "--target" && i + 1 < argc) {
+            debug_play.aim_target = std::uint32_t(std::strtoul(argv[++i], nullptr, 16));
+            demo_aim = true;
+        } else if (a == "--damage-mult" && i + 1 < argc) {
+            debug_play.damage_mult = float(std::atof(argv[++i]));
         } else if (a == "--fire") {
             demo_fire = true;
         } else if (a == "--aim") {
@@ -206,7 +218,7 @@ int main(int argc, char** argv) {
             if (pitch >= 0) eo.pitch = pitch;
             rc = parkan::run_effect_viewer(window, lib, eo);
         } else if (!play.empty()) {
-            parkan::PlayOptions po;
+            parkan::PlayOptions po = debug_play;
             po.mission = play;
             po.shot_path = shot;
             po.start_time = start_time;

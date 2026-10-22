@@ -186,7 +186,7 @@ Vec3 horizontal_push(Vec3 p) {
     return {p.x * k, p.y * k, 0};
 }
 
-void StaticColliders::add(const RenderMesh& mesh, std::uint32_t first, std::uint32_t last) {
+void StaticColliders::add(const RenderMesh& mesh, std::uint32_t first, std::uint32_t last, std::uint32_t tag) {
     for (const auto& d : mesh.draws) {
         if (d.transform < first || d.transform >= last) continue;
         const Mat4& m = mesh.transforms[d.transform];
@@ -199,12 +199,18 @@ void StaticColliders::add(const RenderMesh& mesh, std::uint32_t first, std::uint
             const Vec3 n = cross(v[1] - v[0], v[2] - v[0]);
             const float len = std::sqrt(dot(n, n));
             if (len <= 1e-9f || std::abs(n.z) / len >= 0.7f) continue; // floors and roofs do not push
-            tris_.push_back({v[0], v[1], v[2]});
+            tris_.push_back({v[0], v[1], v[2], tag});
         }
     }
 }
 
+void StaticColliders::remove(std::uint32_t tag) {
+    std::erase_if(tris_, [tag](const Tri& t) { return t.tag == tag; });
+    finish();
+}
+
 void StaticColliders::finish() {
+    cells_.clear();
     if (tris_.empty()) return;
     min_ = {FLT_MAX, FLT_MAX, FLT_MAX};
     max_ = {-FLT_MAX, -FLT_MAX, -FLT_MAX};

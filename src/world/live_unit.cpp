@@ -1,5 +1,7 @@
 #include "world/live_unit.hpp"
 
+#include "core/paths.hpp"
+#include "mission/scheme.hpp"
 #include "res/ctld.hpp"
 
 #include <algorithm>
@@ -12,7 +14,47 @@ namespace {
 
 Vec3 translation(const Mat4& m) { return {m.at(0, 3), m.at(1, 3), m.at(2, 3)}; }
 
+std::string record_field(std::span<const std::uint8_t> rec, std::size_t off) {
+    if (off + 32 > rec.size()) return {};
+    const auto* p = reinterpret_cast<const char*>(rec.data() + off);
+    return std::string(p, ::strnlen(p, 32));
+}
+
 } // namespace
+
+std::unique_ptr<LiveUnit> LiveUnit::load_building(AssetLibrary& lib, const mission::TmaObject& o) {
+    auto path = resolve_path(lib.game_dir(), o.resource);
+    if (!path) return nullptr;
+    const mission::Scheme scheme = mission::decode_scheme(read_file(*path));
+    // FORT (128 bytes): {objects.rlb, agent}, {lib, .bas} (CBuilding ctor reads +0x00/+0x20 and +0x40/+0x60).
+    const NResEntry* fort = lib.find("objects.rlb", scheme.root.entry);
+    if (!fort || fort->type != fourcc("FORT")) return nullptr;
+    const NResEntry* agent = lib.find("objects.rlb", record_field(fort->data, 0x20));
+    if (!agent || agent->data.size() < 0x140) return nullptr;
+    auto model = load_unit_model(lib, o.resource);
+    if (!model || model->parts.empty()) return nullptr;
+    // The agent's pairs: 0 mesh, 1 WEAR, 2 CTPT, 3 NDPR, 4 CTLD (load_unit_model reads them only from
+    // records of 0x140 bytes, so the FORT root has none).
+    UnitPart& root = model->parts.front();
+    root.archive = record_field(agent->data, 0x80), root.cpt_entry = record_field(agent->data, 0xa0);
+    root.ndp_archive = record_field(agent->data, 0xc0), root.ndp_entry = record_field(agent->data, 0xe0);
+    root.ctl_entry = record_field(agent->data, 0x120);
+    model->ctl_archive = record_field(agent->data, 0x100), model->ctl_entry = root.ctl_entry;
+    std::unique_ptr<LiveUnit> u(new LiveUnit);
+    u->placement = &o;
+    u->model = std::move(*model);
+    if (const NResEntry* ce = lib.find(u->model.ctl_archive, u->model.ctl_entry); ce && ce->type == fourcc("CTLD")) u->ctld = decode_ctld(ce->data);
+    if (const NResEntry* pe = lib.find(root.archive, root.cpt_entry)) u->points = decode_ctpt(pe->data);
+    // The body sphere: the static pose's bounds (port: IVisual GetBoundingSphere is not decoded; the
+    // sphere around the box is taken).
+    const ModelAsset& base = u->model.parts.front().model;
+    u->sphere_centre = (base.bounds_min + base.bounds_max) * 0.5f;
+    const Vec3 ext = base.bounds_max - base.bounds_min;
+    u->sphere_radius = std::max(0.25f, 0.5f * std::sqrt(dot(ext, ext)));
+    u->frame.matrix = tma_placement(o); // buildings keep their TMA pose (PlaceBuilding fits the ground to them)
+    u->pose_parts();
+    return u;
+}
 
 std::unique_ptr<LiveUnit> LiveUnit::load(AssetLibrary& lib, const mission::TmaObject& o, const TerrainGround& ground) {
     auto model = load_unit_model(lib, o.resource);
@@ -157,13 +199,24 @@ void LiveUnit::pose_parts() {
         rig->node_frames(aim_x, aim_y, frame.attitude_offset.z, model.parts[turret_part].node_frames);
         for (const auto& [part, joints] : gun_joints) rig->gun_frames(joints, aim_y, model.parts[part].node_frames);
     }
-    for (const auto& j : joint_frames) {
-        if (j.part >= model.parts.size() || j.node < 0) continue;
-        auto& frames = model.parts[j.part].node_frames;
-        if (frames.size() <= std::size_t(j.node)) frames.resize(std::size_t(j.node) + 1, -1.f);
-        frames[std::size_t(j.node)] = j.frame;
-    }
+    for (const auto* list : {&joint_frames, &device_frames})
+        for (const auto& j : *list) {
+            if (j.part >= model.parts.size() || j.node < 0) continue;
+            auto& frames = model.parts[j.part].node_frames;
+            if (frames.size() <= std::size_t(j.node)) frames.resize(std::size_t(j.node) + 1, -1.f);
+            frames[std::size_t(j.node)] = j.frame;
+        }
     posed.resize(model.mesh.transforms.size());
+    if (!motion) {
+        // A building: every part at its node frames (doors; -1 = the static pose), at the placement.
+        for (auto& part : model.parts) {
+            if (part.parent < 0) pose_model_frames(part.model, part.node_frames);
+            else pose_model_frames(part.model, part.node_frames, &model.parts[std::size_t(part.parent)].model.node_world[std::size_t(part.mount)]);
+            for (std::size_t i = 0; i < part.model.node_world.size(); ++i)
+                if (part.transform_base + i < posed.size()) posed[part.transform_base + i] = frame.matrix * part.model.node_world[i];
+        }
+        return;
+    }
     pose_unit(model, frame.matrix, frame.frame_a, frame.frame_b, frame.weight_b, posed, 0, steady_mounts ? &root_rest : nullptr);
 }
 

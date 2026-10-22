@@ -8,7 +8,9 @@
 
 #include <SDL3/SDL.h>
 
+#include <optional>
 #include <string>
+#include <utility>
 
 namespace parkan {
 
@@ -24,6 +26,13 @@ struct PlayOptions {
     int camera_preset = 0;    // 0 TURRET view, 1..4 OUTER presets (for --shot checks)
     input::KeyLayout layout = input::KeyLayout::Modern; // --classic-keys: the 2001 layout
     bool stabilize_camera = true; // --camera-sway: the original's data-driven cockpit sway
+    // Port debug aids (buildings, notes/buildings.md): --goto x,y[,heading°] puts the hero there at the
+    // start; --target <hex LogicID> makes --aim pick that object (a building too); --damage-mult k
+    // multiplies the hero's bullet damage (gun property 0xb4).
+    std::optional<std::pair<float, float>> goto_xy;
+    std::optional<float> goto_heading;
+    std::optional<std::uint32_t> aim_target;
+    float damage_mult = 1;
 };
 
 int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt);

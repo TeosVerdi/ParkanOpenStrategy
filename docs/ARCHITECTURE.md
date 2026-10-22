@@ -81,7 +81,8 @@ Paths inside the data are resolved case-insensitively (`core/paths`).
 | World3D | `world/` object queue, ids, messages | world3d-runtime.md, components.md | — |
 | Terrain | `res/terrain` (Land.msh), `scene/render_mesh`; atmosphere/sky to do | FParkan tomes/04-world, 05-render | LOD0 renders |
 | AniMesh, Control | `scene/model` (static pose) → `anim/` motion graph, mover | control-physics.md, formats-wea-cpt-ndp.md | static models render |
-| Control (devices, damage) | `res/weapons` (weapon devices, BULL, NDPR, EXPL), `combat/` gun device, bullets, part HP, death | weapons-damage.md | hero and AI fire, bullets hit faces, damage/death/removal reach the scripts; seekers, shields, debris, capture to do |
+| Control (devices, damage) | `res/weapons` (weapon devices, BULL, NDPR, EXPL), `combat/` gun device, bullets, part HP, death | weapons-damage.md | hero and AI fire, bullets hit faces, damage/death/removal reach the scripts; buildings are combatants; seekers, shields, debris to do |
+| Terrain `CBuilding` (doors, capture door), iron3d capture callback | `world/building` (+ `LiveUnit::load_building`), capture wiring in `app/play` | buildings.md | buildings load, take damage, die and are removed; capture by any unit inside the lift (the hero in Tut_2), `object_captured` + Fort_Captured; AI `M_Task_Search` capture mode; building screens, building guns to do |
 | Behavior | `behavior/` unit brains, orders, tasks | behaviour-data.md | — |
 | ai | `ai/` script VM; `game/` world model, SuperAI per clan, MissionRuntime | script-vm.md, script-handlers-a/b.md | VM done; 61/73 handlers, 12 neutral (super_ai.hpp); wired into play |
 | iron3d HUD text | `res/tft`, `ui/hud_text` (pager, objectives screen) | rsli-font.md | done for the pager and objectives; frame art inferred |

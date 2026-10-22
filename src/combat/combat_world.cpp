@@ -404,7 +404,7 @@ void CombatWorld::spawn(std::size_t u, std::size_t g, Vec3 pos, Vec3 dir) {
     b.pos = pos;
     b.dir = normalize(dir);
     // v = R(M)·(0, speed, 0) + shooter world velocity (ctl+0x200).
-    b.vel = b.dir * p->speed + c.unit->motion->world_velocity();
+    b.vel = b.dir * p->speed + (c.unit->motion ? c.unit->motion->world_velocity() : Vec3{}); // buildings stand still
     b.range_left = p->range;
     b.mult = gun.damage_mult;
     bullets_.push_back(b);
@@ -428,11 +428,41 @@ std::optional<WorldHit> CombatWorld::trace(Vec3 a, Vec3 b, std::int32_t skip) co
         if (std::int32_t(i) == skip || c.removed || !c.alive() || c.unit->posed.empty()) continue;
         if (!segment_hits_sphere(a, b, c.centre(), c.bound_radius_)) continue;
         const RenderMesh& mesh = c.unit->model.mesh;
-        for (const auto& d : mesh.draws) {
+        if (c.building()) c.draw_cache_.resize(mesh.draws.size());
+        for (std::size_t di = 0; di < mesh.draws.size(); ++di) {
+            const RenderDraw& d = mesh.draws[di];
             if (d.transform >= c.unit->posed.size()) continue;
             const std::size_t part = c.damage.resolve(d.transform);
             if (part < c.damage.parts.size() && c.damage.parts[part].destroyed()) continue; // thrown off as debris
             const Mat4& m = c.unit->posed[d.transform];
+            if (c.building()) {
+                Combatant::DrawCache& dc = c.draw_cache_[di];
+                if (dc.radius < 0 || std::memcmp(&dc.matrix, &m, sizeof m) != 0) {
+                    dc.matrix = m;
+                    dc.verts.clear();
+                    Vec3 lo{FLT_MAX, FLT_MAX, FLT_MAX}, hi{-FLT_MAX, -FLT_MAX, -FLT_MAX};
+                    for (std::uint32_t k = 0; k + 2 < d.index_count; k += 3)
+                        for (std::uint32_t j = 0; j < 3; ++j) {
+                            const auto& rv = mesh.vertices[std::size_t(d.base_vertex + std::int32_t(mesh.indices[d.index_start + k + j]))];
+                            const Vec3 w = m.transform_point({rv.pos[0], rv.pos[1], rv.pos[2]});
+                            dc.verts.push_back(w);
+                            lo = {std::min(lo.x, w.x), std::min(lo.y, w.y), std::min(lo.z, w.z)};
+                            hi = {std::max(hi.x, w.x), std::max(hi.y, w.y), std::max(hi.z, w.z)};
+                        }
+                    dc.centre = (lo + hi) * 0.5f;
+                    dc.radius = dc.verts.empty() ? 0.f : 0.5f * std::sqrt(dot(hi - lo, hi - lo));
+                }
+                if (dc.verts.empty() || !segment_hits_sphere(a, b, dc.centre, dc.radius)) continue;
+                for (std::size_t k = 0; k + 2 < dc.verts.size(); k += 3) {
+                    const Vec3* v = &dc.verts[k];
+                    const auto t = segment_triangle(a, b, v[0], v[1], v[2]);
+                    if (!t || (best && *t >= best->t)) continue;
+                    Vec3 n = normalize(cross(v[1] - v[0], v[2] - v[0]));
+                    if (dot(n, b - a) > 0) n = n * -1.f;
+                    best = WorldHit{WorldHit::Kind::Unit, *t, a + (b - a) * *t, n, std::int32_t(i), std::int32_t(part)};
+                }
+                continue;
+            }
             for (std::uint32_t k = 0; k + 2 < d.index_count; k += 3) {
                 Vec3 v[3];
                 for (int j = 0; j < 3; ++j) {

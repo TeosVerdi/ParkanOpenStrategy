@@ -74,9 +74,11 @@ private:
 
 class StaticColliders {
 public:
-    // Adds the wall triangles of `mesh`'s draws whose transform index is in [first, last).
-    void add(const RenderMesh& mesh, std::uint32_t first_transform, std::uint32_t last_transform);
+    // Adds the wall triangles of `mesh`'s draws whose transform index is in [first, last), tagged `tag`.
+    void add(const RenderMesh& mesh, std::uint32_t first_transform, std::uint32_t last_transform, std::uint32_t tag = 0);
     void finish(); // builds the grid; call after the last add()
+    // Drops the triangles tagged `tag` (a removed building) and rebuilds the grid.
+    void remove(std::uint32_t tag);
 
     // Push that moves a sphere out of every wall it penetrates (two relaxation passes).
     Vec3 push_sphere(Vec3 c, float r) const;
@@ -85,6 +87,7 @@ public:
 private:
     struct Tri {
         Vec3 a, b, c;
+        std::uint32_t tag = 0;
     };
     std::vector<Tri> tris_;
     std::vector<std::vector<std::uint32_t>> cells_;
