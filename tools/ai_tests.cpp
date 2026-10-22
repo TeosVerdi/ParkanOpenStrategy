@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <memory>
 
 using namespace parkan;
 using namespace parkan::ai;
@@ -138,6 +139,60 @@ void test_landmap_synthetic() {
     CHECK(a.contains(5, 5) && !a.contains(11, 5) && !a.contains(5, -1));
 }
 
+// Two 10 m squares side by side: areal 0 (x 0..10, walkable), areal 1 (x 10..20, not walkable).
+LandMap two_squares() {
+    LandMap m;
+    for (int i = 0; i < 2; ++i) {
+        LandAreal a;
+        const float x0 = 10.f * float(i);
+        a.verts = {{x0, 0, 0}, {x0 + 10, 0, 0}, {x0 + 10, 10, 0}, {x0, 10, 0}}; // CCW
+        a.links = {{-1, -1}, {i == 0 ? 1 : -1, i == 0 ? 3 : -1}, {-1, -1}, {i == 1 ? 0 : -1, i == 1 ? 1 : -1}};
+        a.anchor = {x0 + 5, 5, 0};
+        a.walkable = i == 0;
+        a.min_x = x0, a.max_x = x0 + 10, a.min_y = 0, a.max_y = 10;
+        m.areals.push_back(a);
+    }
+    m.cells_x = m.cells_y = 1;
+    m.cell_ids = {0, 1};
+    m.cell_first = {0, 2};
+    m.set_bounds(0, 0, 20, 10);
+    return m;
+}
+
+// A target inside the unit's own areal: the route is that areal alone and the corridor the target
+// (PlanGlobalPath with a one-node path goes to its tail), timed as one stopping point plus two holds.
+// A flyer reaches a target the graph cannot (no edges out of an unwalkable areal) straight away.
+void test_walker_targets() {
+    std::printf("walker targets\n");
+    const LandMap map = two_squares();
+    const ArealGraph graph = ArealGraph::build(map);
+    CHECK(graph.nodes[0].edges.empty() && graph.nodes[1].edges.empty()); // 1 is not walkable
+    MTimer timer;
+    Walker w(map, graph, [] { return 0; });
+    w.max_speed = 10, w.min_speed = 0.5f;
+    w.tick_timer = &timer;
+    UnitState st{{2, 2, 0}, {}, {0, 1, 0}, 1000};
+    w.unit_state = [&] { return st; };
+    CHECK(w.set_target({7, 8, 0}, 10));
+    CHECK(w.route() == std::vector<std::uint32_t>{0} && w.corridor().size() == 1);
+    Wizard wz;
+    w.on_behaviour_takt(wz);
+    // One leg of √(25 + 36) = 7.81 m from rest (ground unit: end speed 0), t = 2·7.81 / max(10 + 0, 2):
+    // 1562 ms, then the two holds at +500 / +700.
+    CHECK(w.points().size() == 3 && wz.point_count() == 3 && !w.idle());
+    CHECK(w.points().size() == 3 && w.points()[0].time == 1000 + 1562 && w.points()[2].time == 1000 + 1562 + 700);
+    CHECK(w.points().size() == 3 && w.points()[0].vel.y == 0 && (wz.point(0).flags & 0x3030) == 0x3030);
+    // Into the unwalkable areal: a ground unit cannot, a flyer goes straight (no route, no portals).
+    CHECK(!w.set_target({15, 5, 0}, 10));
+    w.can_fly = true, w.walk_chassis = false;
+    CHECK(w.set_target({15, 5, 0}, 10));
+    CHECK(w.route().empty() && w.corridor().size() == 1 && w.corridor()[0].pos.x == 15 && w.corridor()[0].areal == 1);
+    st.pos = {15, 5, 0}; // a flyer standing in the unwalkable areal leaves it too
+    CHECK(w.set_target({5, 5, 0}, 10) && w.corridor().size() == 1);
+    // Off the grid: nothing to target.
+    CHECK(!w.set_target({25, 5, 0}, 10));
+}
+
 // ---- corpus ----
 
 struct Unit {
@@ -252,59 +307,70 @@ void test_tut2(const std::filesystem::path& game) {
     }
 
     // ---- an animal (tent.dat) migrating in its clan's areals ----
+    // ---- the animals (tent.dat) migrating in their clan's areals, for several seeds ----
     {
-        const mission::TmaObject* tent = nullptr;
+        std::vector<const mission::TmaObject*> tents;
         for (const auto& o : tma.objects)
-            if (o.resource.find("tent.dat") != std::string::npos) tent = &o;
+            if (o.resource.find("tent.dat") != std::string::npos) tents.push_back(&o);
         const mission::TmaClan* clan = nullptr;
         for (const auto& c : tma.clans)
             if (!c.spatial.empty()) clan = &c;
-        auto model = tent ? load_unit_model(lib, tent->resource) : std::nullopt;
+        auto model = tents.empty() ? std::nullopt : load_unit_model(lib, tents[0]->resource);
         const NResEntry* ce = model ? lib.find(model->ctl_archive, model->ctl_entry) : nullptr;
-        if (!tent || !clan || !ce) {
-            CHECK(!"tent / animal clan / its motion graph missing");
+        if (tents.size() != 2 || !clan || !ce) {
+            CHECK(!"tents / animal clan / their motion graph missing");
             return;
         }
         const Ctld ctld = decode_ctld(ce->data);
         std::vector<ContactPoint> points;
         const std::string base = model->ctl_entry.substr(0, model->ctl_entry.rfind('.'));
         if (const NResEntry* pe = lib.find(model->ctl_archive, base + ".cpt")) points = decode_ctpt(pe->data);
-        UnitMotion motion(ctld, model->parts.front().model.mesh, points);
-        motion.start(0, tma_placement(*tent));
-        // a_a_l3 is an animal flyer (control-physics.md "Flying units"; its chassis sheet is not traced:
-        // chas_fly assumed, CanFly 1, WalkChassis 0), so the pilot also commands body x and z, and it may
-        // target the unwalkable areals it lives in. FollowGround only keeps it above the ground.
-        const auto keep_above_ground = [&] {
-            const Vec3 p = pos_of(motion.output_matrix());
-            if (auto g = ground.probe(p + Vec3{0, 0, 1000}, 2000.f); g && p.z < g->z + 1) motion.apply_offset({0, 0, g->z + 1 - p.z});
-        };
-        ClanMigration mig{clan->spatial, {}, -1};
-        MsvcRand rng{7};
-        AiUnit unit(motion, map, graph, [&] { return rng(); }, {true, false, true});
-        unit.set_ground_height([&](float x, float y) {
-            auto g = ground.probe({x, y, 1000}, 2000.f);
-            return g ? g->z : 0.f;
-        });
-        unit.set_migration(&mig);
-        const Vec3 start = unit.position();
-        float travelled = 0, max_from_start = 0;
-        Vec3 last = start;
-        int moving_ticks = 0, ticks = 0;
-        for (float t = 0; t < 90000; t += 33, ++ticks) {
-            unit.update(t);
-            keep_above_ground();
-            const Vec3 p = unit.position();
-            travelled += dist2d(p, last);
-            max_from_start = std::max(max_from_start, dist2d(p, start));
-            last = p;
-            moving_ticks += unit.moving();
+        for (const std::uint32_t seed : {1u, 7u, 42u}) {
+            ClanMigration mig{clan->spatial, {}, -1}; // shared by the clan's units
+            MsvcRand rng{seed};                        // one CRT generator for the whole run
+            std::vector<std::unique_ptr<UnitMotion>> motions;
+            std::vector<std::unique_ptr<AiUnit>> units;
+            for (const auto* tent : tents) {
+                motions.push_back(std::make_unique<UnitMotion>(ctld, model->parts.front().model.mesh, points));
+                motions.back()->start(0, tma_placement(*tent));
+                // a_a_l3 is an animal flyer (control-physics.md "Flying units"; its chassis sheet is not
+                // traced: chas_fly assumed, CanFly 1, WalkChassis 0): the pilot also commands body x and z,
+                // and the walker goes straight to the target without the areal graph.
+                units.push_back(std::make_unique<AiUnit>(*motions.back(), map, graph, [&] { return rng(); },
+                                                         AiUnitConfig{true, false, true}));
+                units.back()->set_ground_height([&](float x, float y) {
+                    auto g = ground.probe({x, y, 1000}, 2000.f);
+                    return g ? g->z : 0.f;
+                });
+                units.back()->set_migration(&mig);
+            }
+            std::vector<Vec3> start, last;
+            std::vector<float> travelled(units.size(), 0), farthest(units.size(), 0);
+            std::vector<int> busy(units.size(), 0);
+            for (const auto& u : units) start.push_back(u->position()), last.push_back(u->position());
+            int ticks = 0;
+            for (float t = 0; t < 90000; t += 33, ++ticks)
+                for (std::size_t i = 0; i < units.size(); ++i) {
+                    units[i]->update(t);
+                    // FollowGround for a flyer only keeps it above the ground.
+                    UnitMotion& m = *motions[i];
+                    const Vec3 p = pos_of(m.output_matrix());
+                    if (auto g = ground.probe(p + Vec3{0, 0, 1000}, 2000.f); g && p.z < g->z + 1)
+                        m.apply_offset({0, 0, g->z + 1 - p.z});
+                    const Vec3 q = units[i]->position();
+                    travelled[i] += dist2d(q, last[i]);
+                    farthest[i] = std::max(farthest[i], dist2d(q, start[i]));
+                    last[i] = q;
+                    busy[i] += units[i]->moving();
+                }
+            for (std::size_t i = 0; i < units.size(); ++i) {
+                std::printf("  tent %zu, seed %2u: clan areal (last pick) %d, flew %.0f m over 90 s, at most %.0f m from the "
+                            "start, walker busy %d%% of ticks, %d re-plans\n",
+                            i, seed, mig.current, travelled[i], farthest[i], busy[i] * 100 / ticks, units[i]->walker().replans());
+                CHECK(units[i]->current_order() == kOrderMigrate);
+                CHECK(travelled[i] > 20 && busy[i] > 0);
+            }
         }
-        std::printf("  %s (%s, body[7] %.1f m/s): migrate order %u, walked %.0f m over 90 s, at most %.0f m from "
-                    "the start, walker busy %d%% of ticks, %d re-plans\n",
-                    tent->resource.c_str(), model->ctl_entry.c_str(), motion.body[7], unit.current_order(), travelled,
-                    max_from_start, moving_ticks * 100 / ticks, unit.walker().replans());
-        CHECK(unit.current_order() == kOrderMigrate);
-        CHECK(travelled > 20 && moving_ticks > 0);
     }
 }
 
@@ -316,6 +382,7 @@ int ai_unit_tests() {
     test_areal_search();
     test_wizard();
     test_landmap_synthetic();
+    test_walker_targets();
     return g_fail;
 }
 

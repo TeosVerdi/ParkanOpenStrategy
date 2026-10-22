@@ -55,9 +55,16 @@ void Walker::retry_if_stuck() {
 }
 
 bool Walker::plan_global_path() {
+    route_.clear();
+    // A flyer (W+0x28 CanFly) skips the areal search and the portals (10036910 jumps to the tail at
+    // 10038b0d): its corridor is the target alone. The graph has no edges out of unwalkable areals, so
+    // searching would strand flyers that live in them.
+    if (can_fly) {
+        corridor_.push_back({target_, map_->areal_at(target_.x, target_.y).value_or(0), false});
+        return true;
+    }
     const UnitState st = unit_state();
     const auto from = map_->areal_at(st.pos.x, st.pos.y), to = map_->areal_at(target_.x, target_.y);
-    route_.clear();
     if (!from || !to) return false;
     route_ = search_path(*graph_, *from, *to, can_fly, rand_);
     if (route_.empty()) return false;

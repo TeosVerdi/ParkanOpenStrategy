@@ -54,7 +54,8 @@ struct ArealGraph {
 
 // MGraph::Search: randomised best-first A* from `start` to `goal` (areal ids). Every relaxation
 // perturbs the whole accumulated g by (1 + r01·randomness); the search stops when the goal is first
-// generated, after at most 0x800 expansions. Returns start..goal, or empty on failure.
+// generated, after at most 0x800 expansions. Returns start..goal, or empty on failure. Flyers do not
+// search (MWalker::PlanGlobalPath goes straight to the target); `can_fly` only admits 0x10000 edges.
 std::vector<std::uint32_t> search_path(const ArealGraph& graph, std::uint32_t start, std::uint32_t goal, bool can_fly,
                                        const RandomSource& rand, float randomness = 0.7f);
 

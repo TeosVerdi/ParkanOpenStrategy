@@ -53,7 +53,8 @@ public:
     MTimer* tick_timer = nullptr;
 
     // SetTarget(target, {speed, −1, 5.0}): clamps the cruise speed, plans; false when the target is not
-    // on a walkable areal or no route exists.
+    // on a walkable areal (flyers: on no areal) or no route exists. The −1 / 5.0 go to W+0xe0 / +0xe4,
+    // which nothing in Behavior.dll reads (no arrival radius), so they are not kept.
     bool set_target(Vec3 target, float speed);
     void stop();                                  // MWalker::Stop
     bool idle() const { return corridor_.empty() && legs_.empty() && points_.empty(); } // IsIdle 1003dd80
@@ -65,7 +66,7 @@ public:
     float cruise_speed() const { return cruise_; }
     int off_route_count() const { return off_route_; }
     int replans() const { return replans_; }
-    const std::vector<std::uint32_t>& route() const { return route_; } // the last areal path
+    const std::vector<std::uint32_t>& route() const { return route_; } // the last areal path (empty for flyers)
     const std::deque<CorridorPoint>& corridor() const { return corridor_; }
     const std::deque<CorridorPoint>& legs() const { return legs_; }
     const std::deque<TrajectoryPoint>& points() const { return points_; }
