@@ -29,6 +29,9 @@ using namespace parkan::ai;
 // tools/ai_tests.cpp: the unit AI runtime (each returns its failure count).
 int ai_unit_tests();
 int ai_corpus_tests(const std::filesystem::path& game);
+// tools/game_tests.cpp: the strategy layer (world model, SuperAI, mission runtime).
+int game_unit_tests();
+int game_corpus_tests(const std::filesystem::path& game);
 
 namespace {
 
@@ -574,6 +577,7 @@ void test_keymap() {
 void test_corpus(const std::filesystem::path& game) {
     test_unit_motion(game);
     g_failures += ai_corpus_tests(game); // tools/ai_tests.cpp
+    g_failures += game_corpus_tests(game); // tools/game_tests.cpp
     test_audio_corpus(game);
 
     // Tut_2's sky at 07:00 (notes/atmosphere-render.md §10): the clock starts at 01:30 and a day lasts
@@ -636,6 +640,7 @@ int main(int argc, char** argv) {
     test_collision();
     test_audio();
     g_failures += ai_unit_tests();
+    g_failures += game_unit_tests();
     if (argc > 1) test_corpus(argv[1]);
     std::printf(g_failures ? "%d FAILURES\n" : "all passed\n", g_failures);
     return g_failures ? 1 : 0;

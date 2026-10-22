@@ -45,6 +45,9 @@ add_library(parkan_core STATIC
   src/mission/tma.cpp
   src/mission/scheme.cpp
   src/mission/ske.cpp
+  src/game/world.cpp
+  src/game/super_ai.cpp
+  src/game/mission_runtime.cpp
   src/input/scancodes.cpp
   src/input/translate_table.cpp
   src/input/man_manager.cpp
@@ -64,7 +67,7 @@ target_link_libraries(parkan-check PRIVATE parkan_core stb_vorbis)
 add_executable(parkan-dump tools/parkan_dump.cpp)
 target_link_libraries(parkan-dump PRIVATE parkan_core)
 
-add_executable(parkan-tests tools/parkan_tests.cpp tools/ai_tests.cpp)
+add_executable(parkan-tests tools/parkan_tests.cpp tools/ai_tests.cpp tools/game_tests.cpp)
 target_link_libraries(parkan-tests PRIVATE parkan_core)
 enable_testing()
 add_test(NAME unit COMMAND parkan-tests)
