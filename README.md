@@ -52,9 +52,10 @@ The target is behavioural fidelity on a modern platform.
 
 ## Status
 
-> Early but playable: you can walk the hero around every campaign map while enemy clans run their
-> mission scripts and order their robots around. Tutorials talk to you and track objectives. There
-> are no weapons, no combat HUD and no base building yet.
+> Early but playable: you can walk the hero around every campaign map and fight. Guns, bullets,
+> damage, deaths and explosions work, enemy robots engage you, and the mission scripts notice your
+> kills. Tutorials talk to you and track objectives. There is no combat HUD, no building capture and
+> no base building yet.
 
 | Area | State |
 |---|---|
@@ -68,10 +69,13 @@ The target is behavioural fidelity on a modern platform.
 | Turret aim, cockpit and outer cameras, strafing | ✅ |
 | Input: the original binding tables plus a modern WASD layout | ✅ ([controls](docs/CONTROLS.md)) |
 | Audio: 399 sounds, effects, 3D positioning, the CD soundtrack | ✅ |
-| Unit AI: path search, walker, pilots, animal migration | 🟡 movement only; no attack or follow yet |
+| Unit AI: path search, walker, pilots, migration, attack, follow, target picking, fire control | ✅ (repair and reload tasks to come) |
 | Mission scripts: script VM, a strategist AI per clan, 73 handlers | 🟡 61 handlers; enemy clans give patrol and move orders, tutorials send messages and objectives |
 | Game text in the game's fonts: message panel, objectives screen (Russian and English) | ✅ |
-| Weapons, damage, HUD, base building, research UI, menus | ⬜ not started |
+| Weapons: 158 guns, 66 bullet types, ammo and energy, barrel cycle, sight convergence | ✅ (homing missiles and shields to come) |
+| Damage and death: per-part hit points, direct and splash hits, armour, explosions, removal | ✅ (buildings and capture to come) |
+| Visual effects: 923 effects (sprites, beams, trails, bursts, debris, lights) | ✅ |
+| Combat HUD, base building, research UI, menus | ⬜ not started |
 | Multiplayer (DirectPlay) | ⬜ partly mapped in Ghidra, not ported |
 
 ## Quick start
@@ -167,7 +171,8 @@ place in the code.
 | `Ngi32`, `services` | `src/res/`, `src/core/` | NRes archives, textures, meshes, materials, sounds, text |
 | `Terrain` | `src/res/terrain`, `src/scene/` | landscape mesh, shading, sky and atmosphere |
 | `AniMesh`, `Control` | `src/scene/model`, `src/control/` | skeletal sampling, motion graphs, unit physics, turrets |
-| `World3D` | `src/world/` | live units, ground probe, collisions |
+| `World3D` | `src/world/`, `src/combat/` | live units, ground probe, collisions, ray traces; guns, bullets, damage, death |
+| `Effect` | `src/fx/`, `src/app/fx_draw` | effect templates, the particle runtime and its renderer |
 | `ArealMap`, `Behavior`, `Wizard` | `src/ai/` | areas and path search, walkers, pilots, unit behaviour |
 | `ai` | `src/ai/script_*`, `formula`, `src/game/` | the mission script VM, the clan strategist (SuperAI), the world model |
 | `MisLoad` | `src/mission/` | missions (TMA), unit schemes, research tree, skies |
@@ -180,7 +185,7 @@ SDL_GPU with Metal shaders. More detail is in [`docs/ARCHITECTURE.md`](docs/ARCH
 
 ```
 port/
-├── src/            engine: core, res, mission, scene, control, world, ai, game, input, audio, ui, app
+├── src/            engine: core, res, mission, scene, control, world, combat, fx, ai, game, input, audio, ui, app
 ├── tools/          parkan-check (corpus), parkan-tests, parkan-dump (inspect any resource)
 ├── docs/           ARCHITECTURE.md, CONTROLS.md, images/
 └── third_party/    stb_vorbis (public domain)
