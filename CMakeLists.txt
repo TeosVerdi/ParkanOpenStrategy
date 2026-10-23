@@ -101,3 +101,20 @@ target_compile_options(parkan PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(parkan PROPERTIES
   MACOSX_BUNDLE_GUI_IDENTIFIER org.parkan.port
   MACOSX_BUNDLE_BUNDLE_NAME "Parkan")
+
+# Game data from installed folders or retail disc images (src/install: MDF/MDS, ISO, BIN/CUE,
+# ISO 9660/Joliet, InstallShield 5 cabinets, edition manifests, import). SDL-free, part of the core.
+target_sources(parkan_core PRIVATE
+  src/install/hash.cpp
+  src/install/inflate.cpp
+  src/install/disc.cpp
+  src/install/iscab.cpp
+  src/install/source.cpp
+  src/install/edition.cpp
+  src/install/install.cpp
+)
+target_sources(parkan-tests PRIVATE tools/install_tests.cpp)
+
+add_executable(parkan-install tools/parkan_install.cpp)
+target_link_libraries(parkan-install PRIVATE parkan_core SDL3::SDL3)
+target_compile_options(parkan-install PRIVATE -Wall -Wextra -Wpedantic)

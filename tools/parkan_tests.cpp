@@ -49,6 +49,8 @@ int end_corpus_tests(const std::filesystem::path& game);
 // tools/building_tests.cpp: buildings in combat (HP, capture, destruction, the AI capture task).
 int building_unit_tests();
 int building_corpus_tests(const std::filesystem::path& game);
+// tools/install_tests.cpp: disc images, InstallShield cabinets, editions, import (src/install).
+int install_unit_tests();
 
 namespace {
 
@@ -705,6 +707,7 @@ int main(int argc, char** argv) {
     g_failures += hud_unit_tests();
     g_failures += end_unit_tests();
     g_failures += building_unit_tests();
+    g_failures += install_unit_tests();
     if (argc > 1) test_corpus(argv[1]);
     std::printf(g_failures ? "%d FAILURES\n" : "all passed\n", g_failures);
     return g_failures ? 1 : 0;

@@ -30,6 +30,7 @@
 #include <set>
 
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <strings.h>
 
@@ -181,7 +182,7 @@ int check_assets(const fs::path& game) {
 }
 
 // notes/audio.md §1: every SWAV decodes, every FX sound command resolves (except the one entry the
-// data itself lacks), every MUSIC/Track*.ogg opens.
+// data itself lacks), every MUSIC/Track*.ogg opens (or Track*.wav, ripped from a CD by parkan-install).
 int check_audio(const fs::path& game) {
     AssetLibrary lib(game);
     int bad = 0, swav = 0;
@@ -234,7 +235,24 @@ int check_audio(const fs::path& game) {
     if (auto dir = resolve_path(game, "MUSIC"))
         for (const auto& e : fs::directory_iterator(*dir)) {
             const auto f = e.path().filename().string();
-            if (f.size() != 11 || strncasecmp(f.c_str(), "track", 5) != 0 || strcasecmp(f.c_str() + 7, ".ogg") != 0) continue;
+            if (f.size() != 11 || strncasecmp(f.c_str(), "track", 5) != 0) continue;
+            if (strcasecmp(f.c_str() + 7, ".wav") == 0) {
+                // Ripped from a CD by parkan-install: 44-byte header, 44.1 kHz stereo 16-bit PCM.
+                std::uint8_t h[44] = {};
+                std::ifstream(e.path(), std::ios::binary).read(reinterpret_cast<char*>(h), 44);
+                std::uint32_t data = 0;
+                std::memcpy(&data, h + 40, 4);
+                if (std::memcmp(h, "RIFF", 4) != 0 || std::memcmp(h + 8, "WAVEfmt ", 8) != 0 || h[20] != 1 || h[22] != 2 ||
+                    std::memcmp(h + 36, "data", 4) != 0 || fs::file_size(e.path()) != 44 + std::uint64_t(data)) {
+                    ++bad;
+                    std::printf("  FAIL MUSIC/%s: not a 44-byte-header PCM WAV\n", f.c_str());
+                    continue;
+                }
+                ++tracks;
+                music += data / 176400.0;
+                continue;
+            }
+            if (strcasecmp(f.c_str() + 7, ".ogg") != 0) continue;
             int err = 0;
             stb_vorbis* v = stb_vorbis_open_filename(e.path().string().c_str(), &err, nullptr);
             if (!v) {
