@@ -49,6 +49,9 @@ int end_corpus_tests(const std::filesystem::path& game);
 // tools/building_tests.cpp: buildings in combat (HP, capture, destruction, the AI capture task).
 int building_unit_tests();
 int building_corpus_tests(const std::filesystem::path& game);
+// tools/shell_tests.cpp: the game shell (intro videos, forms, navigation, briefings).
+int shell_unit_tests();
+int shell_corpus_tests(const std::filesystem::path& game);
 // tools/install_tests.cpp: disc images, InstallShield cabinets, editions, import (src/install).
 int install_unit_tests();
 
@@ -638,6 +641,7 @@ void test_corpus(const std::filesystem::path& game) {
     g_failures += hud_corpus_tests(game); // tools/hud_tests.cpp
     g_failures += end_corpus_tests(game); // tools/end_tests.cpp
     g_failures += building_corpus_tests(game); // tools/building_tests.cpp
+    g_failures += shell_corpus_tests(game);    // tools/shell_tests.cpp
     test_audio_corpus(game);
 
     // Tut_2's sky at 07:00 (notes/atmosphere-render.md §10): the clock starts at 01:30 and a day lasts
@@ -707,6 +711,7 @@ int main(int argc, char** argv) {
     g_failures += hud_unit_tests();
     g_failures += end_unit_tests();
     g_failures += building_unit_tests();
+    g_failures += shell_unit_tests();
     g_failures += install_unit_tests();
     if (argc > 1) test_corpus(argv[1]);
     std::printf(g_failures ? "%d FAILURES\n" : "all passed\n", g_failures);

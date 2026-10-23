@@ -29,6 +29,7 @@
 #include "ui/hud_text.hpp"
 #include "ui/mission_end.hpp"
 #include "ui/campaign.hpp"
+#include "shell/briefing.hpp"
 
 #include <fstream>
 #include <set>
@@ -347,11 +348,46 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
 
     // Sound (notes/audio.md): in a mission a random track plays once, then a different random one; the
     // listener is the rendered camera. Not started for --shot.
+    // The briefing (notes/shell.md "Briefing"; CMission::LoadNewMission 100a1f30, CBriefing::Load 10031330):
+    // a new mission entered from the shell plays mission.cfg's `object briefing` fly-through first (view
+    // mode 5). A missing object, file or a parse error leaves the mission to start at once.
+    shell::BriefingSetup briefing_setup;
+    std::optional<shell::BriefingPath> briefing;
+    std::string briefing_title; // <mission>/descr (CGame+0xd4), cp1251
+    bool briefing_started = false, briefing_skip = false;
+    if (auto p = resolve_path(*dir, "mission.cfg")) {
+        const Bytes b = read_file(*p);
+        briefing_setup = shell::parse_briefing_setup({reinterpret_cast<const char*>(b.data()), b.size()});
+    }
+    if (opt.briefing && !briefing_setup.filename.empty()) {
+        try {
+            if (auto bp = resolve_path(*dir, briefing_setup.filename)) {
+                const Bytes b = read_file(*bp);
+                briefing.emplace(shell::parse_briefing_cfg({reinterpret_cast<const char*>(b.data()), b.size()}));
+                if (briefing->waypoints().empty()) briefing.reset();
+            }
+        } catch (const std::exception& ex) {
+            SDL_Log("play: briefing: %s", ex.what());
+            briefing.reset();
+        }
+        if (auto d = resolve_path(*dir, "descr")) {
+            const Bytes b = read_file(*d);
+            briefing_title.assign(b.begin(), std::find(b.begin(), b.end(), '\n'));
+            while (!briefing_title.empty() && (briefing_title.back() == '\r' || briefing_title.back() == ' ')) briefing_title.pop_back();
+        }
+        if (briefing) SDL_Log("play: briefing %s, %zu waypoints", briefing_setup.filename.c_str(), briefing->waypoints().size());
+    }
     std::unique_ptr<audio::AudioEngine> sound;
     if (opt.shot_path.empty()) {
         sound = std::make_unique<audio::AudioEngine>(lib);
         if (!sound->ok()) sound.reset();
-        else sound->play_random_music(false);
+        if (sound && opt.sfx_volume >= 0) sound->set_gain(audio::Bus::Sfx, opt.sfx_volume);
+        if (sound && opt.music_volume >= 0) sound->set_gain(audio::Bus::Music, opt.music_volume);
+        if (sound && !opt.music) sound->set_gain(audio::Bus::Music, 0); // PLAY_CD_MUSIC = 0 (port: the tracks stay silent)
+        // initGame: MusicPlayRandomTrack unless the view mode is 5; CBriefing::Load: MusicStop, then the
+        // briefing's cd_track looped (C01M01 only).
+        if (sound && !briefing) sound->play_random_music(false);
+        else if (sound && briefing_setup.cd_track) sound->play_music(*briefing_setup.cd_track, true);
     }
     std::size_t footsteps = 0;
     std::map<std::string, std::vector<FxSound>> fx_sounds; // effect → its sound commands
@@ -809,7 +845,14 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
 
     vo.escape_quits = false;
     vo.quit_requested = [&] { return quit || (end_ctl.state() == ui::GameState::Leaving && leaving_frames > 0); };
+    bool window_closed = false;
     vo.on_event = [&](const SDL_Event& ev) {
+        if (ev.type == SDL_EVENT_QUIT) window_closed = true;
+        if (briefing) {
+            // DispatchUIKeyMessage ignores everything in view mode 5; OnGameKeyDown: Esc skips the briefing.
+            if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat && ev.key.scancode == SDL_SCANCODE_ESCAPE) briefing_skip = true;
+            return;
+        }
         if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat) {
             if (end_ctl.message_visible()) {
                 // OnGameKeyDown / OnGameCharKey: Esc leaves; after a failure R restarts and L loads. Read
@@ -851,6 +894,33 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         }
     };
 
+    // The briefing's per-frame part of MainLoop, run with the simulation clock (game time 0 = the first
+    // CBriefing_Draw).
+    auto briefing_tick = [&] {
+        if (briefing && (briefing_skip || (briefing_started && briefing->done()))) {
+            // MainLoop, the frame after the path ended or Esc: ~CBriefing stops every 2D wave (the voice),
+            // the AI unfreezes, the view returns to the hero; an only_briefing mission is over (won), any
+            // other plays a random track. The objectives screen's 7 s start now.
+            briefing.reset();
+            if (sound) sound->stop_all();
+            objectives_shown_ms = sim_ms;
+            if (briefing_setup.only_briefing) {
+                end_ctl.briefing_only_finished();
+            } else if (sound) {
+                sound->stop_music();
+                sound->play_random_music(false);
+            }
+        }
+        if (briefing) {
+            // CMission_UpdateViewModeCamera 100a5560 (view mode 5): the path by the game clock; playback
+            // starts with the first CBriefing_Draw (here: the first frame or step).
+            const std::uint32_t now = std::uint32_t(sim_ms);
+            if (!briefing_started) briefing->start(now), briefing_started = true;
+            else briefing->update(now);
+            for (const std::string& key : briefing->take_sounds())
+                if (auto v = voice_entries.find(key); sound && v != voice_entries.end()) sound->play({"voices.lib", v->second});
+        }
+    };
     // One simulation frame at most 33 ms long: input → IControl requests → motion → ground.
     auto step = [&](double to_ms) {
         const float dt = float(to_ms - sim_ms);
@@ -901,10 +971,12 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         }
         if (opt.demo_fire && hero_combat.alive()) hero_combat.set_trigger(true);
         sim_ms = to_ms;
+        briefing_tick();
         for (std::size_t i = 0; i < live.size(); ++i) {
             const combat::Combatant& c = combat.unit(i);
             if (c.removed) continue;
-            if (brains[i] && c.alive()) brains[i]->update(float(sim_ms)); // brain tick + motion update (pilot inside)
+            // SetAllUnitsAIFrozen(1) during the briefing: every unit but the hero (property 0x20a).
+            if (brains[i] && c.alive() && !(briefing && i != hero_slot)) brains[i]->update(float(sim_ms)); // brain tick + motion update (pilot inside)
             else live[i]->motion->update(float(sim_ms));
         }
         // The fire control's request: the target goes to the guns (SetTarget), the turret slews toward its
@@ -1076,7 +1148,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             }
         }
         update_effects(sim_ms / 1000);
-        if (runtime) runtime->update(std::uint32_t(sim_ms));
+        if (runtime && !briefing) runtime->update(std::uint32_t(sim_ms)); // MainLoop skips the scripts in view mode 5
         // Footsteps: a touch-down starts its step effect (step_h* by surface; the default surface's
         // entry until surfaces are decoded); the effect's sound commands play at the foot.
         for (auto& u : live)
@@ -1086,7 +1158,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                     if (sound)
                         for (const auto& s : load_fx_sounds(lib, fx->second)) sound->play(audio::fx_sound(s), td.position);
                 }
-        if (sound && sound->music_finished()) sound->play_random_music(false);
+        if (sound && !briefing && sound->music_finished()) sound->play_random_music(false);
     };
 
     vo.animate = [&](double seconds, std::vector<Mat4>& transforms) {
@@ -1128,6 +1200,20 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     // vector; free look (LShift + mouse) rotates locally by Rz((0.5 − ax)·2π) · Ry((0.5 − ay)·π).
     vo.camera = [&](ViewerOptions::Camera& cam) {
         hud_cam.reset();
+        if (briefing && !briefing_started) briefing_tick();
+        if (briefing) {
+            // CreateOuterCamera(…, near 3.0, far 700.0, fov 1.04); CameraCtl_ApplyZoom: fov = lerp(1.04, 0.2, zoom).
+            // The original renders into the viewport (0, 75, W, H − 75); with a horizontal fov the full-screen
+            // image under the black bars is the same picture. Night vision (flag 0x20) is unused by the data
+            // and not drawn.
+            const auto& bc = briefing->camera();
+            const float z = std::clamp(briefing->zoom(), 0.f, 1.f);
+            cam.eye = bc.eye, cam.forward = bc.forward, cam.up = bc.up;
+            cam.fov_x = (1 - z) * 1.04f + z * 0.2f;
+            cam.znear = 3.f, cam.zfar = 700.f;
+            if (sound) sound->set_listener(cam.eye, cam.forward, cam.up);
+            return true;
+        }
         if (spectator) {
             cam = *spectator;
             if (sound) sound->set_listener(cam.eye, cam.forward, cam.up);
@@ -1320,6 +1406,26 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (end_ctl.state() == ui::GameState::Leaving) ++leaving_frames;
             return;
         }
+        if (briefing) {
+            // CBriefing_Draw 100317b0 (CHud_Draw draws nothing else in view mode 5): the fade over the 3D image,
+            // the letterbox bars, the mission title, then the subtitles when [CS] SUBTITLES is on.
+            ui::fill_rect(f, vs, 0, 0, 640, 480, std::uint32_t(std::nearbyint(std::clamp(briefing->fade(), 0.f, 1.f) * 255.f)) << 24);
+            ui::fill_rect(f, vs, 0, 0, 640, 75, 0xff000000u);
+            ui::fill_rect(f, vs, 0, 405, 640, 480, 0xff000000u);
+            ui::draw_text(f, vs, menu_font, 20, 20, briefing_title, 0xff808080u);
+            const auto& wps = briefing->waypoints();
+            const int cur = briefing->index();
+            if (opt.subtitles && cur >= 0 && std::size_t(cur) < wps.size() && !wps[std::size_t(cur)].text_id.empty()) {
+                const std::string text = utf8_to_cp1251(texts.get(std::string_view(wps[std::size_t(cur)].text_id)));
+                // WrapTextToLines(GAME_FONT, 640): width ≤ round(ScaleX · 0.98 · 640) screen px; line step
+                // round((height + 1) / ScaleY).
+                const auto lines = ui::wrap_text(vs, *game_font.font, text, std::nearbyint(vs.sx() * 0.98f * 640.f));
+                const float step = std::nearbyint(float(game_font.font->height + 1) * vs.glyph_scale / vs.sy());
+                float y = 410;
+                for (const auto& l : lines) ui::draw_text(f, vs, game_font, 10, y, l, 0xff808080u), y += step;
+            }
+            return;
+        }
         if (pager && sim_ms - pager->shown_ms >= ui::kPagerLifetimeMs) pager.reset();
         if (objectives_visible && objectives_auto_hide && sim_ms - objectives_shown_ms >= ui::kObjectivesAutoHideMs)
             objectives_visible = false;
@@ -1369,10 +1475,17 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     std::vector<Vec3> unit_start;
     for (auto& u : live) unit_start.push_back(u->position());
     int rc = run_scene_viewer(window, std::move(scene), vo);
+    PlayOutcome outcome;
     if (end_ctl.state() == ui::GameState::Leaving) {
         if (end_ctl.won()) record_mission_complete(lib, opt.mission);
         if (end_ctl.pending_action() == ui::EndAction::Restart) rc = kPlayRestart;
+        outcome.won = end_ctl.won();
+        outcome.exit = end_ctl.pending_action() == ui::EndAction::Restart    ? PlayOutcome::Exit::Restart
+                       : end_ctl.pending_action() == ui::EndAction::LoadGame ? PlayOutcome::Exit::LoadGame
+                                                                             : PlayOutcome::Exit::Shell;
     }
+    if (window_closed) outcome.exit = PlayOutcome::Exit::QuitApp;
+    if (opt.outcome) *opt.outcome = outcome;
     for (std::size_t i = 0; i < live.size(); ++i) {
         const Vec3 a = unit_start[i], b = live[i]->position();
         const Vec3 h = b - hero.position();

@@ -88,7 +88,8 @@ Paths inside the data are resolved case-insensitively (`core/paths`).
 | iron3d HUD text | `res/tft`, `ui/hud_text` (pager, objectives screen) | rsli-font.md | done for the pager and objectives; frame art inferred |
 | iron3d cockpit HUD | `ui/hud` (pages from a plain `HudState`), `ui/hud_resources` (ui.lib pages, hq.cfg/compaund.cfg sprites, minimap) | hud.md | radar, target/own panels, status lamps, weapon rows with lock brackets, sight, satellite map; targeter 3D model, wingman page, map icons to do |
 | MisLoad, ArealMap | `mission/` TMA, research | research-tree.md, mission-data.md, FParkan tma | TMA, schemes + research done; missions render |
-| iron3d | `game/`, `shell/` | ui-shell.md | — |
+| iron3d shell (CShell, GUI framework, forms, intro, credits, briefing) | `shell/` (SDL-free: `gui` widgets, `shell` forms + navigation + launch block + wipe, `controls_form`, `briefing` path, `rich_text` credits, `movie`, `shell_data`, `ini`), `res/avi` + `res/msvideo1` (intro movies), `app/shell_app` (the exe loop: shell ↔ `app/play`), `app/screen2d` (SDL 2D renderer), `app/launcher` (port: data source) | shell.md, ui-shell.md, mission-end.md | the single-player shell; save/load, autodemo, multiplayer forms disabled |
+| iron3d game | `game/` | ui-shell.md | — |
 
 ## Rules
 
@@ -110,6 +111,17 @@ Paths inside the data are resolved case-insensitively (`core/paths`).
 - A model's clips are the motion states of its CTLD (`<base>.ctl` next to the mesh). Track B holds
   the clip; track A is usually {0,0}. Walking is a chain of sub-states (r_l_01: states 19–23 cover
   frames 10→14). All 531 CTLD entries (1,690 states) parse byte-exactly.
+
+## The game loop (`app/shell_app`)
+
+`parkan` with no debug flag runs iron_3d.exe's loop: the shell (`shell::Shell`, drawn by `Screen2D` with
+SDL's 2D renderer in a centred 4:3 area) until a form starts a mission (`Shell::exit(1)` with the launch
+block), then `run_play` with `PlayOptions::briefing` (SDL_GPU claims the window; the shell's renderer is
+destroyed first and rebuilt afterwards), then the shell again in "after game" mode, which replays the
+original's scripted commands to land on the campaign's mission list. `PlayOutcome` carries the exit
+(back, restart, load, quit) and the win (already written to `<pref>/dispatcher.ini`). The shell is
+SDL-free: the app feeds input (Windows virtual-key codes, virtual mouse coordinates), a clock and
+texture slots, and plays the sounds and acts on the `ShellEffects` it returns.
 
 ## Play mode (`app/play`)
 

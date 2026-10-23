@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstdio>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <random>
@@ -104,6 +105,8 @@ struct AudioEngine::Impl {
     bool music_loop = false;
     std::atomic<bool> music_done{false};
     std::vector<short> decode_buf;
+    std::FILE* wav = nullptr;          // a CD-ripped MUSIC/TrackNN.wav (instead of the Ogg decoder)
+    std::uint32_t wav_size = 0, wav_pos = 0; // data bytes, read position (from byte 44)
 
     explicit Impl(AssetLibrary& l) : lib(l) {}
 
@@ -232,6 +235,33 @@ struct AudioEngine::Impl {
     // Play(resume|loop)), else report finished (IsFinished).
     static void SDLCALL music_callback(void* user, SDL_AudioStream* stream, int additional, int) {
         auto& im = *static_cast<Impl*>(user);
+        if (im.wav && !im.music_done) {
+            // PCM 44.1 kHz stereo 16-bit straight from the file, whole frames.
+            int want = additional > 0 ? (additional + 3) & ~3 : 0;
+            bool rewound = false;
+            while (want > 0) {
+                if (im.wav_pos >= im.wav_size) {
+                    if (im.music_loop && !rewound && im.wav_size > 0 && std::fseek(im.wav, 44, SEEK_SET) == 0) {
+                        im.wav_pos = 0, rewound = true;
+                        continue;
+                    }
+                    im.music_done = true;
+                    return;
+                }
+                const std::uint32_t n = std::min<std::uint32_t>(std::uint32_t(std::min(want, 16384)), im.wav_size - im.wav_pos);
+                im.decode_buf.resize(n / 2);
+                const std::size_t got = std::fread(im.decode_buf.data(), 1, n, im.wav) & ~std::size_t(3);
+                if (got == 0) {
+                    im.wav_pos = im.wav_size; // truncated file: treat as the end
+                    continue;
+                }
+                rewound = false;
+                im.wav_pos += std::uint32_t(got);
+                SDL_PutAudioStreamData(stream, im.decode_buf.data(), int(got));
+                want -= int(got);
+            }
+            return;
+        }
         if (!im.vorbis || im.music_done) return;
         const int ch = im.vorbis_channels;
         bool rewound = false;
@@ -258,8 +288,12 @@ AudioEngine::AudioEngine(AssetLibrary& lib) : impl_(std::make_unique<Impl>(lib))
     // Tracks present on disk (the ogg-winmm wrapper reports the files it finds).
     for (int i = 0; i < 99; ++i) {
         char name[32];
+        // An installed or GOG folder has TrackNN.ogg; a disc imported by src/install has TrackNN.wav.
         std::snprintf(name, sizeof name, "MUSIC/Track%02d.ogg", i + 1);
-        if (resolve_path(lib.game_dir(), name)) impl_->tracks.push_back(i);
+        bool present = resolve_path(lib.game_dir(), name).has_value();
+        std::snprintf(name, sizeof name, "MUSIC/Track%02d.wav", i + 1);
+        present = present || resolve_path(lib.game_dir(), name).has_value();
+        if (present) impl_->tracks.push_back(i);
     }
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
         SDL_Log("audio: SDL_INIT_AUDIO failed: %s", SDL_GetError());
@@ -303,6 +337,7 @@ AudioEngine::~AudioEngine() {
     SDL_CloseAudioDevice(impl_->device);
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
     if (impl_->vorbis) stb_vorbis_close(impl_->vorbis);
+    if (impl_->wav) std::fclose(impl_->wav);
 }
 
 bool AudioEngine::ok() const { return impl_->device != 0; }
@@ -321,10 +356,18 @@ std::shared_ptr<const Pcm> AudioEngine::load(std::string_view lib, std::string_v
     return pcm;
 }
 
+Handle AudioEngine::play_pcm(std::shared_ptr<const Pcm> pcm, bool loop) {
+    Sound s;
+    return play_samples(s, std::move(pcm), {}, {}, loop);
+}
+
 Handle AudioEngine::play(const Sound& sound, Vec3 position, Vec3 velocity, bool loop) {
     if (!ok()) return 0;
-    auto pcm = load(sound.lib, sound.entry);
-    if (!pcm || !pcm->frames()) return 0;
+    return play_samples(sound, load(sound.lib, sound.entry), position, velocity, loop);
+}
+
+Handle AudioEngine::play_samples(const Sound& sound, std::shared_ptr<const Pcm> pcm, Vec3 position, Vec3 velocity, bool loop) {
+    if (!ok() || !pcm || !pcm->frames()) return 0;
     Command c;
     c.kind = Command::Play;
     c.voice.id = impl_->next_id++;
@@ -400,26 +443,48 @@ bool AudioEngine::play_music(int index, bool loop) {
     if (!impl_->music) return false;
     char name[32];
     std::snprintf(name, sizeof name, "MUSIC/Track%02d.ogg", index + 1);
-    const auto path = resolve_path(impl_->lib.game_dir(), name);
-    if (!path) return false;
-    int err = 0;
-    stb_vorbis* v = stb_vorbis_open_filename(path->string().c_str(), &err, nullptr);
-    if (!v) {
-        SDL_Log("audio: %s: stb_vorbis error %d", name, err);
-        return false;
+    stb_vorbis* v = nullptr;
+    std::FILE* wav = nullptr;
+    std::uint32_t wav_size = 0;
+    SDL_AudioSpec spec{SDL_AUDIO_S16, 2, 44100};
+    if (const auto path = resolve_path(impl_->lib.game_dir(), name)) {
+        int err = 0;
+        v = stb_vorbis_open_filename(path->string().c_str(), &err, nullptr);
+        if (!v) {
+            SDL_Log("audio: %s: stb_vorbis error %d", name, err);
+            return false;
+        }
+        const stb_vorbis_info info = stb_vorbis_get_info(v);
+        spec = {SDL_AUDIO_S16, info.channels, int(info.sample_rate)};
+    } else {
+        std::snprintf(name, sizeof name, "MUSIC/Track%02d.wav", index + 1);
+        const auto wpath = resolve_path(impl_->lib.game_dir(), name);
+        if (!wpath) return false;
+        wav = std::fopen(wpath->string().c_str(), "rb");
+        std::uint8_t header[44] = {};
+        std::error_code ec;
+        const auto size = std::filesystem::file_size(*wpath, ec);
+        const auto data = wav && !ec && std::fread(header, 1, 44, wav) == 44 ? music_wav_data_size(header, size) : std::nullopt;
+        if (!data) {
+            SDL_Log("audio: %s: not a 44.1 kHz stereo 16-bit PCM WAV", name);
+            if (wav) std::fclose(wav);
+            return false;
+        }
+        wav_size = *data;
     }
-    const stb_vorbis_info info = stb_vorbis_get_info(v);
-    const SDL_AudioSpec spec{SDL_AUDIO_S16, info.channels, int(info.sample_rate)};
     SDL_LockAudioStream(impl_->music);
     stb_vorbis* old = impl_->vorbis;
+    std::FILE* old_wav = impl_->wav;
     impl_->vorbis = v;
-    impl_->vorbis_channels = info.channels;
+    impl_->vorbis_channels = v ? spec.channels : 0;
+    impl_->wav = wav, impl_->wav_size = wav_size, impl_->wav_pos = 0;
     impl_->music_loop = loop;
     impl_->music_done = false;
     SDL_ClearAudioStream(impl_->music);
     SDL_SetAudioStreamFormat(impl_->music, &spec, nullptr);
     SDL_UnlockAudioStream(impl_->music);
     if (old) stb_vorbis_close(old);
+    if (old_wav) std::fclose(old_wav);
     impl_->track = index;
     return true;
 }
@@ -433,11 +498,14 @@ void AudioEngine::stop_music() {
     if (!impl_->music) return;
     SDL_LockAudioStream(impl_->music);
     stb_vorbis* old = impl_->vorbis;
+    std::FILE* old_wav = impl_->wav;
     impl_->vorbis = nullptr;
+    impl_->wav = nullptr;
     impl_->music_done = false;
     SDL_ClearAudioStream(impl_->music);
     SDL_UnlockAudioStream(impl_->music);
     if (old) stb_vorbis_close(old);
+    if (old_wav) std::fclose(old_wav);
 }
 
 int AudioEngine::music_track() const { return impl_->track; }

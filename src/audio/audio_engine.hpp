@@ -50,6 +50,8 @@ public:
     // Starts at once. Missing entries (e.g. fortif_door_move.wav) give 0. A positional one-shot beyond
     // its max distance is cancelled; a loop there is silent but keeps time (UpdateBankChannels3D).
     Handle play(const Sound& sound, Vec3 position = {}, Vec3 velocity = {}, bool loop = false);
+    // A 2D sound from decoded samples (e.g. a movie's audio stream), on the SFX line.
+    Handle play_pcm(std::shared_ptr<const Pcm> pcm, bool loop = false);
     void stop(Handle h);
     void stop_all();
     void set_position(Handle h, Vec3 position, Vec3 velocity);
@@ -71,6 +73,7 @@ public:
     bool music_finished() const; // a non-looping track ran out (CD player IsFinished)
 
 private:
+    Handle play_samples(const Sound& sound, std::shared_ptr<const Pcm> pcm, Vec3 position, Vec3 velocity, bool loop);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

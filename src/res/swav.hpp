@@ -5,6 +5,8 @@
 
 #include "core/bytes.hpp"
 
+#include <optional>
+
 namespace parkan {
 
 struct Pcm {
@@ -17,6 +19,11 @@ struct Pcm {
 
 // Decodes a RIFF/WAVE image; throws FormatError on anything but PCM16 / MS-ADPCM.
 Pcm decode_swav(std::span<const std::uint8_t> riff);
+
+// A CD-ripped music track (MUSIC/TrackNN.wav written by src/install): the 44-byte canonical header
+// "RIFF" … "WAVE" "fmt " (16 bytes: PCM, 2 channels, 44100 Hz, 16-bit) "data" at offset 36. Returns the
+// data size (clamped to what `file_size` holds after the header), or nullopt when the header is not that.
+std::optional<std::uint32_t> music_wav_data_size(std::span<const std::uint8_t> header, std::uint64_t file_size);
 
 // MS-ADPCM blocks (7-byte header per channel, then nibbles, high first, channels interleaved).
 // `coefs` holds the predictor pairs from the fmt chunk (c1, c2, c1, c2, ...); empty = the 7 standard

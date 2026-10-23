@@ -19,11 +19,21 @@ add_library(parkan_core STATIC
   src/res/library.cpp
   src/res/textres.cpp
   src/res/tft.cpp
+  src/res/avi.cpp
+  src/res/msvideo1.cpp
   src/ui/hud_text.cpp
   src/ui/hud.cpp
   src/ui/hud_resources.cpp
   src/ui/mission_end.cpp
   src/ui/campaign.cpp
+  src/shell/briefing.cpp
+  src/shell/movie.cpp
+  src/shell/shell_data.cpp
+  src/shell/ini.cpp
+  src/shell/rich_text.cpp
+  src/shell/gui.cpp
+  src/shell/shell.cpp
+  src/shell/controls_form.cpp
   src/res/ctld.cpp
   src/res/swav.cpp
   src/res/fx.cpp
@@ -82,7 +92,7 @@ target_link_libraries(parkan-check PRIVATE parkan_core stb_vorbis)
 add_executable(parkan-dump tools/parkan_dump.cpp)
 target_link_libraries(parkan-dump PRIVATE parkan_core)
 
-add_executable(parkan-tests tools/parkan_tests.cpp tools/ai_tests.cpp tools/game_tests.cpp tools/fx_tests.cpp tools/combat_tests.cpp tools/hud_tests.cpp tools/end_tests.cpp tools/building_tests.cpp)
+add_executable(parkan-tests tools/parkan_tests.cpp tools/ai_tests.cpp tools/game_tests.cpp tools/fx_tests.cpp tools/combat_tests.cpp tools/hud_tests.cpp tools/end_tests.cpp tools/building_tests.cpp tools/shell_tests.cpp)
 target_link_libraries(parkan-tests PRIVATE parkan_core)
 enable_testing()
 add_test(NAME unit COMMAND parkan-tests)
@@ -95,7 +105,7 @@ add_library(parkan_audio STATIC src/audio/audio_engine.cpp)
 target_link_libraries(parkan_audio PUBLIC parkan_core PRIVATE SDL3::SDL3 stb_vorbis)
 target_compile_options(parkan_audio PRIVATE -Wall -Wextra -Wpedantic)
 
-add_executable(parkan MACOSX_BUNDLE src/app/main.cpp src/app/scene_viewer.cpp src/app/play.cpp src/app/fx_viewer.cpp src/app/fx_draw.cpp)
+add_executable(parkan MACOSX_BUNDLE src/app/main.cpp src/app/scene_viewer.cpp src/app/play.cpp src/app/fx_viewer.cpp src/app/fx_draw.cpp src/app/screen2d.cpp src/app/shell_app.cpp src/app/launcher.cpp)
 target_link_libraries(parkan PRIVATE parkan_audio parkan_core SDL3::SDL3)
 target_compile_options(parkan PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(parkan PROPERTIES

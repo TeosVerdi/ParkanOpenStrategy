@@ -1,6 +1,10 @@
 // Entry point. The original flow (iron_3d.exe → iron3d.dll shell → game) is in notes/ui-shell.md.
 //
-//   parkan [<game dir>]                                               placeholder game window
+//   parkan [<game dir>] [--skip-intro] [--classic-keys] [--launcher]  the game: intro, shell, missions (app/shell_app)
+//   parkan --shell-shot <screen> <out.bmp> [--time <s>] [<game dir>]  one shell screen offscreen: intro, main, single,
+//                                                   campaigns, missions[:CC], singles, load, options, video, audio,
+//                                                   controls, tuning, credits, quit
+//   parkan --play <mission dir> --briefing ...                        start the mission with its briefing
 //   parkan --view <archive> <mesh> [--state <n>] [--time <s>] [--shot <out.bmp>] [<game dir>]
 //                                                   model viewer; plays motion state n of the model's CTLD
 //   parkan --terrain <map dir> [--shot <out.bmp>] [<game dir>]        terrain viewer (e.g. DATA/MAPS/Tut_2)
@@ -22,6 +26,7 @@
 #include "app/fx_viewer.hpp"
 #include "app/play.hpp"
 #include "app/scene_viewer.hpp"
+#include "app/shell_app.hpp"
 #include "audio/audio_engine.hpp"
 #include "res/ctld.hpp"
 #include "mission/ske.hpp"
@@ -52,17 +57,12 @@ std::filesystem::path default_game_dir(bool english) {
     return !std::filesystem::exists(ru, ec) && std::filesystem::exists(en, ec) ? en : ru;
 }
 
-int run_placeholder() {
-    bool running = true;
-    while (running) {
-        SDL_Event ev;
-        while (SDL_PollEvent(&ev)) {
-            if (ev.type == SDL_EVENT_QUIT) running = false;
-            if (ev.type == SDL_EVENT_KEY_DOWN && ev.key.key == SDLK_ESCAPE) running = false;
-        }
-        SDL_Delay(16);
-    }
-    return 0;
+std::filesystem::path pref_path() {
+    char* p = SDL_GetPrefPath("", "Parkan");
+    if (!p) return {};
+    std::filesystem::path out(p);
+    SDL_free(p);
+    return out;
 }
 
 // --sound / --music smoke path: plays one sample or one music track to its end, then exits.
@@ -116,7 +116,9 @@ int main(int argc, char** argv) {
     int start_state = 0;
     bool no_fog = false, demo_walk = false, demo_strafe = false, demo_fire = false, demo_aim = false, classic_keys = false, camera_sway = false;
     int camera_preset = 0;
-    std::string play, sound_lib, sound_entry, effect;
+    std::string play, sound_lib, sound_entry, effect, shell_shot_form;
+    bool skip_intro = false, force_launcher = false, lang_given = false;
+    std::string handoff;
     int music = -1;
     float pitch = -1; // camera elevation override (radians); negative = the mode's default
     parkan::PlayOptions debug_play; // --goto / --target / --damage-mult (port debug aids)
@@ -136,6 +138,8 @@ int main(int argc, char** argv) {
             unit = argv[++i];
         } else if (a == "--play" && i + 1 < argc) {
             play = argv[++i];
+        } else if (a == "--briefing") {
+            debug_play.briefing = true;
         } else if (a == "--walk") {
             demo_walk = true;
         } else if (a == "--goto" && i + 1 < argc) {
@@ -176,12 +180,34 @@ int main(int argc, char** argv) {
             shot = argv[++i];
         } else if (a == "--lang" && i + 1 < argc) {
             english = std::string_view(argv[++i]) == "en";
+            lang_given = true;
+        } else if (a == "--shell-shot" && i + 2 < argc) {
+            shell_shot_form = argv[++i];
+            shot = argv[++i];
+        } else if (a == "--handoff-test" && i + 1 < argc) {
+            handoff = argv[++i];
+        } else if (a == "--skip-intro") {
+            skip_intro = true;
+        } else if (a == "--launcher") {
+            force_launcher = true;
         } else {
             game = a;
         }
     }
-    if (game.empty()) game = default_game_dir(english);
-    if (!parkan::resolve_path(game, "MISSIONS")) {
+    // The game itself (no debug mode): the data folder is the positional argument, $PARKAN_DATA or --lang
+    // (overrides), else the folder remembered by the launcher, else the launcher runs (first start).
+    const bool game_mode = view_mesh.empty() && unit.empty() && terrain.empty() && mission.empty() && play.empty() && effect.empty() &&
+                           sound_entry.empty() && music < 0;
+    const std::filesystem::path pref = pref_path();
+    const bool overridden = !game.empty() || std::getenv("PARKAN_DATA") || lang_given;
+    bool need_launcher = false;
+    if (game.empty() && !overridden) game = parkan::remembered_data_dir(pref);
+    if (game.empty()) {
+        game = default_game_dir(english);
+        need_launcher = game_mode && !overridden && shell_shot_form.empty();
+    }
+    if (force_launcher) need_launcher = true;
+    if (!need_launcher && !parkan::resolve_path(game, "MISSIONS")) {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Parkan",
                                  ("Game data not found in:\n" + game.string() +
                                   "\n\nPass the folder as an argument or set PARKAN_DATA.").c_str(),
@@ -201,6 +227,19 @@ int main(int argc, char** argv) {
         SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError());
         SDL_Quit();
         return 1;
+    }
+    if (need_launcher) {
+        game = parkan::run_data_launcher(window, pref, game, shell_shot_form.empty() ? shot : std::string());
+        if (!shot.empty() && shell_shot_form.empty()) {
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            return 0;
+        }
+        if (game.empty()) {
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            return 0;
+        }
     }
     SDL_Log("game data: %s", game.string().c_str());
 
@@ -323,7 +362,25 @@ int main(int argc, char** argv) {
             opt.distance = 1.6f;
             rc = parkan::run_scene_viewer(window, parkan::load_terrain_render_mesh(lib, terrain), opt);
         } else {
-            rc = run_placeholder();
+            // iron_3d.exe: the shell, the game, back to the shell (app/shell_app).
+            parkan::ShellAppOptions so;
+            so.shot_form = shell_shot_form;
+            so.shot_path = shell_shot_form.empty() ? std::string() : shot;
+            so.shot_time = start_time;
+            so.skip_intro = skip_intro;
+            so.classic_keys = classic_keys;
+            so.pref = pref;
+            so.handoff_mission = handoff;
+            bool change = false;
+            rc = parkan::run_shell_app(window, lib, so, change);
+            while (change) {
+                // The options form's "game data" button: the launcher, then the shell on the new folder.
+                const auto next = parkan::run_data_launcher(window, pref, lib.game_dir());
+                if (next.empty()) break;
+                parkan::AssetLibrary next_lib(next);
+                so.skip_intro = true;
+                rc = parkan::run_shell_app(window, next_lib, so, change);
+            }
         }
     } catch (const std::exception& ex) {
         SDL_Log("error: %s", ex.what());

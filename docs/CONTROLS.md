@@ -11,6 +11,27 @@ Two port additions in the modern layout: **Option** is a bindable key (the origi
 **sprint**: each movement binding walks at half its original throttle and has a Shift twin with the
 full value, so Shift switches gait while a movement key is held (the original's modifier handling).
 
+## Menus (the game shell)
+
+As in the original (iron3d's GUI, notes/shell.md):
+
+| Input | Effect |
+|---|---|
+| Mouse over a control | selects it (the same as keyboard focus); it blinks and the `i_hilit` sound plays |
+| Left click (on press), **Enter**, **Space** | activate the selected button, list row or checkbox |
+| **Up / Down**, **Tab** | previous / next control (Up/Down inside a list move between its rows) |
+| **Left / Right** | sliders and selectors (held: auto-repeat every 0.1 s); bar buttons |
+| **Esc** | back (the main menu asks to quit) |
+| **Y / N** | answer the quit question |
+| Any key or left click | skip the current intro movie (each movie separately) |
+| Esc, Space or a click | leave the credits |
+| **Esc** during a briefing | skip it (no other input works while it plays) |
+
+Key bindings (Options → Controls): click a row or press Enter to capture the next key or mouse button
+(Esc included, as in the original); Delete or a right click clears it. Conflicting keys show in red and
+disable OK. The edited `ui_*.man` files are saved to the user folder; missions still use the port's
+layouts above (rebuilding the merged in-game tables from them is not ported yet).
+
 ## Driving (hero and warbots)
 
 | Action | Modern | Classic |

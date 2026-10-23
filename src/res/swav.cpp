@@ -1,6 +1,9 @@
 #include "res/swav.hpp"
 
 #include <algorithm>
+#include <cstring>
+
+#include <algorithm>
 #include <optional>
 
 namespace parkan {
@@ -120,6 +123,16 @@ Pcm decode_swav(std::span<const std::uint8_t> riff) {
                           " bits");
     }
     return pcm;
+}
+
+std::optional<std::uint32_t> music_wav_data_size(std::span<const std::uint8_t> h, std::uint64_t file_size) {
+    if (h.size() < 44 || file_size < 44) return std::nullopt;
+    auto tag = [&](std::size_t o, const char* t) { return std::memcmp(h.data() + o, t, 4) == 0; };
+    auto u16 = [&](std::size_t o) { return std::uint32_t(h[o] | h[o + 1] << 8); };
+    auto u32 = [&](std::size_t o) { return u16(o) | u16(o + 2) << 16; };
+    if (!tag(0, "RIFF") || !tag(8, "WAVE") || !tag(12, "fmt ") || u32(16) != 16 || !tag(36, "data")) return std::nullopt;
+    if (u16(20) != 1 || u16(22) != 2 || u32(24) != 44100 || u16(34) != 16 || u16(32) != 4) return std::nullopt;
+    return std::uint32_t(std::min<std::uint64_t>(u32(40), file_size - 44)) & ~3u;
 }
 
 } // namespace parkan

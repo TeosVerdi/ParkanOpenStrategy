@@ -14,6 +14,18 @@
 
 namespace parkan {
 
+// What the mission ended with (the exe's launch block after CGame::Run: launch+0x14c mode, launch+0x157 won;
+// notes/mission-end.md §5). The shell reads it to record a win and pick the form to show.
+struct PlayOutcome {
+    enum class Exit {
+        Shell,    // mode 1: Esc after the end message, leaving the mission, or an only_briefing mission's end
+        Restart,  // mode 2: R after a failure — run the same mission again
+        LoadGame, // mode 3: L after a failure — the shell's load-game form
+        QuitApp,  // port: the window was closed
+    } exit = Exit::Shell;
+    bool won = false; // launch+0x157 (the win is already recorded in dispatcher.ini when set)
+};
+
 struct PlayOptions {
     std::string mission;    // game-relative mission folder
     std::string shot_path;  // render one frame and exit
@@ -33,6 +45,14 @@ struct PlayOptions {
     std::optional<float> goto_heading;
     std::optional<std::uint32_t> aim_target;
     float damage_mult = 1;
+    // The shell's entry: play the mission's briefing first (mission.cfg `object briefing`); --play skips it
+    // unless --briefing is given.
+    bool briefing = false;
+    bool subtitles = true; // iron_3d.ini [CS] SUBTITLES (the shipped file has 1)
+    // iron_3d.ini [CS] SFX_VOLUME / CD_VOLUME (÷ 100) and PLAY_CD_MUSIC; negative = leave the mixer as it is.
+    float sfx_volume = -1, music_volume = -1;
+    bool music = true;
+    PlayOutcome* outcome = nullptr; // filled when the mission ends
 };
 
 // Returns the viewer's code, or kPlayRestart when the player restarted the mission (R after a failure).

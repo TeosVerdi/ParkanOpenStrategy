@@ -55,8 +55,9 @@ The target is behavioural fidelity on a modern platform.
 > Early but playable: you can walk the hero around every campaign map and fight with the original
 > cockpit HUD. Guns, bullets, damage, deaths and explosions work, enemy robots engage you, and the
 > mission scripts notice your kills. Buildings take damage, burn down and can be captured by walking onto
-> their capture lift. Tutorials talk to you and track objectives. There is no base building and no menu
-> shell yet.
+> their capture lift. Tutorials talk to you and track objectives. Launching `parkan` plays the intro
+> movies and opens the original menus: pick a campaign mission, watch its briefing, play, and come back
+> to the mission list with the next mission unlocked. There is no base building yet.
 
 | Area | State |
 |---|---|
@@ -78,7 +79,9 @@ The target is behavioural fidelity on a modern platform.
 | Buildings: 167 placed buildings as targets, doors, capture lifts, owner change, the AI capture order | ✅ (building screens, building guns, debris to come) |
 | Visual effects: 923 effects (sprites, beams, trails, bursts, debris, lights) | ✅ |
 | Cockpit HUD: sight, radar, unit panels, status lamps, weapon rows, lock-on, satellite map | ✅ (targeter 3D view, wingman menu, HUD sounds to come) |
-| Base building, research UI, menus, game shell | ⬜ not started |
+| Game shell: intro movies (AVI / Microsoft Video 1), main menu, campaigns and mission lists with progression, briefings, options (video, audio, key bindings, devices), credits, quit | ✅ (save/load, autodemo and multiplayer menus disabled) |
+| First-run data launcher: installed game folder or disc image (MDS/MDF, ISO, BIN/CUE) | ✅ port addition |
+| Base building, research UI | ⬜ not started |
 | Multiplayer (DirectPlay) | ⬜ partly mapped in Ghidra, not ported |
 
 ## Quick start
@@ -97,15 +100,22 @@ brew install cmake ninja sdl3
 cmake -S . -B build -G Ninja && cmake --build build
 ```
 
-The port looks for the game data in this order: the first argument, then `$PARKAN_DATA`, then the
-default CrossOver bottle path (`--lang en` picks the English install there). Paths inside the data
-are matched case-insensitively.
+The port looks for the game data in this order: the first argument, then `$PARKAN_DATA`, then
+`--lang en` (the English install in the default CrossOver bottle), then the folder chosen earlier in the
+launcher. On the first start the launcher asks for an installed game folder or a disc image (which it
+imports once) and offers the CrossOver install when it finds one; Options → "Game data..." reopens it.
+Paths inside the data are matched case-insensitively. Settings, key bindings and campaign progress are
+kept in `~/Library/Application Support/Parkan/`, never in the game folder.
 
 ```sh
 export PARKAN_DATA="$HOME/Library/Application Support/CrossOver/Bottles/ParkanIS/drive_c/GOG Games/Parkan - Iron Strategy"
 P=build/parkan.app/Contents/MacOS/parkan
 
+$P                                                       # the game: intro, menus, missions
+$P --skip-intro                                          # straight to the main menu
+$P --shell-shot campaigns out.bmp --time 1               # one menu screen, off-screen
 $P --play MISSIONS/CAMPAIGN/CAMPAIGN.00/Mission.02      # drive the hero
+$P --play MISSIONS/CAMPAIGN/CAMPAIGN.00/Mission.01 --briefing   # with its briefing
 $P --play MISSIONS/CAMPAIGN/CAMPAIGN.02/Mission.01 --outer 1 --time 20
 $P --unit UNITS/AUTO/32_win_l2.dat                       # inspect a unit design
 $P --view bases.rlb r_l_01.msh --state 39               # model viewer, motion state 39
