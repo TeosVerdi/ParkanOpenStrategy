@@ -28,5 +28,9 @@ struct Scheme {
 };
 
 Scheme decode_scheme(std::span<const std::uint8_t> data);
+// The writer (the HQ build screen's UNITS\tempbld.dat, the factory's bld_unit_<LogicID>.dat; designs-research.md
+// §1): the same layout, strings NUL-padded to 32 bytes (names back to CP1251). Throws on a string that does
+// not fit in 31 bytes.
+Bytes encode_scheme(const Scheme& s);
 
 } // namespace parkan::mission

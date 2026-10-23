@@ -135,7 +135,8 @@ MissionRuntime::MissionRuntime(World world, const std::filesystem::path& scripts
             program = ai::load_script_bundle(scripts_dir, "default"); // CSuperAI ctor: a missing bundle → default
         }
         auto ai = std::make_unique<SuperAI>(world_, registry_, c, std::move(program), cb, rand);
-        for (std::uint32_t i = 0; i < opt.brains_per_clan; ++i) ai->add_brain();
+        const std::uint32_t brains = opt.brains_per_clan ? *opt.brains_per_clan : world_.clans[c].brains;
+        for (std::uint32_t i = 0; i < brains; ++i) ai->add_brain();
         ais_.push_back(std::move(ai));
     }
 }
@@ -148,13 +149,54 @@ std::unique_ptr<MissionRuntime> MissionRuntime::load(const std::filesystem::path
     if (!tma) throw std::runtime_error("no data.tma in " + dir->string());
     auto scripts = resolve_path(game_dir, "MISSIONS/SCRIPTS");
     if (!scripts) throw std::runtime_error("no MISSIONS/SCRIPTS");
-    World w = World::from_tma(mission::decode_tma(read_file(*tma)), &game_dir);
-    return std::make_unique<MissionRuntime>(std::move(w), *scripts, load_mission_config(*dir), opt);
+    const mission::Tma t = mission::decode_tma(read_file(*tma));
+    World w = World::from_tma(t, &game_dir);
+    auto rt = std::make_unique<MissionRuntime>(std::move(w), *scripts, load_mission_config(*dir), opt);
+    rt->set_economy(std::make_unique<economy::Economy>(rt->world(), game_dir, &t, opt.seed));
+    return rt;
+}
+
+void MissionRuntime::set_economy(std::unique_ptr<economy::Economy> eco) {
+    economy_ = std::move(eco);
+    if (!economy_) return;
+    economy_->set_brains([this](std::uint32_t clan) -> std::vector<std::uint32_t>* {
+        SuperAI* s = super_ai(clan);
+        return s ? &s->brains() : nullptr;
+    });
+    economy_->set_event_sink([this](const economy::EconomyEvent& e) { on_economy_event(e); });
+    for (auto& ai : ais_) ai->set_economy(economy_.get());
+}
+
+void MissionRuntime::on_economy_event(const economy::EconomyEvent& e) {
+    using T = economy::EconomyEvent::Type;
+    const WorldObject* o = world_.find(e.object);
+    SuperAI* owner = o && o->clan < kMaxClans ? registry_[o->clan] : nullptr;
+    // The host first (it creates the new object's body and attaches its control), then the strategist.
+    if (eco_sink_) eco_sink_(e);
+    switch (e.type) {
+    case T::UnitProduced:
+    case T::BuildingPlaced:
+        if (economy_) economy_->wrap_controls();
+        if (owner) owner->on_object_added(e.type == T::UnitProduced ? 1 : 2, e.object); // OnWorldNotify slot 4
+        break;
+    case T::BuildingUpgraded:
+        for (auto& ai : ais_) ai->on_object_removed(e.object);
+        if (owner) owner->on_object_added(2, e.object);
+        break;
+    case T::TaskComplete:
+        if (owner) owner->notify_object_event(e.object, 3);
+        break;
+    default: break;
+    }
 }
 
 void MissionRuntime::update(std::uint32_t now_ms) {
     if (!started_) {
         started_ = true;
+        if (economy_) {
+            economy_->wrap_controls();
+            economy_->start([this](std::uint32_t clan) { return super_ai(clan) != nullptr; });
+        }
         for (const auto& o : world_.objects())
             if (o.alive && o.clan < kMaxClans && registry_[o.clan]) registry_[o.clan]->on_object_added(o.building() ? 2 : 1, o.logic_id, true);
         for (auto& ai : ais_) { // 10039440
@@ -166,23 +208,33 @@ void MissionRuntime::update(std::uint32_t now_ms) {
         mission_gate_ = now_ms + 2000;
         if (SuperAI* p = super_ai(player_)) p->run_mission_event();
     }
+    if (economy_) economy_->update(now_ms);
     for (auto& ai : ais_) ai->takt(now_ms);
 }
 
 void MissionRuntime::object_added(std::uint32_t logic_id) {
+    if (economy_) {
+        economy_->wrap_controls();
+        economy_->on_object_added(logic_id);
+    }
     const WorldObject* o = world_.live(logic_id);
     if (o && o->clan < kMaxClans && registry_[o->clan]) registry_[o->clan]->on_object_added(o->building() ? 2 : 1, logic_id);
 }
 
 void MissionRuntime::object_killed(std::uint32_t logic_id) {
     for (auto& ai : ais_) ai->on_object_removed(logic_id);
+    if (economy_) economy_->on_object_removed(logic_id);
     world_.kill(logic_id);
 }
 
 void MissionRuntime::object_captured(std::uint32_t logic_id, std::uint32_t new_clan) {
     for (auto& ai : ais_) ai->on_object_removed(logic_id);
+    const WorldObject* o = world_.find(logic_id);
+    const std::uint32_t old = o ? o->clan : kNoClan;
     world_.set_clan(logic_id, new_clan);
-    object_added(logic_id);
+    if (economy_) economy_->on_object_captured(logic_id, old);
+    const WorldObject* n = world_.live(logic_id);
+    if (n && n->clan < kMaxClans && registry_[n->clan]) registry_[n->clan]->on_object_added(n->building() ? 2 : 1, logic_id);
 }
 
 void MissionRuntime::object_event(std::uint32_t logic_id, std::uint32_t event) {

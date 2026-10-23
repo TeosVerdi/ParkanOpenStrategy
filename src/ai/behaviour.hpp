@@ -7,6 +7,9 @@
 // mode of M_Task_Search (10030110..10030300, notes/buildings.md §3.6). The fire
 // control (MB+0x35c) is ai/fire_control.hpp. Spec: notes/unit-ai-runtime.md §1, §2.1, §4.
 //
+// The economy tasks (Transport 6, Build 7, Mine 0xa, Construct 0xc, Research 0xe/0x10, ShowUpgrade 0x12,
+// Upgrade 0x18) run in src/economy (economy::Economy, reached through its EconomyControl); M_Task_Leave
+// (0x14) is here.
 // NOT IMPLEMENTED (tasks that cannot start, so the order is dropped as "Cannot StartTask"): every other
 // order; Go into a building (target kind 0x201); patrols around a building or a unit. Also not modelled:
 // CheckRepair (10017d50: always false, there is no damage summary), the repair interrupt (event 3), the
@@ -37,6 +40,7 @@ enum OrderType : std::uint32_t {
     kOrderBuild = 7,
     kOrderMigrate = 0xf,
     kOrderCapture = 0x11, // ORDER_ROBOT_CAPTURE: M_Task_Search ("захват")
+    kOrderLeave = 0x14, // M_Task_Leave (walk out of a plant / a building's footprint)
     kOrderStayGround = 0x15,
     kOrderFollow = 0x16,
 };

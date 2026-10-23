@@ -12,11 +12,22 @@
 //   So only the player's script runs "Mission"; the others act through Problems.
 //
 // Port decisions: the placed objects are entered into their clan's unit list before Start (so Init's
-// SetUnitReserved / CountOwnUnits see them; the original's order is not traced); brains per clan
-// default to 0 (iron3d adds `clan+0x20` free brains, source not traced); fDifficulty keeps its
-// varset value (10005d00 sets it from a table not yet read).
+// SetUnitReserved / CountOwnUnits see them; the original's order is not traced); brains per clan come
+// from WorldClan::brains (iron3d 100392e0 AddBrain × player+0x20; the data.tma source is inferred, see
+// world.hpp) unless MissionOptions overrides them; fDifficulty keeps its varset value (10005d00 sets it
+// from a table not yet read).
+//
+// ECONOMY (src/economy, notes/base-building.md): load() attaches an economy::Economy over the world. On the
+// first update it wraps every object's control (so script and HQ orders of the economy types reach the
+// economy tasks), runs OnInternalInit (distributors, default mine orders), and is updated every frame before
+// the SuperAI takts. Its events reach the SuperAI as the original's do (a produced robot / a placed building
+// → OnObjectAdded; an upgrade → removed + added; a finished economy task → NotifyObjectEvent 3, i.e.
+// Mech_TaskComplete / Fort_Task_Complete [inferred: "Reported that Order Done" → NotifyGamePlay]) and then the
+// economy sink (the app: spawn the robot's body, play VOICE_RSRCH_COMPLETE, swap the building model, …).
+// A host that attaches a control to a new object later calls object_added(lid) (it re-wraps controls).
 #pragma once
 
+#include "economy/economy.hpp"
 #include "game/super_ai.hpp"
 
 #include <map>
@@ -53,7 +64,7 @@ const char* to_string(MissionEvent::Type t);
 
 struct MissionOptions {
     std::optional<std::uint32_t> player_clan; // default: the hero's clan, else 0
-    std::uint32_t brains_per_clan = 0;
+    std::optional<std::uint32_t> brains_per_clan; // default: WorldClan::brains
     std::uint32_t seed = 1; // the CRT rand() seed shared by every SuperAI
 };
 
@@ -75,6 +86,11 @@ public:
     void set_event_sink(std::function<void(const MissionEvent&)> sink) { sink_ = std::move(sink); }
     const std::vector<MissionEvent>& events() const { return log_; }
 
+    // The economy (load() attaches one; tests may attach their own before the first update).
+    void set_economy(std::unique_ptr<economy::Economy> eco);
+    economy::Economy* economy() { return economy_.get(); }
+    void set_economy_sink(std::function<void(const economy::EconomyEvent&)> sink) { eco_sink_ = std::move(sink); }
+
     // Once per game frame. The first call starts every SuperAI (Init runs).
     void update(std::uint32_t now_ms);
 
@@ -93,11 +109,14 @@ public:
 private:
     void on_callback(std::uint32_t clan, std::uint32_t channel, std::uint32_t kind, std::uint32_t b);
     void emit(MissionEvent e);
+    void on_economy_event(const economy::EconomyEvent& e);
 
     World world_;
     MissionConfig cfg_;
     std::vector<SuperAI*> registry_;
     std::vector<std::unique_ptr<SuperAI>> ais_;
+    std::unique_ptr<economy::Economy> economy_; // after the SuperAIs: it holds pointers into their brain lists
+    std::function<void(const economy::EconomyEvent&)> eco_sink_;
     std::function<void(const MissionEvent&)> sink_;
     std::vector<MissionEvent> log_;
     std::uint32_t rand_seed_;

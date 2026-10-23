@@ -494,6 +494,31 @@ struct CaptureTask : Task {
     }
 };
 
+// M_Task_Leave (ORDER_LEAVE 0x14): a produced robot walks out of its plant (base-building.md §3.2: param
+// -1, target 0x204), a unit is pushed out of a building's footprint by its build show (§2.3: target 0x201 =
+// the building). behaviour-data.md: "finds a free spot at 150 m / 300 m". [inferred] The spot: a random
+// direction (away from the building when one is given, within ±90°) at 150 m, 12 tries, then at 300 m;
+// the task ends when the walker is idle. The task's own choice of "free" (no other unit there) is not
+// traced.
+struct LeaveTask : Task {
+    using Task::Task;
+    bool start(Behaviour& b, const UnitState& st) override {
+        b.set_fire_mode(kFireAtWill, kNoObject, 0.5f);
+        float base = 0, spread = kTwoPi;
+        if (order.target_kind == kTargetBuilding) {
+            const Vec3 from = b.object_pos(order.target_id);
+            if (from.x != 0 || from.y != 0) base = std::atan2(st.pos.y - from.y, st.pos.x - from.x) - kTwoPi / 4, spread = kTwoPi / 2;
+        }
+        for (const float d : {150.f, 300.f})
+            for (int i = 0; i < 12; ++i) {
+                const float a = base + r01(b.rand) * spread;
+                if (b.walker.set_target({st.pos.x + d * std::cos(a), st.pos.y + d * std::sin(a), 0}, b.go_speed())) return true;
+            }
+        return false;
+    }
+    bool takt(Behaviour& b, const UnitState&) override { return !b.walker.idle(); }
+};
+
 // Orders whose tasks are not ported: they cannot start, so the stack drops them.
 struct NotImplementedTask : Task {
     using Task::Task;
@@ -513,6 +538,7 @@ std::unique_ptr<Task> make_task(const Order& o) { // MTaskStack::CreateTaskFromO
     case kOrderMigrate: return std::make_unique<MigrateTask>(o);
     case kOrderFollow: return std::make_unique<FollowTask>(o);
     case kOrderCapture: return std::make_unique<CaptureTask>(o);
+    case kOrderLeave: return std::make_unique<LeaveTask>(o);
     default: return std::make_unique<NotImplementedTask>(o);
     }
 }

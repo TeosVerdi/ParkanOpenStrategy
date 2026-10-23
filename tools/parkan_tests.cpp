@@ -54,6 +54,9 @@ int shell_unit_tests();
 int shell_corpus_tests(const std::filesystem::path& game);
 // tools/install_tests.cpp: disc images, InstallShield cabinets, editions, import (src/install).
 int install_unit_tests();
+// tools/economy_tests.cpp: economy and base building (distributor, mines, plants, research, builders).
+int economy_unit_tests();
+int economy_corpus_tests(const std::filesystem::path& game);
 
 namespace {
 
@@ -642,6 +645,7 @@ void test_corpus(const std::filesystem::path& game) {
     g_failures += end_corpus_tests(game); // tools/end_tests.cpp
     g_failures += building_corpus_tests(game); // tools/building_tests.cpp
     g_failures += shell_corpus_tests(game);    // tools/shell_tests.cpp
+    g_failures += economy_corpus_tests(game);  // tools/economy_tests.cpp
     test_audio_corpus(game);
 
     // Tut_2's sky at 07:00 (notes/atmosphere-render.md §10): the clock starts at 01:30 and a day lasts
@@ -713,6 +717,7 @@ int main(int argc, char** argv) {
     g_failures += building_unit_tests();
     g_failures += shell_unit_tests();
     g_failures += install_unit_tests();
+    g_failures += economy_unit_tests();
     if (argc > 1) test_corpus(argv[1]);
     std::printf(g_failures ? "%d FAILURES\n" : "all passed\n", g_failures);
     return g_failures ? 1 : 0;

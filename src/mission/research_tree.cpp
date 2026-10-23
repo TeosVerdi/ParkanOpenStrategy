@@ -69,10 +69,10 @@ ResearchTree load_research_tree(const std::filesystem::path& path) {
     Reader r(trf0.data);
     for (std::size_t i = 0; i < n; ++i) {
         auto& it = t.items[i];
-        it.research_time = r.f32();
-        it.research_cost = r.f32();
-        it.production_time = r.f32();
-        it.production_cost = r.f32();
+        it.research_power = r.f32();
+        it.research_ore = r.f32();
+        it.build_power = r.f32();
+        it.build_ore = r.f32();
         it.code = cstr_at(codes, r.u32());
         it.name = cstr_at(names, r.u32());
         it.description = cstr_at(descs, r.u32());

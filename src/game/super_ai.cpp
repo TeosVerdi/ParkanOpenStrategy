@@ -91,6 +91,7 @@ std::uint32_t SuperAI::current_problem() const {
 }
 
 void SuperAI::takt(std::uint32_t now_ms) {
+    now_ = now_ms;
     if (mode_ == 0 || next_problems_ >= std::int64_t(now_ms)) return;
     next_problems_ = std::int64_t(now_ms) + 7000 + rand_() % 1000;
     clock_ += 7;
@@ -349,6 +350,34 @@ void SuperAI::grow_base_radius() {
     }
 }
 
+void SuperAI::reserve_spot(float x, float y) { // 1000fb60: a 20-slot table, oldest replaced
+    auto& spots = world_.reserved_spots;
+    if (spots.size() >= 20) spots.erase(spots.begin());
+    spots.push_back({x, y, now_});
+}
+
+// 100068b0: inside the base radius; not a teleport, ruins, generator, hangar, bridge or bunker; not showing
+// (property 0x20c); a clan; level + 1 < the type's level count; the next level's scheme fully researched.
+bool SuperAI::upgradable(const UnitRec& u) const {
+    if (!economy_ || u.logic_id == kNoObject || !(u.logic_id & kBuildingBit)) return false;
+    const WorldObject* o = world_.live(u.logic_id);
+    if (!o || o->clan == kNoClan || o->clan != clan_) return false;
+    switch (o->type) {
+    case kTypeTeleport: case kTypeRuins: case kTypeGenerator: case kTypeHangar: case kTypeBridge:
+    case kTypeBunkerSmall: case kTypeBunkerMedium: case kTypeBunkerLarge: return false;
+    default: break;
+    }
+    const Vec3 p = o->position();
+    if (!(dist2d(p.x, p.y, base_x_, base_y_) < base_radius_)) return false;
+    if (economy_->showing(u.logic_id)) return false;
+    const std::uint32_t lvl = economy_->level(u.logic_id);
+    if (!(lvl + 1 < economy_->data().build_table.level_count(o->type))) return false;
+    const std::string* next = economy_->building_scheme(o->type, lvl + 1);
+    const economy::Research* r = economy_->research(clan_);
+    const mission::Scheme* s = next ? economy_->schemes().get(*next) : nullptr;
+    return s && r && r->fully_researched(*s);
+}
+
 std::uint32_t SuperAI::call_handler(std::uint32_t index, ai::ScriptVM& vm, const ai::Record& rec) {
     if (index < handler_calls.size()) ++handler_calls[index];
     const auto ref = [&](std::size_t i) -> ai::ScriptValue& { return vm.var(rec.refs.at(i)); };
@@ -385,7 +414,14 @@ std::uint32_t SuperAI::call_handler(std::uint32_t index, ai::ScriptVM& vm, const
         case kTargetId: o.target_id = u32(9); break;
         case kTargetPlace: o.place = {float(u32(9)), float(u32(10)), 0}; break;
         case kTargetType: o.mask = u32(9); break;
-        case kTargetName: return by_name_ok; // no design table to pick a scheme from
+        case kTargetName: { // 10010be0 / 100107c0: the design table's pick for robot type op3, mode op9
+            if (!economy_) return by_name_ok; // no design table: h28 gives the order with an empty target
+            if (!planner_.loaded) return false;
+            const auto pick = planner_.select_best(o.param, u32(9), std::uint32_t(rand_()) + now_);
+            if (!pick) return false;
+            o.design = planner_.entries[*pick].file;
+            return true;
+        }
         default: break;
         }
         return true;
@@ -426,7 +462,12 @@ std::uint32_t SuperAI::call_handler(std::uint32_t index, ai::ScriptVM& vm, const
         else problems_.push_back(std::move(np));
         return 0;
     }
-    case 3: return neutral(fbits(0.f)); // GetEnergySurplus: no distributor
+    case 3: { // GetEnergySurplus: fPowerAvailable − fPowerUsage of the last distributor step (0 before)
+        if (!economy_) return neutral(fbits(0.f));
+        const economy::Distributor* d = economy_->distributor(clan_);
+        if (!d || !d->stepped()) return fbits(0.f);
+        return fbits(d->summary().power_available - d->summary().power_usage);
+    }
     case 4: // ReleaseProblemUnits(problem)
         if (Problem* p = problem(u32(0))) release_problem_units(*p);
         return 0;
@@ -527,17 +568,71 @@ std::uint32_t SuperAI::call_handler(std::uint32_t index, ai::ScriptVM& vm, const
     case 15: { // GiveOrder(unit, type, insert, param, 4 floats, targetKind, t0[, t1])
         const std::uint32_t id = u32(0), insert = u32(2);
         UnitOrder o;
-        if (!make_order(o, false)) return neutral(0);
+        if (!make_order(o, false)) return economy_ ? 0 : neutral(0);
         if (!orders_allowed) return 0;
         if (!world_.live(id)) return 5;
         return give(id, o, int(insert)) ? 1 : 0;
     }
-    case 16: // SumFreeResourceSpace
-    case 17: // SumResourceAmount
-        return neutral(fbits(0.f));
-    case 18: // FindBuildPlace(outX, outY)
-        out(0, 0), out(1, 0);
-        return neutral(1);
+    case 16:   // SumFreeResourceSpace(type, res): Σ capacity − value over the own units of exactly `type`
+    case 17: { // SumResourceAmount(type, res): Σ value; RESOURCE_LEFT_ORE: Σ property 0x105
+        if (!economy_) return neutral(fbits(0.f));
+        const std::uint32_t type = u32(0), res = u32(1);
+        float sum = 0;
+        for (const auto& u : units_) {
+            if (u.logic_id == kNoObject || u.type != type || !world_.live(u.logic_id)) continue;
+            const economy::EcoState* st = economy_->state(u.logic_id);
+            if (!st) continue;
+            if (index == 17 && res == economy::kResourceLeftOre) sum += st->ore_left;
+            else if (res == economy::kResourceOre) sum += index == 16 ? st->ore_max - st->ore : st->ore;
+        }
+        return fbits(sum);
+    }
+    case 18: { // FindBuildPlace(outX, outY)
+        if (!economy_) {
+            out(0, 0), out(1, 0);
+            return neutral(1);
+        }
+        auto& spots = world_.reserved_spots; // 1000fb60: entries older than 60 s expire
+        std::erase_if(spots, [&](const World::ReservedSpot& r) { return now_ - r.time > 60000; });
+        planner_.refresh_lodes(world_, *economy_);
+        std::vector<std::array<float, 2>> obstacles;
+        for (const auto& o : world_.objects())
+            if (o.alive && o.building()) obstacles.push_back({o.position().x, o.position().y});
+        for (const auto& l : planner_.lodes)
+            if (!l.has_mine) obstacles.push_back({l.pos.x, l.pos.y});
+        for (const auto& r : spots) obstacles.push_back({r.x, r.y});
+        const auto ok = [&](float x, float y) {
+            if (world_.map_max_x > 0 && (x < 0 || x > world_.map_max_x || y < 0 || y > world_.map_max_y)) return false;
+            if (world_.terrain_height) { // the four ±75 corners in valid areals, mean |Δh| ≤ 20 (1000fa80)
+                float h[4];
+                const float cx[4] = {-75, 75, 75, -75}, cy[4] = {-75, -75, 75, 75};
+                for (int k = 0; k < 4; ++k) {
+                    auto z = world_.terrain_height(x + cx[k], y + cy[k]);
+                    if (!z) return false;
+                    h[k] = *z;
+                }
+                const float mean = (h[0] + h[1] + h[2] + h[3]) / 4;
+                float dev = 0;
+                for (float v : h) dev += std::fabs(v - mean);
+                if (dev / 4 > 20) return false;
+            }
+            for (const auto& b : obstacles)
+                if (dist2d(b[0], b[1], x, y) < 250.f) return false;
+            return true;
+        };
+        float fx = 0, fy = 0;
+        bool found = false;
+        for (float r = 0; r <= 1500 && !found; r += 150) {
+            const float step = r > 0 ? 150.f / r : 7.f;
+            for (float a = 0; a < 6.2831855f && !found; a += step) {
+                const float x = base_x_ + r * std::cos(a), y = base_y_ + r * std::sin(a);
+                if (ok(x, y)) fx = x, fy = y, found = true;
+            }
+        }
+        out(0, ftol(fx)), out(1, ftol(fy));
+        reserve_spot(fx, fy);
+        return 1;
+    }
     case 19: // GetClanBase(outX, outY, outClan)
         out(0, ftol(base_x_)), out(1, ftol(base_y_)), out(2, clan_);
         return 0;
@@ -630,7 +725,7 @@ std::uint32_t SuperAI::call_handler(std::uint32_t index, ai::ScriptVM& vm, const
         const auto g = std::int32_t(u32(0));
         const std::uint32_t insert = u32(2);
         UnitOrder o;
-        make_order(o, true); // TARGET_BY_NAME: the target stays empty
+        if (!make_order(o, true)) return 0; // TARGET_BY_NAME: no design fits
         if (!orders_allowed || !cp) return 0;
         ProblemGroup* gr = group(*cp, g);
         if (!gr) return 0;
@@ -725,16 +820,59 @@ std::uint32_t SuperAI::call_handler(std::uint32_t index, ai::ScriptVM& vm, const
         return ftol(sum);
     }
     case 39: return world_.live(u32(0)) ? 1 : 0; // ObjectExists
-    case 40: // FindMineSite(outX, outY, outHits): no lode table → "no candidate"
+    case 40: { // FindMineSite(outX, outY, outHits)
+        if (!economy_) {
+            out(0, 0), out(1, 0);
+            return neutral(kNoObject);
+        }
+        planner_.refresh_lodes(world_, *economy_);
+        const LodeRecord* free = nullptr;
+        for (const auto& l : planner_.lodes)
+            if (!l.has_mine && (!free || dist2d(l.pos.x, l.pos.y, base_x_, base_y_) < dist2d(free->pos.x, free->pos.y, base_x_, base_y_)))
+                free = &l;
+        if (free) { // the free lode nearest the base
+            out(0, ftol(free->pos.x)), out(1, ftol(free->pos.y));
+            out(2, ftol(hits_around(free->pos.x, free->pos.y, 350.f, kNoObject)));
+            reserve_spot(free->pos.x, free->pos.y);
+            return kNoObject;
+        }
+        std::uint32_t best = kNoObject;
+        float best_h = 0;
+        for (const auto& l : planner_.lodes) { // a hostile clan's mine, the least defended
+            if (!l.has_mine || l.mine_clan == clan_ || !hostile(l.mine_clan)) continue;
+            auto p = object_pos(l.mine);
+            if (!p) continue;
+            const float h = hits_around(p->x, p->y, 350.f, kNoObject);
+            if (best == kNoObject || h < best_h) best = l.mine, best_h = h;
+        }
+        if (best != kNoObject) {
+            out(2, ftol(best_h));
+            return best;
+        }
         out(0, 0), out(1, 0);
-        return neutral(kNoObject);
-    case 41: // OrderNextResearch(institute)
-        if (!world_.live(u32(0))) return kNoObject;
-        return neutral(0);
+        return kNoObject;
+    }
+    case 41: { // OrderNextResearch(institute)
+        const std::uint32_t inst = u32(0);
+        if (!world_.live(inst)) return kNoObject;
+        if (!economy_) return neutral(0);
+        const economy::Research* r = economy_->research(clan_);
+        if (!planner_.loaded || !r) return 0;
+        planner_.select_cheapest_research(*economy_, *r);
+        if (planner_.selected < 0 || planner_.entries[std::size_t(planner_.selected)].available) return 0;
+        UnitOrder o; // DesignPlanner::OrderResearch (10011100)
+        o.type = economy::kOrderResearchScheme, o.param = 0, o.target_kind = kTargetName;
+        o.design = planner_.entries[std::size_t(planner_.selected)].file;
+        o.limits[7] = 1.f, o.limits[8] = 1.f, o.limits[9] = 1.f, o.limits[10] = 0;
+        return give(inst, o, 3) ? 1 : 0;
+    }
     case 42: // ClearProblemField48(flag)
         if (u32(0) == 0 && cp) cp->and_mode = 0;
         return 0;
-    case 43: return neutral(0); // LoadDesignList
+    case 43: // LoadDesignList
+        if (!economy_) return neutral(0);
+        planner_.load(*economy_, economy_->research(clan_));
+        return 0;
     case 44: { // HitsAt(radius, clan | ERROR, kind, a[, b])
         const float radius = f32(0);
         const std::uint32_t c = u32(1), kind = u32(2);
@@ -796,7 +934,15 @@ std::uint32_t SuperAI::call_handler(std::uint32_t index, ai::ScriptVM& vm, const
         const WorldObject* o = world_.live(u32(0));
         return o ? o->clan : kNoObject;
     }
-    case 53: return neutral(0); // CountClanOreLodes
+    case 53: { // CountClanOreLodes(clan): that clan's lode table, records with flag +1
+        const std::uint32_t c = u32(0);
+        if (c >= 0x41) return 0;
+        if (!economy_) return neutral(0);
+        SuperAI* other = c < registry_.size() ? registry_[c] : nullptr;
+        if (!other) return 0;
+        other->planner_.refresh_lodes(world_, *economy_);
+        return std::uint32_t(std::count_if(other->planner_.lodes.begin(), other->planner_.lodes.end(), [](const LodeRecord& l) { return l.flag; }));
+    }
     case 54: { // GetObjectOrderType
         const WorldObject* o = world_.live(u32(0));
         return o ? o->current_order() : kNoObject;
@@ -807,11 +953,19 @@ std::uint32_t SuperAI::call_handler(std::uint32_t index, ai::ScriptVM& vm, const
         const Vec3 p = o->position();
         return p.x >= 0 && p.x <= world_.map_max_x && p.y >= 0 && p.y <= world_.map_max_y ? 1 : 0;
     }
-    case 56: return neutral(0);        // AllDesignsAvailable
+    case 56: // AllDesignsAvailable: planner P+0x25
+        if (!economy_) return neutral(0);
+        return planner_.all_available ? 1 : 0;
     case 57:                           // RunMissionScriptCommand(n, unused): host callback channel 2
         if (callback_) callback_(clan_, 2, u32(0), u32(1));
         return 0;
-    case 58: return neutral(kNoObject); // FindUpgradableBuilding
+    case 58: { // FindUpgradableBuilding(n): the n-th own building passing 100068b0
+        if (!economy_) return neutral(kNoObject);
+        std::uint32_t n = u32(0);
+        for (const auto& u : units_)
+            if (upgradable(u) && n-- == 0) return u.logic_id;
+        return kNoObject;
+    }
     case 59: return clock_ + u32(0);    // MakeDeadline(seconds)
     case 60: return u32(0) < clock_ ? 1 : kNoObject; // DeadlinePassed: 1 or ERROR
     case 61: { // GetObjectType
@@ -840,7 +994,20 @@ std::uint32_t SuperAI::call_handler(std::uint32_t index, ai::ScriptVM& vm, const
         if (best != kNoObject) out(1, ftol(best_h));
         return best;
     }
-    case 65: return neutral(0); // IsLargeRobotResearched
+    case 65: { // IsLargeRobotResearched
+        if (!economy_) return neutral(0);
+        if (!planner_.loaded || !economy_->research(clan_)) return 0;
+        if (planner_.large_latch) return 1;
+        for (const auto& d : planner_.entries)
+            if (d.available && !(d.type & kBuildingBit) && d.size > 2 && d.weapon >= 105000.f) {
+                planner_.large_latch = true;
+                for (std::size_t i = 0; i < problems_.size(); ++i)
+                    if (problems_[i].type == kPbmBuildingCapture) set_problem_state(std::uint32_t(i), kStSolved);
+                return 1;
+            }
+        planner_.large_latch = false;
+        return 0;
+    }
     case 66: { // GetCaptureBonus(logicId, outBonus)
         const WorldObject* o = world_.live(u32(0));
         if (!o) return 0;
@@ -866,7 +1033,7 @@ std::uint32_t SuperAI::call_handler(std::uint32_t index, ai::ScriptVM& vm, const
         return 1;
     }
     case 69: // SetDesignChoiceSpread(n)
-        if (std::int32_t(u32(0)) >= 0) design_spread_ = u32(0);
+        if (std::int32_t(u32(0)) >= 0) planner_.spread = u32(0);
         return 1;
     case 70: { // Random(n)
         const auto n = std::int32_t(u32(0));

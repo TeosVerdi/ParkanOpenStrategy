@@ -109,6 +109,7 @@ World World::from_tma(const mission::Tma& tma, const std::filesystem::path* game
         wc.base_x = c.anchor_x;
         wc.base_y = c.anchor_y;
         wc.migration = c.spatial;
+        wc.brains = c.research_tag > 0 ? std::uint32_t(c.research_tag) : 0;
         w.clans.push_back(std::move(wc));
     }
     // Relations by clan name. Unlisted pairs stay 1 (neither hostile nor allied; inferred: every shipped

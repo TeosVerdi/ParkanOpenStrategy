@@ -4,19 +4,16 @@
 // handlers. Spec: notes/script-vm.md, notes/script-handlers-a.md, notes/script-handlers-b.md,
 // notes/components.md "ISuperAI"; decompiled slots in notes/decomp/ai.dll/isuperai.c.
 //
-// NEUTRAL HANDLERS (systems the port does not have yet; each returns the spec's neutral/failure value
-// and is counted in neutral_calls):
-//   h3 GetEnergySurplus → 0.0 (no resource distributor, CSuperAI+0x438)
-//   h15/h28 TARGET_BY_NAME → h15 gives no order and returns 0 (no design table, +0x40c)
-//   h16 SumFreeResourceSpace, h17 SumResourceAmount → 0.0 (no IBehaviour attributes / ore)
-//   h18 FindBuildPlace → writes 0, 0 ("nothing found"), returns 1 (no areal flags / terrain heights)
-//   h40 FindMineSite → writes 0, 0, returns -1 (no mineral-lode table)
-//   h41 OrderNextResearch → 0 (-1 when the institute is gone; no research planner / IResearch)
-//   h43 LoadDesignList → 0 (no CreateObjectFromScheme statistics; the planner stays unloaded)
-//   h46 Stub46 → 0 (the original returns a stale FPU value)
-//   h53 CountClanOreLodes → 0, h56 AllDesignsAvailable → 0, h65 IsLargeRobotResearched → 0,
-//   h58 FindUpgradableBuilding → -1 (no lodes / planner / building levels)
-//   h70 Random(0) → 0 (the original divides by zero)
+// ECONOMY HANDLERS (set_economy; without an economy they return the neutral values below and count
+// them in neutral_calls): h3 GetEnergySurplus (the clan distributor's summary), h15/h28 TARGET_BY_NAME
+// (the design planner), h16/h17 the ore attributes, h18 FindBuildPlace, h40 FindMineSite (the lode
+// table), h41 OrderNextResearch, h43 LoadDesignList, h53 CountClanOreLodes, h56 AllDesignsAvailable,
+// h58 FindUpgradableBuilding, h65 IsLargeRobotResearched (game/design_planner.hpp, notes/base-building.md §6).
+// Neutral without an economy: h3 → 0.0; h15 by name → no order, 0; h16/h17 → 0.0; h18 → 0, 0, returns 1;
+// h40 → 0, 0, -1; h41 → 0 (-1 when the institute is gone); h43/h53/h56/h65 → 0; h58 → -1.
+// Always neutral: h46 Stub46 → 0 (the original returns a stale FPU value); h70 Random(0) → 0 (the
+// original divides by zero).
+// h18 without World::terrain_height accepts every point's corners (no areal / flatness test) [port].
 //
 // Port decisions (not traced in the original):
 //   - A cleared problem slot (type 0) is reused by the next AddProblem; the spec says "appends".
@@ -30,6 +27,7 @@
 #pragma once
 
 #include "ai/script_vm.hpp"
+#include "game/design_planner.hpp"
 #include "game/world.hpp"
 
 #include <functional>
@@ -116,6 +114,11 @@ public:
     bool remove_brain(std::size_t i);
     std::size_t brain_count() const { return brains_.size(); }
     std::uint32_t& brain(std::size_t i) { return brains_.at(i); }
+    std::vector<std::uint32_t>& brains() { return brains_; }
+
+    // The economy the handlers of base-building.md §6 read (nullptr: neutral values). Not owned.
+    void set_economy(economy::Economy* e) { economy_ = e; }
+    DesignPlanner& planner() { return planner_; }
 
     std::uint32_t call_handler(std::uint32_t index, ai::ScriptVM& vm, const ai::Record& rec) override;
 
@@ -159,6 +162,8 @@ private:
     void grow_base_radius();
     void update_problems();
     bool expr_done(const Problem& p, const ProblemExpr& x) const;
+    void reserve_spot(float x, float y); // 1000fb60
+    bool upgradable(const UnitRec& u) const; // 100068b0
 
     World& world_;
     std::vector<SuperAI*>& registry_;
@@ -179,7 +184,9 @@ private:
     std::array<Relation, kMaxClans> rel_{};
     std::vector<std::uint32_t> brains_;
     std::array<std::uint32_t, 7> built_{}; // +0x3e0..+0x3f8: mine, storage, plant, hangar, tower M, tower L, institute
-    std::uint32_t design_spread_ = 0;      // planner +0x10 (h69)
+    DesignPlanner planner_;                // +0x40c (spread +0x10: h69)
+    economy::Economy* economy_ = nullptr;
+    std::uint32_t now_ = 0;                // the last Takt time (timeGetTime for 1000fb60 / h15)
     std::int64_t ev_mission_ = -1, ev_problems_ = -1, ev_mech_ = -1, ev_fort_ = -1;
     std::optional<std::uint32_t> var_current_problem_, var_current_sender_;
 };

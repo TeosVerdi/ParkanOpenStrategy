@@ -26,6 +26,7 @@
 #include <array>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <unordered_map>
 
@@ -75,6 +76,7 @@ struct UnitOrder {
     Vec3 place{};                        // 0x202
     std::uint32_t mask = 0;              // 0x203
     std::string design;                  // 0x205: a scheme file name
+    float angle = 0;                     // 0x206 (a 4×4 placement, M_Task_Build T+0xe0): rotation about z; position = place
     std::array<float, 11> limits{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.f}; // +0x110; script writes [7..10]
 };
 
@@ -115,6 +117,10 @@ struct WorldClan {
     float base_x = 0, base_y = 0;
     std::vector<std::uint32_t> relations; // per clan index: 0 hostile, 1, 2 (data.tma relations)
     std::vector<std::array<float, 5>> migration; // mode-0 spatial records
+    // SuperAI brains (the robot limit): iron3d 100392e0 calls AddBrain player+0x20 times; player+0x20 is the
+    // MisLoad clan record's dword [5] (10039010). [inferred] That dword is the data.tma i32 after the .trf
+    // path (TmaClan::research_tag: 2..17 in the shipped missions, enemies more than the player).
+    std::uint32_t brains = 0;
 };
 
 struct TacticalAreal {
@@ -153,6 +159,16 @@ public:
     float map_max_x = 0, map_max_y = 0;
 
     bool in_tactical_areal(std::uint32_t areal, std::uint32_t logic_id) const;
+
+    // h18 FindBuildPlace's terrain: the ground height at (x, y), nullopt where no valid areal is (system
+    // map slots 7/6 + areal flag +0x20). Set by the app; unset = flat and valid everywhere.
+    std::function<std::optional<float>(float x, float y)> terrain_height;
+    // The global "recently assigned spot" table of ai.dll (1000fb60: 20 slots, 60 s), shared by every clan.
+    struct ReservedSpot {
+        float x = 0, y = 0;
+        std::uint32_t time = 0;
+    };
+    std::vector<ReservedSpot> reserved_spots;
 
 private:
     std::deque<WorldObject> objects_;

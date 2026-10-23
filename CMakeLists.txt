@@ -128,3 +128,14 @@ target_sources(parkan-tests PRIVATE tools/install_tests.cpp)
 add_executable(parkan-install tools/parkan_install.cpp)
 target_link_libraries(parkan-install PRIVATE parkan_core SDL3::SDL3)
 target_compile_options(parkan-install PRIVATE -Wall -Wextra -Wpedantic)
+
+# Economy and base building (src/economy: distributor, research runtime, mine/construct/research/build/
+# upgrade/transport tasks; notes/base-building.md). SDL-free, part of the core.
+target_sources(parkan_core PRIVATE
+  src/economy/econ_data.cpp
+  src/economy/research.cpp
+  src/economy/distributor.cpp
+  src/economy/economy.cpp
+)
+target_sources(parkan_core PRIVATE src/game/design_planner.cpp)
+target_sources(parkan-tests PRIVATE tools/economy_tests.cpp)
