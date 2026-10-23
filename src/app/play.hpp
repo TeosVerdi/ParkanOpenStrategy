@@ -35,6 +35,8 @@ struct PlayOptions {
     float damage_mult = 1;
 };
 
+// Returns the viewer's code, or kPlayRestart when the player restarted the mission (R after a failure).
+inline constexpr int kPlayRestart = 2;
 int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt);
 
 } // namespace parkan

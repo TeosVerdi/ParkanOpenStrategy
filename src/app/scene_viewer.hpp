@@ -39,6 +39,10 @@ struct ViewerOptions {
     SkyTextures sky_textures;
     std::function<void(double seconds, Vec3 forward, SkyDome& dome, SkyFrame& out)> sky;
     // Optional: every SDL event goes here first (game input).
+    // Esc quits the viewer unless the game handles it (play: the end-of-mission message reads Esc).
+    bool escape_quits = true;
+    // Optional: polled once per frame; true ends the viewer loop (the game left the mission).
+    std::function<bool()> quit_requested;
     std::function<void(const SDL_Event&)> on_event;
     // Optional: after `animate`, may move the orbit centre (a camera following a unit).
     std::function<void(Vec3& centre)> follow;

@@ -27,7 +27,10 @@
 #include "ui/hud.hpp"
 #include "ui/hud_resources.hpp"
 #include "ui/hud_text.hpp"
+#include "ui/mission_end.hpp"
+#include "ui/campaign.hpp"
 
+#include <fstream>
 #include <set>
 
 #include <algorithm>
@@ -166,6 +169,34 @@ std::string key_label(std::string_view command, input::KeyLayout layout) {
 std::string with_key(std::string text, const std::string& key) {
     if (auto p = text.find("%s"); p != std::string::npos) text.replace(p, 2, key);
     return text;
+}
+
+// The shell's bookkeeping after a won mission (notes/mission-end.md §5): [COMPLETE] <key>=1 in
+// missions/dispatcher.ini. Port: the game folder stays read-only, so the edited copy lives in the
+// user's preferences folder, seeded from the shipped file.
+void record_mission_complete(AssetLibrary& lib, std::string_view mission) {
+    std::string path(mission);
+    for (char& c : path) c = c == '\\' ? '/' : char(std::tolower(static_cast<unsigned char>(c)));
+    if (path.empty() || path.back() != '/') path += '/';
+    char* pref = SDL_GetPrefPath("", "Parkan");
+    if (!pref) return;
+    const std::filesystem::path ini_path = std::filesystem::path(pref) / "dispatcher.ini";
+    SDL_free(pref);
+    std::string ini;
+    std::error_code ec;
+    if (std::filesystem::exists(ini_path, ec)) {
+        const Bytes b = read_file(ini_path);
+        ini.assign(b.begin(), b.end());
+    } else if (auto shipped = resolve_path(lib.game_dir(), "MISSIONS/dispatcher.ini")) {
+        const Bytes b = read_file(*shipped);
+        ini.assign(b.begin(), b.end());
+    }
+    ini = ui::set_mission_complete(ini, path);
+    std::ofstream(ini_path, std::ios::binary) << ini;
+    auto campaigns = ui::scan_campaigns(lib.game_dir());
+    ui::apply_progress(campaigns, ui::parse_dispatcher_ini(ini));
+    const auto next = ui::next_mission(campaigns, path);
+    SDL_Log("play: %s complete (%s); next: %s", path.c_str(), ini_path.c_str(), next ? next->c_str() : "-");
 }
 
 } // namespace
@@ -528,6 +559,24 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (const std::string* l = o.get("library"); l && contains_ci(*l, "voices.lib"))
                 for (const auto& [k, v] : o.entries) voice_entries[k] = v;
     }
+    // The end of the mission (notes/mission-end.md): CGame+0x08 as a controller, the centred message
+    // over the frozen scene, and the computer voices from UI/game_resources.cfg.
+    ui::MissionEndController end_ctl;
+    const ui::EndStrings end_str = ui::load_end_strings(ui_strings);
+    std::map<std::string, std::string> voice_table;
+    if (auto p = resolve_path(lib.game_dir(), "UI/game_resources.cfg")) {
+        const Bytes b = read_file(*p);
+        voice_table = ui::parse_voice_table({reinterpret_cast<const char*>(b.data()), b.size()});
+    }
+    std::optional<ViewerOptions::Camera> spectator; // CMission_EnterSpectatorAtUnit after the hero's death
+    // QueueUnitVoice with no unit: the 2D computer voice (VOICE_MISSION_COMPLETE / _FAIL).
+    auto play_end_voice = [&](const char* key) {
+        if (!key) return;
+        SDL_Log("play: mission %s", end_ctl.state() == ui::GameState::Complete ? "complete" : "failed");
+        if (auto v = voice_table.find(key); sound && v != voice_table.end()) sound->play({"voices.lib", v->second});
+    };
+    std::size_t leaving_frames = 0;
+    bool quit = false;
     std::optional<ui::PagerMessage> pager;
     std::set<std::uint32_t> messages_seen;
     bool objectives_visible = false;
@@ -561,7 +610,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 // PostComputerPagerText: "from: the central computer" with 5040 / 5041.
                 pager = ui::PagerMessage{ui_text(1541), ui_text(e.type == T::ObjectiveComplete ? 5040 : 5041), {}, sim_ms};
             } else if (e.type == T::MissionComplete || e.type == T::MissionFailed) {
-                objectives_visible = true, objectives_auto_hide = false; // the end screens are not ported yet
+                play_end_voice(e.type == T::MissionComplete ? end_ctl.mission_complete() : end_ctl.mission_failed());
             }
         });
         // Assumed: initGame shows the objectives at the start and lets them hide after 7 s.
@@ -758,7 +807,20 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         }
     };
 
+    vo.escape_quits = false;
+    vo.quit_requested = [&] { return quit || (end_ctl.state() == ui::GameState::Leaving && leaving_frames > 0); };
     vo.on_event = [&](const SDL_Event& ev) {
+        if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat) {
+            if (end_ctl.message_visible()) {
+                // OnGameKeyDown / OnGameCharKey: Esc leaves; after a failure R restarts and L loads. Read
+                // by physical key, so a Russian layout's К / Д work as in the original.
+                if (ev.key.scancode == SDL_SCANCODE_ESCAPE) end_ctl.on_escape();
+                else if (ev.key.scancode == SDL_SCANCODE_R) end_ctl.on_char('r');
+                else if (ev.key.scancode == SDL_SCANCODE_L) end_ctl.on_char('l');
+                return;
+            }
+            if (ev.key.scancode == SDL_SCANCODE_ESCAPE) quit = true; // the in-game menu is not ported: Esc leaves
+        }
         if ((ev.type == SDL_EVENT_KEY_DOWN || ev.type == SDL_EVENT_KEY_UP) && !ev.key.repeat) {
             if (const auto scan = input::scan_from_hid(int(ev.key.scancode)))
                 events.push_back({ev.type == SDL_EVENT_KEY_DOWN, scan});
@@ -978,6 +1040,19 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                         std::size_t(e.unit) == hero_slot ? "HERO" : v.building() ? "building" : "unit", v.logic_id, name(e.unit));
                 // GetObjectClan returns 0xfffe from now on; the AI stops (MBehaviour OnTakt "No clan").
                 if (runtime) runtime->world().set_clan(v.logic_id, combat::kKilledClan);
+                if (std::size_t(e.unit) == hero_slot) {
+                    // OnUnitRemoved 100755f0: the hero leaving the world fails the mission and puts the camera
+                    // in spectator mode at the hero's x, y, 16 above the ground, with the hero's heading.
+                    // Port: the player's unit is never removed here, so the killing blow triggers it.
+                    play_end_voice(end_ctl.hero_killed());
+                    const Vec3 p = hero.position();
+                    const auto g = ground.probe(p + Vec3{0, 0, 50}, 200.f);
+                    const Mat4& hm = hero.frame.matrix;
+                    ViewerOptions::Camera c;
+                    c.eye = {p.x, p.y, (g ? g->z : p.z) + ui::kDeathCameraHeight};
+                    c.forward = normalize(Vec3{hm.at(0, 1), hm.at(1, 1), -0.35f});
+                    spectator = c;
+                }
                 if (std::size_t(e.unit) < live.size()) {
                     live[std::size_t(e.unit)]->motion->pilot = nullptr;
                     live[std::size_t(e.unit)]->motion->set_throttle({});
@@ -1016,7 +1091,14 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
 
     vo.animate = [&](double seconds, std::vector<Mat4>& transforms) {
         const double now = seconds * 1000.0;
-        while (sim_ms + 1e-6 < now) step(std::min(now, sim_ms + 33.0));
+        if (end_ctl.simulating()) {
+            while (sim_ms + 1e-6 < now) step(std::min(now, sim_ms + 33.0));
+        } else {
+            // MainLoop: the world stops (stdCalculateGame) while the player's script, sound and music go on;
+            // a later opposite result flips the message.
+            if (runtime) runtime->update(std::uint32_t(now));
+            if (sound && sound->music_finished()) sound->play_random_music(false);
+        }
         for (std::size_t i = 0; i < live.size(); ++i) {
             // From its own TURRET camera the unit is not drawn (inferred from CCameraDevice::CreateCamera
             // handing the camera to IAniMesh slot 0x84). The camera reads the posed model, not these.
@@ -1046,6 +1128,11 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     // vector; free look (LShift + mouse) rotates locally by Rz((0.5 − ax)·2π) · Ry((0.5 − ay)·π).
     vo.camera = [&](ViewerOptions::Camera& cam) {
         hud_cam.reset();
+        if (spectator) {
+            cam = *spectator;
+            if (sound) sound->set_listener(cam.eye, cam.forward, cam.up);
+            return true;
+        }
         const auto& rig = hero.rig;
         const auto& turret_points = hero.turret_points;
         if (camera_mode < 0 || !rig || rig->camera_eye_point < 0 || std::size_t(rig->camera_eye_point) >= turret_points.size() ||
@@ -1227,6 +1314,12 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         std::size_t k = 0;
         while (k + 1 < font_sets.size() && font_sets[k].size != want) ++k;
         const ui::HudFont game_font{&font_sets[k].game, std::int32_t(2 * k)}, menu_font{&font_sets[k].menu, std::int32_t(2 * k + 1)};
+        // DrawGameStateMessage: once the mission is over the HUD goes and only the message is drawn.
+        if (!end_ctl.hud_visible()) {
+            ui::draw_end_screen(f, vs, game_font, menu_font, end_ctl.screen(), end_str);
+            if (end_ctl.state() == ui::GameState::Leaving) ++leaving_frames;
+            return;
+        }
         if (pager && sim_ms - pager->shown_ms >= ui::kPagerLifetimeMs) pager.reset();
         if (objectives_visible && objectives_auto_hide && sim_ms - objectives_shown_ms >= ui::kObjectivesAutoHideMs)
             objectives_visible = false;
@@ -1275,7 +1368,11 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             start_pos.x, start_pos.y, start_pos.z, hero.model.ctl_entry.c_str(), live.size(), buildings.size());
     std::vector<Vec3> unit_start;
     for (auto& u : live) unit_start.push_back(u->position());
-    const int rc = run_scene_viewer(window, std::move(scene), vo);
+    int rc = run_scene_viewer(window, std::move(scene), vo);
+    if (end_ctl.state() == ui::GameState::Leaving) {
+        if (end_ctl.won()) record_mission_complete(lib, opt.mission);
+        if (end_ctl.pending_action() == ui::EndAction::Restart) rc = kPlayRestart;
+    }
     for (std::size_t i = 0; i < live.size(); ++i) {
         const Vec3 a = unit_start[i], b = live[i]->position();
         const Vec3 h = b - hero.position();

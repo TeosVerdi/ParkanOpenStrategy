@@ -559,6 +559,7 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
     }
 
     while (running) {
+        if (opt.quit_requested && opt.quit_requested()) break;
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             if (opt.on_event) opt.on_event(ev);
@@ -574,7 +575,7 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
                 break;
             case SDL_EVENT_MOUSE_WHEEL: dist = std::max(radius * 0.05f, dist * (ev.wheel.y > 0 ? 0.9f : 1.1f)); break;
             case SDL_EVENT_KEY_DOWN:
-                if (ev.key.key == SDLK_ESCAPE) running = false;
+                if (ev.key.key == SDLK_ESCAPE && opt.escape_quits) running = false;
                 if (ev.key.key == SDLK_SPACE) paused = !paused;
                 if (opt.cycle && (ev.key.key == SDLK_LEFTBRACKET || ev.key.key == SDLK_RIGHTBRACKET)) {
                     opt.cycle(ev.key.key == SDLK_RIGHTBRACKET ? 1 : -1);

@@ -230,7 +230,8 @@ int main(int argc, char** argv) {
             po.camera_preset = camera_preset;
             po.stabilize_camera = !camera_sway;
             po.layout = classic_keys ? parkan::input::KeyLayout::Classic : parkan::input::KeyLayout::Modern;
-            rc = parkan::run_play(window, lib, po);
+            do rc = parkan::run_play(window, lib, po);
+            while (rc == parkan::kPlayRestart); // R after a failure reloads the mission
         } else if (!view_mesh.empty()) {
             opt.title = view_mesh;
             // Animation: the motion states of the model's CTLD (same archive, same base name). A state
