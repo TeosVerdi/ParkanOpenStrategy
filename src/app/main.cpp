@@ -11,6 +11,9 @@
 //   parkan --unit <scheme .dat> [--shot <out.bmp>] [<game dir>]      unit design (e.g. UNITS/AUTO/swlklas.dat)
 //   parkan --play <mission dir> [--classic-keys] [--time <s>] [--no-fog] [--walk] [--fire] [--aim] [--shot <out.bmp>] [<game dir>]
 //        [--goto x,y[,heading°]] [--target <hex LogicID>] [--damage-mult k]   port debug aids (buildings)
+//        [--enter <hex LogicID>] [--hq-screen <n>] [--click x,y[,t][,r|m]]... port debug aids (HQ screens): the
+//                                                   hero enters that own building, screen n opens, virtual
+//                                                   640×480 clicks at game time t (r = right button, m = move)
 //                                                   drive the mission's hero (M1.TBL keys; --walk holds forward,
 //                                                   --fire holds LMB with every gun selected, --aim turns to the
 //                                                   nearest hostile unit and aims the bullets at it)
@@ -150,6 +153,16 @@ int main(int argc, char** argv) {
         } else if (a == "--target" && i + 1 < argc) {
             debug_play.aim_target = std::uint32_t(std::strtoul(argv[++i], nullptr, 16));
             demo_aim = true;
+        } else if (a == "--enter" && i + 1 < argc) {
+            debug_play.hq_enter = std::uint32_t(std::strtoul(argv[++i], nullptr, 16));
+        } else if (a == "--hq-screen" && i + 1 < argc) {
+            debug_play.hq_screen = std::atoi(argv[++i]);
+        } else if (a == "--click" && i + 1 < argc) {
+            parkan::PlayOptions::VirtualClick c;
+            char r = 0;
+            const int n = std::sscanf(argv[++i], "%f,%f,%lf,%c", &c.x, &c.y, &c.t, &r);
+            c.right = n == 4 && r == 'r', c.move_only = n == 4 && r == 'm';
+            if (n >= 2) debug_play.hq_clicks.push_back(c);
         } else if (a == "--damage-mult" && i + 1 < argc) {
             debug_play.damage_mult = float(std::atof(argv[++i]));
         } else if (a == "--fire") {

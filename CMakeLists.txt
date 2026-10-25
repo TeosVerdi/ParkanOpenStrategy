@@ -26,6 +26,8 @@ add_library(parkan_core STATIC
   src/ui/hud_resources.cpp
   src/ui/mission_end.cpp
   src/ui/campaign.cpp
+  src/ui/hq.cpp
+  src/ui/hq_draw.cpp
   src/shell/briefing.cpp
   src/shell/movie.cpp
   src/shell/shell_data.cpp
@@ -165,3 +167,6 @@ target_sources(parkan_core PRIVATE
 )
 target_sources(parkan_core PRIVATE src/game/design_planner.cpp)
 target_sources(parkan-tests PRIVATE tools/economy_tests.cpp)
+
+# The HQ interface (src/ui/hq*: view states, HQ camera, selection and orders, sidebar, screens; notes/hq-ui.md).
+target_sources(parkan-tests PRIVATE tools/hq_tests.cpp)

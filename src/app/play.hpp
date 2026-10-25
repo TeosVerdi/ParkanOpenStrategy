@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace parkan {
 
@@ -53,6 +54,18 @@ struct PlayOptions {
     float sfx_volume = -1, music_volume = -1;
     bool music = true;
     PlayOutcome* outcome = nullptr; // filled when the mission ends
+    // Port debug aids for the HQ screens (notes/hq-ui.md): --enter <hex LogicID> puts the hero into that own
+    // building at the start (as the capture lift's callback does), --hq-screen <n> opens screen n once the HQ
+    // interface is up, --click x,y[,t][,r|m] clicks the 640×480 virtual screen at game time t s (r: right button, m: only moves
+    // the pointer there).
+    std::optional<std::uint32_t> hq_enter;
+    int hq_screen = -1;
+    struct VirtualClick {
+        float x = 0, y = 0;
+        double t = 0;
+        bool right = false, move_only = false;
+    };
+    std::vector<VirtualClick> hq_clicks;
 };
 
 // Returns the viewer's code, or kPlayRestart when the player restarted the mission (R after a failure).

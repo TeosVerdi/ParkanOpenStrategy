@@ -29,6 +29,7 @@
 #include "ui/hud_text.hpp"
 #include "ui/mission_end.hpp"
 #include "ui/campaign.hpp"
+#include "ui/hq.hpp"
 #include "shell/briefing.hpp"
 
 #include <fstream>
@@ -617,6 +618,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     }
     // The cockpit (notes/hud.md): the ui.lib pages and the mission's satellite map, uploaded after the fonts.
     ui::HudTextures hud_tex;
+    ui::HqSprites hq_sprites; // hq.cfg / compaund.cfg by name (the HQ interface, notes/hq-ui.md §3.4)
     try {
         const ui::HudResources hr = ui::load_hud_resources(lib, &*dir);
         auto add = [&](const Texm* t, const char* name) -> std::int32_t {
@@ -628,6 +630,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         hud_tex.page6 = page("page6"), hud_tex.page7 = page("page7"), hud_tex.page9 = page("page9");
         hud_tex.ui_menu = page("ui_menu"), hud_tex.ui_menu3 = page("ui_menu3");
         hud_tex.minimap = add(hr.minimap ? &*hr.minimap : nullptr, "minimap");
+        hq_sprites = ui::make_hq_sprites(hr.sprites);
     } catch (const std::exception& ex) {
         SDL_Log("play: HUD textures: %s", ex.what());
     }
@@ -817,9 +820,17 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         SDL_Log("play: voice %s", key.c_str());
         if (auto v = game_voices.find(key); sound && v != game_voices.end()) sound->play({"voices.lib", v->second});
     };
+    // The HQ interface and the view-state stack (notes/hq-ui.md; created once the HUD strings exist, below).
+    std::unique_ptr<ui::HqController> hq;
+    std::function<void()> hq_frame; // its per-frame part (HqUi_Update and the rest), set below
+    std::function<ui::HqPick(float, float)> hq_pick; // what lies under a virtual-screen point, set below
+    float hq_aspect = 4.f / 3.f; // drawable width / height of the last frame
+    double hq_cam_ms = -1;       // the HQ camera's last update (game clock)
+    ui::HqPick hq_last_pick;     // under the pointer, refreshed every frame
+    bool relative_mouse_on = true;
     // The capture callback (iron3d OnBuildingCaptureCallback 10061540): unit `i` was inside building `k`
     // when its capture door finished opening. Same clan: the unit enters the building (for the player's
-    // hero, iron3d 10062ad0 opens the building's screen: plant, institute, ...; not ported). Otherwise the
+    // hero, CMission::OnUnitEntersOwnBuilding 10062ad0 opens the building's view; ui::HqController). Otherwise the
     // owner changes (CUnit::SetClan 10033190 → MBehaviour::Capture 10008e40) and CMission::OnObjectCaptured
     // (100a4840) tells the player: their capture → pager 5039 from the central computer and a voice by
     // the old owner (neutral clan or relation 1 → VOICE_NBUILD_CAPTURE, hostile → VOICE_EBUILD_CAPTURE,
@@ -829,8 +840,9 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         const std::uint32_t lid = placement_of(ci).identity, new_clan = clan_of(i), old_clan = clan_of(ci);
         if (new_clan == combat::kKilledClan) return;
         if (new_clan == old_clan) {
-            SDL_Log("play: %.1f s unit %08x enters its clan's building %08x (the building screens are not ported)", sim_ms / 1000,
-                    placement_of(i).identity, lid);
+            SDL_Log("play: %.1f s unit %08x enters its clan's building %08x", sim_ms / 1000, placement_of(i).identity, lid);
+            // 10062ad0: the player's hero (or a manually driven unit of the clan: remote control is not ported).
+            if (hq && i == hero_slot && new_clan == hero_clan) hq->hero_enters_building(placement_of(i).identity, lid);
             return;
         }
         SDL_Log("play: %.1f s building %08x (%s) captured by unit %08x: clan %u -> %u", sim_ms / 1000, lid, placement_of(ci).resource.c_str(),
@@ -852,6 +864,8 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         } else if (old_clan == hero_clan) {
             play_voice("VOICE_BUILD_CAPTURE");
         }
+        // CMission::OnObjectCaptured ends with OnUnitEntersOwnBuilding: the capturer now owns it.
+        if (hq && i == hero_slot && new_clan == hero_clan) hq->hero_enters_building(placement_of(i).identity, lid);
     };
 
     // Objects created while the mission runs (the economy's events; notes/base-building.md §2.2, §3.2). Each
@@ -1082,7 +1096,65 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 else if (ev.key.scancode == SDL_SCANCODE_L) end_ctl.on_char('l');
                 return;
             }
-            if (ev.key.scancode == SDL_SCANCODE_ESCAPE) quit = true; // the in-game menu is not ported: Esc leaves
+            // Esc: the HQ's own handling (OnGameKeyDown / ROLLBACK_STATE) in the HQ states; on foot the in-game
+            // menu is not ported, so Esc leaves.
+            if (ev.key.scancode == SDL_SCANCODE_ESCAPE && !(hq && hq->escape())) quit = true;
+        }
+        // The HQ states (3–5, notes/hq-ui.md §2.2, §3.2, §10): the pointer is a cursor on the 640×480 virtual
+        // screen, the keys drive the HQ camera and the hardcoded letters; the hero takes no input
+        // (ViewTrans_*: FUN_10075440(hero, 0), stdClearKeyboard). Releases still reach the hero's tables.
+        if (hq && !hq->hero_controlled()) {
+            int ww = 640, wh = 480;
+            SDL_GetWindowSize(window, &ww, &wh);
+            const auto virt = [&](float x, float y) {
+                return std::pair{std::round(x * 640.f / float(std::max(ww, 1))), std::round(y * 480.f / float(std::max(wh, 1)))};
+            };
+            if ((ev.type == SDL_EVENT_KEY_DOWN || ev.type == SDL_EVENT_KEY_UP) && !ev.key.repeat) {
+                const bool down = ev.type == SDL_EVENT_KEY_DOWN;
+                const auto scan = input::scan_from_hid(int(ev.key.scancode));
+                if (scan && !down) events.push_back({false, scan});
+                auto is = [&](std::string_view command) {
+                    const auto k = input::ui_key(command, opt.layout);
+                    return scan && k && k->key == scan;
+                };
+                static constexpr std::pair<const char*, ui::HqCamera::Key> kMoves[6] = {
+                    {"CMD_JAMES_HQ_MOVE_LEFT", ui::HqCamera::Left},   {"CMD_JAMES_HQ_MOVE_RIGHT", ui::HqCamera::Right},
+                    {"CMD_JAMES_HQ_MOVE_FORWARD", ui::HqCamera::Forward}, {"CMD_JAMES_HQ_MOVE_BACKWARD", ui::HqCamera::Back},
+                    {"CMD_JAMES_HQ_MOVE_UP", ui::HqCamera::Up},       {"CMD_JAMES_HQ_MOVE_DOWN", ui::HqCamera::Down}};
+                bool camera_key = false;
+                for (const auto& [command, k] : kMoves)
+                    if (is(command)) hq->camera.key(k, down, sim_ms / 1000), camera_key = true;
+                if (!down) return;
+                if (is("CMD_JAMES_BASE_ROTLEFT")) hq->rotate_ghost(1); // [inferred] left = counterclockwise
+                else if (is("CMD_JAMES_BASE_ROTRIGHT")) hq->rotate_ghost(-1);
+                else if (is("CMD_JAMES_ZOOM_MODE") && hq->view_mode() == 2) hq->camera.toggle_zoom();
+                else if (is("CMD_JAMES_SATELLITE_MAP")) hq->map_open = !hq->map_open;
+                else if (is("CMD_JAMES_MISSION_OBJ")) objectives_visible = !objectives_visible, objectives_auto_hide = false;
+                // The letters W C B R P (listener slot 8). Port: skipped when the layout binds the key to an HQ
+                // camera move (the modern layout's W).
+                else if (!camera_key) {
+                    const SDL_Scancode sc = ev.key.scancode;
+                    const char letter = sc == SDL_SCANCODE_W ? 'W' : sc == SDL_SCANCODE_C ? 'C' : sc == SDL_SCANCODE_B ? 'B'
+                                        : sc == SDL_SCANCODE_R ? 'R' : sc == SDL_SCANCODE_P ? 'P' : 0;
+                    if (letter) hq->hotkey(letter);
+                }
+            } else if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN || ev.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                const auto [vx, vy] = virt(ev.button.x, ev.button.y);
+                if (ev.type == SDL_EVENT_MOUSE_BUTTON_UP)
+                    events.push_back({false, ev.button.button == SDL_BUTTON_LEFT ? input::kScanMouseLeft
+                                             : ev.button.button == SDL_BUTTON_RIGHT ? input::kScanMouseRight : input::kScanMouseMiddle});
+                const ui::HqPick pk = hq_pick(vx, vy);
+                if (ev.button.button == SDL_BUTTON_LEFT) {
+                    if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN) hq->lbutton_down(vx, vy, pk);
+                    else hq->lbutton_up(vx, vy, pk);
+                } else if (ev.button.button == SDL_BUTTON_RIGHT && ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                    hq->rbutton_down();
+                }
+            } else if (ev.type == SDL_EVENT_MOUSE_MOTION) {
+                const auto [vx, vy] = virt(ev.motion.x, ev.motion.y);
+                hq->mouse_move(vx, vy);
+            }
+            return;
         }
         if ((ev.type == SDL_EVENT_KEY_DOWN || ev.type == SDL_EVENT_KEY_UP) && !ev.key.repeat) {
             if (const auto scan = input::scan_from_hid(int(ev.key.scancode)))
@@ -1148,17 +1220,20 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         events.clear();
         mouse_dx = mouse_dy = 0;
         using namespace input;
+        // In the HQ states the hero is not driven (ViewTrans_*: FUN_10075440(hero, 0)).
+        const bool hero_input = !hq || hq->hero_controlled();
         // ExecuteBinding (vehicle class 0): throttle.y from FORWARD/BACK/WALK_F/WALK_B, the angular
         // command from ROTATE_*; strafing (LEFT/RIGHT heading) is not modelled yet.
         float forward = commands.get(0, 0, kMcmdForward) + commands.get(0, 0, kMcmdBack) +
                         commands.get(0, 0, kMcmdWalkF) + commands.get(0, 0, kMcmdWalkB);
         if (opt.demo_walk) forward = 1;
-        forward = std::clamp(forward, -1.f, 1.f);
+        forward = hero_input ? std::clamp(forward, -1.f, 1.f) : 0.f;
         // Strafing (ExecuteBinding LEFT/RIGHT): walk (throttle.y = ±1) with an attitude offset of ±90°,
         // ±45° while also walking forward or back; the motion graph sees a plain walk request.
         // The LEFT/RIGHT value is the strafe throttle (1 in the original tables; the modern layout walks
         // at 0.5 and sprints at 1 with Shift).
-        const float left_v = opt.demo_strafe ? 1.f : commands.get(0, 0, kMcmdLeft), right_v = commands.get(0, 0, kMcmdRight);
+        const float left_v = !hero_input ? 0.f : opt.demo_strafe ? 1.f : commands.get(0, 0, kMcmdLeft),
+                    right_v = hero_input ? commands.get(0, 0, kMcmdRight) : 0.f;
         const bool left = left_v > 0, right = right_v > 0;
         float heading = 0;
         if (left != right) {
@@ -1167,14 +1242,15 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (forward == 0) forward = std::max(left_v, right_v);
         }
         motion.set_attitude_offset({0, 0, heading});
-        motion.set_throttle({0, forward, commands.get(0, 0, kMcmdUp) + commands.get(0, 0, kMcmdDown)});
+        motion.set_throttle({0, forward, hero_input ? commands.get(0, 0, kMcmdUp) + commands.get(0, 0, kMcmdDown) : 0.f});
         // HERO.TBL mouse X → ANGLE_Z: the chassis attitude target (IControl +0x48) gets the mouse delta
         // on top of the remaining turn the mover has not consumed yet (GetProperty 0x30).
         const float angle_z = commands.get(0, 0, kMcmdAngleZ);
         float dz_turn = angle_z - last_angle_z;
         dz_turn -= std::round(dz_turn);
         last_angle_z = angle_z;
-        if (dz_turn != 0) {
+        if (!hero_input) {
+        } else if (dz_turn != 0) {
             Vec3 t = motion.attitude_target();
             t.z = t.z + dz_turn - std::floor(t.z + dz_turn);
             motion.set_attitude_target(t);
@@ -1184,7 +1260,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         // The multigun bindings (ExecuteBinding SELECT / STATE): 1–8 toggle a gun, 0 selects all, LMB
         // sets CIS_CONTINUEFIGHT on the selected guns and its release CIS_SWITCHOFF.
         for (const auto& a : commands.take_actions()) {
-            if (a.cls != 2) continue;
+            if (a.cls != 2 || !hero_input) continue;
             if (a.cmd == kMcmdSelect) hero_combat.select(a.index);
             else if (a.cmd == kMcmdState && a.index == -1) hero_combat.set_state_selected(std::uint32_t(a.state));
             else if (a.cmd == kMcmdState && a.index >= 1) hero_combat.set_gun_state(std::size_t(a.index - 1), std::uint32_t(a.state));
@@ -1372,6 +1448,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         }
         update_effects(sim_ms / 1000);
         if (runtime && !briefing) runtime->update(std::uint32_t(sim_ms)); // MainLoop skips the scripts in view mode 5
+        if (hq_frame && !briefing) hq_frame(); // CHud_UpdateHq and the HQ's MainLoop parts
         // Footsteps: a touch-down starts its step effect (step_h* by surface; the default surface's
         // entry until surfaces are decoded); the effect's sound commands play at the foot.
         for (auto& u : live)
@@ -1460,6 +1537,18 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         }
         if (spectator) {
             cam = *spectator;
+            if (sound) sound->set_listener(cam.eye, cam.forward, cam.up);
+            return true;
+        }
+        // The HQ states show the system pointer (cursors .ani not decoded) instead of the captured mouse.
+        if (const bool rel = !hq || hq->hero_controlled(); opt.shot_path.empty() && rel != relative_mouse_on)
+            SDL_SetWindowRelativeMouseMode(window, rel), relative_mouse_on = rel;
+        if (hq && hq->view_mode() == 2) {
+            // The HQ camera (view mode 2, CFreeCamera mission+0x100, updated in the simulation step); the
+            // World3D camera far 700, near 3 (HqCam_Init 10036ed0).
+            cam.eye = hq->camera.pos, cam.forward = hq->camera.forward(), cam.up = hq->camera.up();
+            cam.fov_x = hq->camera.fov(), cam.znear = 3.f, cam.zfar = 700.f;
+            hud_cam = cam;
             if (sound) sound->set_listener(cam.eye, cam.forward, cam.up);
             return true;
         }
@@ -1638,6 +1727,126 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
 
     // HUD text. Positions are in the 640×480 virtual screen; the font set is chosen by the window's size
     // in points and its glyphs scaled by the pixel density (ui/hud_text.hpp).
+    // The HQ (notes/hq-ui.md): the controller over the mission's world model and economy, its host hooks,
+    // and what lies under the pointer (HqUi_ClassifyPointer's picks: the world ray against the terrain and the
+    // objects' faces [port: the combat world's trace stands in for 10036270, not traced]).
+    std::map<std::string, std::string> ui_sounds; // ui/game_resources.cfg `object sounds`
+    if (auto p = resolve_path(lib.game_dir(), "UI/game_resources.cfg")) {
+        const Bytes b = read_file(*p);
+        for (const auto& o : game::parse_cfg({reinterpret_cast<const char*>(b.data()), b.size()}))
+            if (o.name == "sounds")
+                for (const auto& [k, v] : o.entries) ui_sounds[k] = v;
+    }
+    if (runtime) {
+        ui::HqHost host;
+        host.text = ui_text;
+        host.health = [&](std::uint32_t lid) {
+            auto it = unit_of.find(lid);
+            return it != unit_of.end() ? combat.unit(it->second).damage.hp_ratio() * 100.f : 100.f;
+        };
+        host.name = [&](std::uint32_t lid) {
+            auto it = unit_of.find(lid);
+            return it != unit_of.end() ? unit_name(it->second) : std::string();
+        };
+        host.voice = [&](const std::string& key, std::uint32_t) { play_voice(key); };
+        host.pager = [&](const std::string& h, const std::string& b) { pager = ui::PagerMessage{h, b, {}, sim_ms}; };
+        host.sound = [&](const char* key) {
+            if (auto v = ui_sounds.find(key); sound && v != ui_sounds.end()) sound->play({"sounds.lib", v->second});
+        };
+        host.passable = [&](float x, float y) { // FUN_10076bc0's ground cell [inferred: inside the landscape]
+            return x > ground.bounds_min().x && y > ground.bounds_min().y && x < ground.bounds_max().x && y < ground.bounds_max().y;
+        };
+        host.log = [&](const std::string& line) { SDL_Log("play: %.1f s hq: %s", sim_ms / 1000, line.c_str()); };
+        hq = std::make_unique<ui::HqController>(runtime->world(), eco, hero_clan, std::move(host));
+        // The designer's recent projects start with mission.cfg `object prebuild` (CConstructor_LoadPrebuildProjects:
+        // "units\units\prebld\" + modelN, each pushed in front).
+        if (eco)
+            if (auto p = resolve_path(*dir, "mission.cfg")) {
+                const Bytes b = read_file(*p);
+                for (const auto& o : game::parse_cfg({reinterpret_cast<const char*>(b.data()), b.size()}))
+                    if (o.name == "prebuild")
+                        for (const auto& [k, v] : o.entries) {
+                            const std::string file = "UNITS\\UNITS\\PREBLD\\" + v;
+                            if (const mission::Scheme* sc = eco->schemes().get(file)) hq->add_project({file, *sc});
+                            else SDL_Log("play: prebuild %s not readable", file.c_str());
+                        }
+            }
+        hq->project = [&](Vec3 p) -> std::optional<ui::Vec2f> {
+            if (!hud_cam) return std::nullopt;
+            const float eye[3] = {hud_cam->eye.x, hud_cam->eye.y, hud_cam->eye.z};
+            const float fwd[3] = {hud_cam->forward.x, hud_cam->forward.y, hud_cam->forward.z};
+            const float up[3] = {hud_cam->up.x, hud_cam->up.y, hud_cam->up.z}, pt[3] = {p.x, p.y, p.z};
+            return ui::project_to_virtual(eye, fwd, up, hud_cam->fov_x, hq_aspect, pt);
+        };
+    }
+    hq_pick = [&](float vx, float vy) {
+        ui::HqPick pk;
+        if (!hq || hq->view_mode() != 2) return pk;
+        const Vec3 eye = hq->camera.pos, dir = ui::hq_pointer_ray(hq->camera, vx, vy, hq_aspect);
+        if (auto h = ground.trace(eye, eye + dir * 3000.f)) pk.ground = h->point;
+        // The object: the first unit or building face along the ray that faces the eye (the combat world's
+        // trace; [inferred] back faces are skipped as a rendered pick would cull them).
+        Vec3 from = eye;
+        for (int k = 0; k < 8; ++k) {
+            const auto h = combat.trace(from, eye + dir * 3000.f, std::int32_t(hero_slot));
+            if (!h || h->kind != combat::WorldHit::Kind::Unit || h->unit < 0) break;
+            if (dot(h->face_normal, dir) < 0) {
+                pk.object = placement_of(std::size_t(h->unit)).identity;
+                break;
+            }
+            from = h->point + dir * 0.05f;
+        }
+        return pk;
+    };
+    // Port debug aids (src/app/main.cpp usage): --enter puts the hero into an own building as the lift does,
+    // --hq-screen opens a screen once the interface is up, --click clicks the virtual screen at a time.
+    bool hq_entered = false, hq_screen_done = false;
+    std::size_t hq_clicks_done = 0;
+    std::function<void()> hq_debug_tick;
+    hq_debug_tick = [&] {
+        if (!hq) return;
+        if (opt.hq_enter && !hq_entered) {
+            hq_entered = true;
+            hq->hero_enters_building(hero.placement->identity, *opt.hq_enter);
+        }
+        if (opt.hq_screen >= 0 && !hq_screen_done && hq->interface_up()) {
+            hq_screen_done = true;
+            hq->expand_now();
+            hq->set_screen(opt.hq_screen);
+        }
+        while (hq_clicks_done < opt.hq_clicks.size() && sim_ms >= opt.hq_clicks[hq_clicks_done].t * 1000) {
+            const auto& ck = opt.hq_clicks[hq_clicks_done++];
+            hq->mouse_move(ck.x, ck.y);
+            const ui::HqPick pk = hq_pick(ck.x, ck.y);
+            if (ck.move_only) continue;
+            if (ck.right) hq->rbutton_down();
+            else hq->lbutton_down(ck.x, ck.y, pk), hq->lbutton_up(ck.x, ck.y, pk);
+            SDL_Log("play: %.1f s debug click (%.0f, %.0f)%s: object %08x, state %d, screen %d", sim_ms / 1000, ck.x, ck.y, ck.right ? " right" : "",
+                    pk.object, hq->state(), hq->screen());
+        }
+    };
+
+    hq_frame = [&] {
+        if (!hq) return;
+        // HqCam_Update 10037bc0 in view mode 2, by the game clock.
+        if (hq->view_mode() == 2) {
+            const float dtc = hq_cam_ms < 0 ? 0.f : float((sim_ms - hq_cam_ms) / 1000);
+            hq_cam_ms = sim_ms;
+            hq->camera.update(sim_ms / 1000, dtc, hq->mouse_x, hq->mouse_y, hq->cursor() != ui::kCurBox,
+                              [&](float x, float y) { // FUN_100a1470(x, y, 1, …): [inferred] the landscape or an object's top
+                                  auto g = ground.probe({x, y, 2000.f}, 4000.f);
+                                  float z = g ? g->z : 0.f;
+                                  if (auto h = combat.trace_floor({x, y, 2000.f}, {x, y, z})) z = std::max(z, h->point.z);
+                                  return z;
+                              },
+                              runtime ? runtime->world().map_max_x : ground.bounds_max().x);
+        } else {
+            hq_cam_ms = -1;
+        }
+        hq_debug_tick();
+        hq->update(sim_ms, hq_last_pick);
+    };
+
     vo.overlay_textures = std::move(font_textures);
     vo.overlay = [&](OverlayFrame& f) {
         if (font_sets.empty()) return;
@@ -1677,13 +1886,42 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             objectives_visible = false;
         // CHud_Draw: with the objectives screen up only it is drawn; otherwise the cockpit, the satellite
         // map, then the pager.
-        if (!objectives_visible) {
+        hq_aspect = float(f.width) / float(std::max(1u, f.height));
+        if (hq && hq->interface_up()) {
+            // CHud_Draw in the HQ states 3–5: the HQ interface instead of the cockpit (HqUi_Draw), the satellite
+            // map, the pager in its HQ place.
+            hq_last_pick = hq_pick(hq->mouse_x, hq->mouse_y);
+            const ui::HudContext hc{vs, game_font, hud_tex, hud_strings};
+            if (const auto& g = hq->ghost(); g && g->on_ground && eco) {
+                // [port] The placement ghost (the building's model tinted by validity, Placement_Update) is drawn as
+                // its bounding circle on the ground in the validity colour.
+                game::WorldObject probe;
+                probe.type = g->type;
+                const float r = eco->radius(probe);
+                const std::uint32_t argb = g->validity == 0 ? 0xffff0000u : g->validity == 1 ? 0xff00ff00u : 0xffffff00u;
+                std::optional<ui::Vec2f> prev;
+                for (int k = 0; k <= 32; ++k) {
+                    const float a = 6.2831853f * float(k) / 32;
+                    const auto p = hq->project({g->pos.x + r * std::cos(a), g->pos.y + r * std::sin(a), g->pos.z + 0.5f});
+                    if (p && prev) ui::draw_line(f, vs, prev->x, prev->y, p->x, p->y, argb);
+                    prev = p;
+                }
+            }
+            ui::draw_hq(f, hc, hq_sprites, *hq, objectives_visible);
+            if (!objectives_visible && hq->map_open) {
+                ui::HudState hs = build_hud(hq_aspect);
+                hs.cockpit = false, hs.map_visible = true;
+                ui::draw_hud(f, hc, hs);
+            }
+            if (pager && !objectives_visible) ui::draw_pager(f, vs, game_font, *pager, true);
+        } else if (!objectives_visible) {
             const ui::HudState hs = build_hud(float(f.width) / float(std::max(1u, f.height)));
             ui::draw_hud(f, ui::HudContext{vs, game_font, hud_tex, hud_strings}, hs);
             if (pager) ui::draw_pager(f, vs, game_font, *pager);
         }
         if (objectives_visible && runtime) {
             ui::ObjectivesScreen o;
+            o.dark = hq && hq->interface_up(); // views 3/4/5: the 80% backdrop
             o.title = ui_text(3062), o.bonus_title = ui_text(3061), o.footer = with_key(ui_text(1017), objectives_key);
             // Port deviation: the RU string 1017 hard-codes "F12" (no %s; ENG has %s), so the bound key replaces it.
             if (ui_text(1017).find("%s") == std::string::npos)
