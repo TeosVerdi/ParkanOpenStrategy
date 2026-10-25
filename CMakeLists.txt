@@ -111,6 +111,10 @@ target_compile_options(parkan PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(parkan PROPERTIES
   MACOSX_BUNDLE_GUI_IDENTIFIER org.parkan.port
   MACOSX_BUNDLE_BUNDLE_NAME "Parkan")
+# The app icon: the GOG release's goggame-*.ico (regenerate with tools/make_icon.py <game dir>).
+target_sources(parkan PRIVATE res/parkan.icns)
+set_source_files_properties(res/parkan.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+set_target_properties(parkan PROPERTIES MACOSX_BUNDLE_ICON_FILE parkan.icns)
 
 # Game data from installed folders or retail disc images (src/install: MDF/MDS, ISO, BIN/CUE,
 # ISO 9660/Joliet, InstallShield 5 cabinets, edition manifests, import). SDL-free, part of the core.
