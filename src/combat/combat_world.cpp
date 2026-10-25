@@ -407,6 +407,7 @@ void CombatWorld::spawn(std::size_t u, std::size_t g, Vec3 pos, Vec3 dir) {
     b.vel = b.dir * p->speed + (c.unit->motion ? c.unit->motion->world_velocity() : Vec3{}); // buildings stand still
     b.range_left = p->range;
     b.mult = gun.damage_mult;
+    b.target = c.target; // QI(b, 0x204).SetTarget(&dev+0x108): the gun's target, part 0
     bullets_.push_back(b);
     ++shots;
     events_.push_back({CombatEvent::Type::Shot, std::int32_t(u), std::int32_t(g), 0, pos, {}});
@@ -485,9 +486,51 @@ std::optional<WorldHit> CombatWorld::trace(Vec3 a, Vec3 b, std::int32_t skip, bo
     return best;
 }
 
+// CSeekerDevice::Track (100247c0): the target's position in the bullet frame while the seeker holds it.
+// The target object must exist and its part 0 have HP (a destroyed aimed part falls back to part 0; the
+// port's guns aim at part 0); the aim point is that part's origin; it must lie within the seeker range
+// (param 1) and the cone (dot(forward, direction) ≥ cos(param 0), 100247a0).
+std::optional<Vec3> CombatWorld::seek(const Bullet& b) const {
+    const BulletProto& p = *b.proto;
+    if (!p.seeker || b.target < 0 || std::size_t(b.target) >= units_.size()) return std::nullopt;
+    const Combatant& t = *units_[std::size_t(b.target)];
+    const std::size_t r = t.damage.root;
+    if (t.removed || !t.alive() || r >= t.unit->posed.size()) return std::nullopt;
+    const Vec3 aim = t.unit->posed[r].transform_point({});
+    const Vec3 to = aim - b.pos;
+    const float dist = std::sqrt(dot(to, to));
+    if (!(dist <= (*p.seeker)[1])) return std::nullopt;
+    if (dist > 0 && dot(to * (1 / dist), b.dir) < std::cos((*p.seeker)[0])) return std::nullopt;
+    const Mat4 f = bullet_matrix(b.pos, b.dir); // orthonormal: the local coordinates are projections
+    return Vec3{dot(to, normalize(rotate(f, {1, 0, 0}))), dot(to, normalize(rotate(f, {0, 1, 0}))), dot(to, normalize(rotate(f, {0, 0, 1})))};
+}
+
 void CombatWorld::fly(Bullet& b, float dt_ms, float now) {
     const float dt = dt_ms * 0.001f;
     const BulletProto& p = *b.proto;
+    // Homing (CBulletControl::Update 1000cbb0): the angular command is −(1000/dt_ms)·error per axis, the
+    // errors atan2(z, y) (about x) and atan2(x, y) (about z) of the target in the bullet frame (0 when
+    // y = 0), clamped to ±body[9] / ±body[11] and scaled by |v_y| / body[7]; no roll. Port: the turn is
+    // applied in this step to the direction and, the velocity being kept in the bullet frame, to it.
+    if (auto local = seek(b); local && dt_ms > 0) {
+        const float ex = local->y != 0 ? std::atan2(local->z, local->y) : 0.f;
+        const float ez = local->y != 0 ? std::atan2(local->x, local->y) : 0.f;
+        const float k = p.speed != 0 ? std::abs(dot(b.vel, b.dir) / p.speed) : 0.f;
+        const float ax = std::clamp(ex, -p.turn[0] * dt, p.turn[0] * dt) * k;
+        const float az = std::clamp(ez, -p.turn[2] * dt, p.turn[2] * dt) * k;
+        const Mat4 f = bullet_matrix(b.pos, b.dir);
+        const Vec3 xa = normalize(rotate(f, {1, 0, 0})), za = normalize(rotate(f, {0, 0, 1}));
+        const Vec3 w = xa * ax - za * az; // +x turns forward toward +z; −z turns it toward +x
+        if (const float angle = std::sqrt(dot(w, w)); angle > 0) {
+            const Vec3 axis = w * (1 / angle);
+            auto turn = [&](Vec3 v) {
+                const float c = std::cos(angle), s = std::sin(angle);
+                return v * c + cross(axis, v) * s + axis * (dot(axis, v) * (1 - c));
+            };
+            b.dir = normalize(turn(b.dir));
+            b.vel = turn(b.vel);
+        }
+    }
     if (p.physics == 3) {
         b.vel.z -= kGravity * dt; // ballistic: gravity on v
         b.dir = normalize(b.vel);

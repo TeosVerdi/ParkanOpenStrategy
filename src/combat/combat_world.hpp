@@ -7,8 +7,8 @@
 // - hit test: the bullet's swept segment against the landscape (TerrainGround::trace), the static
 //   scene's triangles (TraceMesh) and the posed triangles of every live unit and building (the face hit names the
 //   object and mesh part, as Terrain's TraceRay does); units that are dead have left collision;
-// - seekers (device 0x11) are not flown: guided bullets fly straight. The gun's lock-on gate
-//   (param 9/10) is kept, so guided guns need a target (set_target);
+// - seekers (device 0x11): CSeekerDevice::Track + CBulletControl::Update's homing turn (fly()); the gun's
+//   lock-on gate (param 9/10) is kept, so guided guns need a target (set_target);
 // - rockets with their own throttle (bullet property 0x20) start at the gun's speed like the rest;
 // - shields (types 9/0x15) are absent; armour (type 0x1b) is the last one in the unit's scheme
 //   (CreateDevice overwrites ctl+0x5b4; inferred);
@@ -99,6 +99,7 @@ struct Bullet {
     Vec3 pos{}, vel{}, dir{0, 1, 0};
     float range_left = 0;
     float mult = 1;
+    std::int32_t target = -1; // the seeker's target (the gun's at the shot; CSeekerDevice +0x98), −1 none
     bool alive = true;
     bool fresh = true; // spawned this step: flies from the next one (AddObjectToGame)
 };
@@ -181,6 +182,7 @@ private:
     class Host;
     const BulletProto* bullet(const ResName& name);
     void spawn(std::size_t unit, std::size_t gun, Vec3 pos, Vec3 dir);
+    std::optional<Vec3> seek(const Bullet& b) const;
     void fly(Bullet& b, float dt_ms, float now);
     void explode(const Bullet& b, const Expl& e, Vec3 pos, std::int32_t target, std::int32_t part);
     void process_records(float now);

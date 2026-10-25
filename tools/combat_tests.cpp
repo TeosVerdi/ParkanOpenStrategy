@@ -337,6 +337,46 @@ int combat_corpus_tests(const std::filesystem::path& game) {
         }
         std::printf("\n");
     }
+    // Homing (CSeekerDevice::Track + CBulletControl::Update): the plasma (seeker cone 0.25 rad, turn
+    // 0.8 rad/s) locks on the tent, then each shot leaves 5 m to its side (~0.12 rad) and curves in.
+    {
+        CombatWorld w(lib, ground, nullptr);
+        const std::size_t a = w.add_unit(*hero, hero->placement->identity, hero->placement->ai_index, true);
+        const std::size_t b = w.add_unit(*tent, tent->placement->identity, tent->placement->ai_index, false);
+        Combatant& shooter = w.unit(a);
+        shooter.select(1), shooter.select(2); // the plasma only
+        shooter.target = std::int32_t(b);
+        hero->pose_parts();
+        tent->pose_parts();
+        const Vec3 mount = *w.muzzle(a, 1), aim = w.unit(b).aim_centre();
+        const Mat4 m = hero->frame.matrix;
+        const Vec3 fwd{m.at(0, 1), m.at(1, 1), m.at(2, 1)}, right{m.at(0, 0), m.at(1, 0), m.at(2, 0)}, up{m.at(0, 2), m.at(1, 2), m.at(2, 2)};
+        const Vec3 d = aim - mount;
+        const auto [tx, ty] = hero->rig->inputs_for_angles(std::atan2(dot(d, right), dot(d, fwd)), std::atan2(dot(d, up), std::hypot(dot(d, right), dot(d, fwd))));
+        hero->aim_x = tx, hero->aim_y = ty;
+        hero->pose_parts();
+        shooter.aim_point = aim + right * 5.f;
+        // Flying straight, the shot would miss the tent.
+        const Vec3 off = normalize(*shooter.aim_point - mount);
+        const auto straight = w.trace(mount, mount + off * 150.f, std::int32_t(a));
+        CHECK(!straight || straight->unit != std::int32_t(b));
+        shooter.set_trigger(true);
+        std::size_t shots = 0, hits_on_tent = 0;
+        for (float now = 33; now < 3000; now += 33) {
+            hero->pose_parts();
+            tent->pose_parts();
+            w.update(now);
+            for (const auto& e : w.take_events()) {
+                if (e.type == CombatEvent::Type::Shot) ++shots;
+                if (e.type == CombatEvent::Type::Damaged && e.unit == std::int32_t(b)) ++hits_on_tent;
+            }
+        }
+        std::printf("  plasma homing: %zu shots aimed 5 m aside, %zu hits on the tent (straight line: %s)\n", shots, hits_on_tent,
+                    straight && straight->unit == std::int32_t(b) ? "hit" : "miss");
+        CHECK(shots > 3 && hits_on_tent + 1 >= shots); // the last shot may still be in flight
+        hero->aim_x = TurretRig::kManualX, hero->aim_y = TurretRig::kManualY;
+    }
+
     auto rt = game::MissionRuntime::load(game, mission);
     h.select(1); // deselect the MG
     h.select(3); // the laser
