@@ -8,7 +8,7 @@
 //   scene's triangles (TraceMesh) and the posed triangles of every live unit and building (the face hit names the
 //   object and mesh part, as Terrain's TraceRay does); units that are dead have left collision;
 // - seekers (device 0x11) are not flown: guided bullets fly straight. The gun's lock-on gate
-//   (param 9/10) is kept: with a target (set_target) guided guns lock first, without one they fire unguided;
+//   (param 9/10) is kept, so guided guns need a target (set_target);
 // - rockets with their own throttle (bullet property 0x20) start at the gun's speed like the rest;
 // - shields (types 9/0x15) are absent; armour (type 0x1b) is the last one in the unit's scheme
 //   (CreateDevice overwrites ctl+0x5b4; inferred);
@@ -112,6 +112,7 @@ struct CombatEvent {
         Killed,  // unit's clan became 0xfffe (amount = time)
         Removed, // unit's removal time passed: MissionRuntime::object_killed, hide it
         Effect,  // start effect `effect` at pos (bullet tracer/muzzle, impact, part explosion)
+        BulletEnded, // bullet `bullet` died in situation `amount` (2 hit, 3 left the world, 4 range exhausted)
     };
     Type type;
     std::int32_t unit = -1, other = -1;
@@ -122,7 +123,9 @@ struct CombatEvent {
     Vec3 axis{0, 1, 0};       // Effect: the frame's forward axis (bullet direction)
     float scale = 1;          // Effect: SetEffectScale (part explosions: the part's radius; inferred)
     Mat4 frame = Mat4::identity(); // Effect: local spawn frame (fx::contact_frame of the event's CTPT points)
-    std::int32_t end_mode = -1; // Effect on a bullet: when it is gone, −1 stop, else restart in this time mode
+    // Effect on a bullet: BulletProto::end_actions for situations 2/3/4, and the bullet's removal delay.
+    std::array<std::int32_t, 3> end_actions{BulletProto::kEffectKeep, BulletProto::kEffectKeep, BulletProto::kEffectKeep};
+    float removal_ms = 0;
 };
 
 // A segment hit in the world.

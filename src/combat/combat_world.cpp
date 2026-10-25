@@ -413,7 +413,7 @@ void CombatWorld::spawn(std::size_t u, std::size_t g, Vec3 pos, Vec3 dir) {
     for (std::size_t i = 0; i < p->spawn_effects.size(); ++i) {
         const auto& sp = p->spawn_points[i];
         events_.push_back({CombatEvent::Type::Effect, std::int32_t(u), -1, 0, pos, p->spawn_effects[i], b.id, b.dir, 1,
-                           fx::contact_frame(sp.pos, sp.vec), p->hit_restart_mode[i]});
+                           fx::contact_frame(sp.pos, sp.vec), p->end_actions[i], float(p->removal_ms)});
     }
 }
 
@@ -511,6 +511,7 @@ void CombatWorld::fly(Bullet& b, float dt_ms, float now) {
         // OnCollision (1000d0c0) → situation 2: SelfExplode, part 0's EXPL.
         b.pos = h->point;
         b.alive = false;
+        events_.push_back({CombatEvent::Type::BulletEnded, -1, b.shooter, 2, h->point, {}, b.id});
         if (p.expl) explode(b, *p.expl, h->point, h->unit, h->part);
         return;
     }
@@ -518,10 +519,12 @@ void CombatWorld::fly(Bullet& b, float dt_ms, float now) {
     const Vec3 lo = ground_.bounds_min(), hi = ground_.bounds_max();
     if (to.x < lo.x || to.y < lo.y || to.x > hi.x || to.y > hi.y || to.z > hi.z + 20.f || to.z < lo.z - 50.f) {
         b.alive = false; // BulletExitWorldBounds → situation 3: removed without an explosion
+        events_.push_back({CombatEvent::Type::BulletEnded, -1, b.shooter, 3, to, {}, b.id});
         return;
     }
     if (exhausted) {
         b.alive = false; // situation 4: the substitute explosion (event 0x1b), else nothing
+        events_.push_back({CombatEvent::Type::BulletEnded, -1, b.shooter, 4, to, {}, b.id});
         if (p.range_expl) explode(b, *p.range_expl, to, -1, -1);
     }
     (void)now;

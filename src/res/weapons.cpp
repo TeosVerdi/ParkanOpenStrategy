@@ -114,14 +114,23 @@ BulletProto load_bullet(AssetLibrary& lib, std::string_view name) {
                 b.spawn_points.push_back(sp);
                 std::uint32_t handle = 0;
                 std::memcpy(&handle, e.raw.data() + 0x1c, 4);
-                std::int32_t mode = -1;
-                if (const auto* hit = list(2))
-                    for (const auto& h : *hit) {
-                        std::uint32_t a = 0, m = 0;
-                        std::memcpy(&a, h.raw.data() + 0x10, 4), std::memcpy(&m, h.raw.data() + 0x14, 4);
-                        if (h.type == 0xa && a == handle) mode = std::int32_t(m);
-                    }
-                b.hit_restart_mode.push_back(mode);
+                std::array<std::int32_t, 3> end{BulletProto::kEffectKeep, BulletProto::kEffectKeep, BulletProto::kEffectKeep};
+                for (std::size_t s = 0; s < 3; ++s)
+                    if (const auto* l2 = list(2 + s); l2 && handle != 0xffffffffu)
+                        for (const auto& h : *l2) {
+                            std::uint32_t a = 0, m = 0;
+                            std::memcpy(&a, h.raw.data() + 0x10, 4), std::memcpy(&m, h.raw.data() + 0x14, 4);
+                            if (a != handle) continue;
+                            switch (h.type) {
+                            case 0xa: end[s] = std::int32_t(m); break;
+                            case 0xb: end[s] = BulletProto::kEffectStop; break;
+                            case 8: end[s] = BulletProto::kEffectDestroy; break;
+                            case 0x12: end[s] = BulletProto::kEffectKeep; break; // enable
+                            case 0x13: end[s] = BulletProto::kEffectDisable; break;
+                            default: break;
+                            }
+                        }
+                b.end_actions.push_back(end);
             }
     if (const auto* l = list(4))
         for (const auto& e : *l)

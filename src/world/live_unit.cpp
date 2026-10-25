@@ -111,18 +111,21 @@ std::unique_ptr<LiveUnit> LiveUnit::load(AssetLibrary& lib, const mission::TmaOb
 
 void LiveUnit::drop_to_ground(float now_ms, const TerrainGround& ground) {
     // CControlBase::DropToGround (10018800): the contact points of the current state (state 0 at load)
-    // are probed and the body shifts by the mean height difference (flags 0x30 / 0xc0 tilt and upright
-    // are not ported). Without contact points the body origin goes onto the ground. Landscape only here.
+    // are probed (ProbeGroundFace) and the body shifts by the mean height to the face planes (flags
+    // 0x30 / 0xc0 tilt and upright are not ported). Without contact points the body origin goes onto the
+    // ground. Port: landscape faces only here (the original probes object faces too); probe span inferred.
     MotionFrame f = motion->interpolate(now_ms);
     ModelAsset& chassis = model.parts.front().model;
     pose_model_blend(chassis, f.frame_a, f.frame_b, f.weight_b);
+    // The sum runs over the points with ground under them; it is divided by the number of contacts.
     float sum = 0;
     int n = 0;
     for (const auto& c : motion->contacts()) {
         const auto pi = c.point;
         if (pi >= points.size() || points[pi].part >= chassis.node_world.size()) continue;
+        ++n;
         const Vec3 foot = (f.matrix * chassis.node_world[points[pi].part]).transform_point(points[pi].pos);
-        if (auto g = ground.probe(foot + Vec3{0, 0, 50}, 100.f)) sum += g->z - foot.z, ++n;
+        if (auto g = ground.probe(foot + Vec3{0, 0, 50}, 100.f)) sum += g->z - foot.z;
     }
     if (n == 0) {
         const Vec3 p = translation(f.matrix);

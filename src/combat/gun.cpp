@@ -110,9 +110,10 @@ void GunDevice::tick(float dt, GunHost& host) {
         if (param_[8] > 0) {
             const auto target = host.target_position();
             if (!target) {
-                if (param_[9] > 0) { // a guided weapon without a target: lock reset, then it fires unguided
+                if (param_[9] > 0) { // a guided weapon waits for a target
                     state_ = kGunReady;
                     lock_ = param_[9];
+                    return;
                 }
             } else {
                 Vec3 pos, dir;

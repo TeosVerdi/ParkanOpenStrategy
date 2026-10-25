@@ -435,7 +435,9 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         fx::EffectInstance inst;
         std::uint32_t bullet = 0;
         bool stopped = false;
-        std::int32_t end_mode = -1; // see CombatEvent::end_mode
+        std::array<std::int32_t, 3> end_actions{}; // see CombatEvent::end_actions
+        float removal_ms = 0;
+        double remove_at = 0; // the bullet object's removal (s), once it has died
         std::map<std::size_t, audio::Handle> voices; // sound command → voice
     };
     std::vector<LiveEffect> effects;
@@ -452,10 +454,12 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             play_effect_sounds(e.effect, e.pos);
             return;
         }
-        effects.push_back({fx::EffectInstance(it->second, fx_ctx, combat::CombatWorld::bullet_matrix(e.pos, e.axis), now), e.bullet, false, e.end_mode, {}});
+        effects.push_back({fx::EffectInstance(it->second, fx_ctx, combat::CombatWorld::bullet_matrix(e.pos, e.axis), now), e.bullet, false, e.end_actions,
+                           e.removal_ms, 0, {}});
         effects.back().inst.set_spawn_frame(e.frame); // bullet tracers: the CTPT frame (×0.03)
         if (e.scale != 1) effects.back().inst.set_scale({e.scale, e.scale, e.scale});
     };
+    std::map<std::uint32_t, int> ended_bullets; // bullet → its end situation (CombatEvent::BulletEnded)
     auto update_effects = [&](double now) {
         std::map<std::uint32_t, const combat::Bullet*> flying;
         for (const auto& b : combat.bullets()) flying[b.id] = &b;
@@ -464,10 +468,15 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (e.bullet && !e.stopped) {
                 if (auto f = flying.find(e.bullet); f != flying.end()) {
                     e.inst.set_transform(combat::CombatWorld::bullet_matrix(f->second->pos, f->second->dir));
-                } else { // the bullet hit or ran out: event 0x13 stops its effects, 0xa restarts them
-                    if (e.end_mode >= 0) e.inst.start(now, std::uint32_t(e.end_mode));
-                    else e.inst.stop(now);
+                } else { // the bullet died: its end situation's list acts on the effect (BulletProto::end_actions)
+                    const auto en = ended_bullets.find(e.bullet);
+                    const int situation = en != ended_bullets.end() ? en->second : 2;
+                    const std::int32_t act = e.end_actions[std::size_t(situation - 2)];
+                    if (act >= 0) e.inst.start(now, std::uint32_t(act));
+                    else if (act == BulletProto::kEffectStop) e.inst.stop(now);
+                    else if (act == BulletProto::kEffectDisable) e.inst.set_enabled(false, now);
                     e.stopped = true;
+                    e.remove_at = act == BulletProto::kEffectDestroy ? now : now + e.removal_ms / 1000;
                 }
             }
             sounds.clear();
@@ -483,13 +492,12 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                         else sound->set_position(v->second, s.pos, {});
                     }
                 }
-            // Port: a bullet's effect goes once its stop (or its restart) has run to the end; the original
-            // destroys the bullet object, and its effect manager with it. Looping tracers otherwise restart
-            // forever (the laser's time mode 0).
-            const bool ended = e.stopped && (e.end_mode >= 0 ? now >= e.inst.end_time() : e.inst.stop_reached());
-            if (!alive || ended) e.bullet = ~0u; // marked for removal
+            // A bullet's effects go with the bullet object, body[18] after its death (its effect manager is
+            // released with it).
+            if (!alive || (e.stopped && now >= e.remove_at)) e.bullet = ~0u; // marked for removal
         }
         std::erase_if(effects, [](const LiveEffect& e) { return e.bullet == ~0u; });
+        ended_bullets.clear();
     };
 
     // The mission's strategy layer (notes/script-vm.md): one SuperAI per clan running the clan's script;
@@ -1274,11 +1282,12 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 }
             }
         } else {
-            // Guided guns lock on the selected HUD target, else on what the sight covers (port: the turret's
-            // PushTargetToGuns is not traced).
+            // The guns' target is the selected HUD target only (CTargeting 10091cd0 pushes it to the selected
+            // weapons on LockTarget, the select commands and the target's death); nothing selected → no
+            // target, so guided guns (plasma, missiles) hold fire (CGunDevice::Update 10029f4b).
             if (hud_target >= 0 && (combat.unit(std::size_t(hud_target)).removed || !combat.unit(std::size_t(hud_target)).alive()))
                 hud_target = -1;
-            hero_combat.target = hud_target >= 0 ? hud_target : combat.sight_target(hero_slot);
+            hero_combat.target = hud_target;
         }
         combat.update(float(sim_ms));
         for (const auto& e : combat.take_events()) {
@@ -1288,6 +1297,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             case T::Effect:
                 start_effect(e, sim_ms / 1000);
                 break;
+            case T::BulletEnded: ended_bullets[e.bullet] = int(e.amount); break;
             case T::Hit:
                 if (e.unit >= 0)
                     SDL_Log("play: %.2f s bullet of %d hit %s at (%.1f, %.1f, %.1f)", sim_ms / 1000, e.other, e.unit >= 0 ? name(e.unit) : "the world",
@@ -1707,9 +1717,9 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     for (std::size_t i = 0; i < live.size(); ++i) {
         const Vec3 a = unit_start[i], b = live[i]->position();
         const Vec3 h = b - hero.position();
-        SDL_Log("play: unit %zu %s moved %.1f m (order %u, state %u, moving %d, v=(%.2f %.2f %.2f), at (%.1f, %.1f, %.1f), placed z %.1f); %.0f m from the hero, "
+        SDL_Log("play: unit %zu %08x %s moved %.1f m (order %u, state %u, moving %d, v=(%.2f %.2f %.2f), at (%.1f, %.1f, %.1f), placed z %.1f); %.0f m from the hero, "
                 "%.0f / %.0f HP%s, target %d",
-                i, live[i]->placement->resource.c_str(), std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y)),
+                i, live[i]->placement->identity, live[i]->placement->resource.c_str(), std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y)),
                 brains[i] ? brains[i]->current_order() : 0u, live[i]->motion->current_state(), brains[i] ? int(brains[i]->moving()) : -1,
                 live[i]->motion->velocity().x, live[i]->motion->velocity().y, live[i]->motion->velocity().z, b.x, b.y, b.z, live[i]->placement->position[2], std::sqrt(dot(h, h)),
                 combat.unit(live_ci[i]).damage.total, combat.unit(live_ci[i]).damage.initial, combat.unit(live_ci[i]).removed ? " (removed)" : "",
