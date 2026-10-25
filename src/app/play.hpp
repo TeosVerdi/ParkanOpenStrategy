@@ -60,6 +60,10 @@ struct PlayOptions {
     // interface is up, --click x,y[,t][,r|m] clicks the 640×480 virtual screen at game time t s (r: right button, m: only moves
     // the pointer there).
     std::optional<std::uint32_t> hq_enter;
+    // --pilot <hex LogicID> [t [t_exit]]: the hero boards that own unit (ENTER_STATE → view state 1) at game time
+    // t s and gets out (ROLLBACK_STATE) at t_exit.
+    std::optional<std::uint32_t> pilot;
+    double pilot_time = 0, pilot_exit = -1;
     int hq_screen = -1;
     struct VirtualClick {
         float x = 0, y = 0;

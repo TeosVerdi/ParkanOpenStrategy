@@ -142,6 +142,30 @@ void test_game_menu() {
     CHECK(hq.escape() && hq.state() == kStateHqBunker && near(hq.camera.pos.x, 777)); // the HQ view continues
 }
 
+void test_pilot_state() {
+    // View state 1 (view-states.md §3): the game side decides (transition), the warbot becomes the selection,
+    // the exit can be vetoed (no exit point) — also under PopToState.
+    Base b;
+    HqHost h = b.host();
+    std::vector<std::pair<int, int>> calls;
+    bool allow_exit = false;
+    h.transition = [&](int from, int to, std::uint32_t) {
+        calls.push_back({from, to});
+        return to != kStateHero || allow_exit;
+    };
+    HqController hq(b.world, nullptr, 0, h);
+    CHECK(hq.push_state(kStatePilot, 0x11) && hq.state() == kStatePilot && hq.unit_controlled() && hq.view_mode() == 1);
+    CHECK(hq.selected_units().size() == 1 && hq.selected_units()[0] == 0x11);
+    CHECK(hq.open_menu() && hq.escape() && hq.state() == kStatePilot); // 7 → 1: no game-side call
+    CHECK(calls.size() == 1);
+    CHECK(hq.escape() && hq.state() == kStatePilot); // vetoed
+    hq.pop_to_hero();                                // vetoed, no endless loop
+    CHECK(hq.state() == kStatePilot);
+    allow_exit = true;
+    CHECK(hq.escape() && hq.state() == kStateHero && hq.selected_units().empty());
+    CHECK(calls.size() == 4 && calls.back() == std::make_pair(int(kStatePilot), int(kStateHero)));
+}
+
 void test_states_and_selection() {
     Base b;
     HqController hq(b.world, nullptr, 0, b.host());
@@ -457,6 +481,7 @@ int hq_unit_tests() {
     test_draw();
     test_designer_helpers();
     test_game_menu();
+    test_pilot_state();
     return g_fail;
 }
 

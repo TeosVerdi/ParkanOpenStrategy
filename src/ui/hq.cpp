@@ -379,6 +379,17 @@ bool HqController::push_state(int s, std::uint32_t object) {
     } else if (s == kStateMenu) {
         // ViewTrans_HeroToMenu 10064a80 / HqToMenu 10064af0 / BuildingScreenToMenu 10064c40: the controlled unit's
         // input off, CGameMenu_Show(1) (page 0; the host pauses).
+    } else if (s == kStatePilot) {
+        // ViewTrans_HeroToWarbot 10063c60: the host hides the hero and hands the warbot to the player; the warbot
+        // becomes the selection (SelectUnit, exclusive).
+        if (host_.transition && !host_.transition(from, s, object)) {
+            say("view: push 1 refused by the game");
+            return false;
+        }
+        select_unit(object, true);
+        states_.push_back({s, object});
+        say("view: push 1");
+        return true;
     } else {
         say("view: state " + std::to_string(s) + " is not ported (requested for " + std::to_string(object) + ")");
         return false;
@@ -410,20 +421,27 @@ void HqController::leave_to_hero() {
     mode_ = kModeFree;
 }
 
-void HqController::pop_state() {
-    if (states_.size() <= 1) return;
+bool HqController::pop_state() {
+    if (states_.size() <= 1) return false;
     const int from = state();
     const int to = states_[states_.size() - 2].state;
+    // ViewTrans_WarbotToHero 10063d60 can veto (no exit point: lamp 4, pager 6211); the warbot is deselected.
+    if (from == kStatePilot && to != kStateMenu) {
+        if (host_.transition && !host_.transition(from, to, states_[states_.size() - 2].object)) return false;
+        clear_units();
+    }
     if (to == kStateHero && (from == kStateHqBunker || from == kStateInBuilding)) leave_to_hero();
     if (from == kStateInBuilding && screen_ != kScreenNone) set_screen(kScreenNone);
     states_.pop_back();
     // ViewTrans_MenuTo* (10064b50 / 10064bd0 / 10064c60): Show(0), the view below continues as it was.
     if (state() == kStateHqBunker && from != kStateMenu) enter_hq(state_object());
     say("view: pop to " + std::to_string(state()));
+    return true;
 }
 
 void HqController::pop_to_hero() {
-    while (states_.size() > 1) pop_state();
+    while (states_.size() > 1 && pop_state()) {
+    }
 }
 
 void HqController::hero_enters_building(std::uint32_t hero, std::uint32_t building) {

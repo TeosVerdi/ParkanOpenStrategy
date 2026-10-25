@@ -107,6 +107,10 @@ struct HqHost {
     // objects.dlb has a DSCR entry for this display model (the designer's list filter, §3.2).
     std::function<bool(const std::string& model)> described;
     bool full_research_tree = false; // FULL_RESEARCH_TREE (IsFullResearchTreeIni 1008b070): the designer lists all
+    // The view-state handler's game side (g_ViewStateTransitions: the controlled unit, the hero's body, the
+    // cameras): called for every push and pop before the queue changes, with the unit / building of the record
+    // pushed or uncovered; false vetoes it (ComputeWarbotExitPlacement's "exit blocked").
+    std::function<bool(int from, int to, std::uint32_t object)> transition;
     AssetLibrary* library = nullptr;  // the designer's assembly (objects.rlb records); no designer without it
     HqStatNormalize stat_norm;
     std::function<void(const std::string& key, std::uint32_t lid)> voice; // QueueUnitVoice (lid kNoObject: 2D)
@@ -216,10 +220,13 @@ public:
     std::uint32_t state_object() const { return states_.back().object; }
     // CViewStateQueue::Push 10063060: refused when the table has no handler for top → s.
     bool push_state(int s, std::uint32_t object = game::kNoObject);
-    void pop_state();   // the top state's handler back to the one below (ViewTrans_*ToHero for 4/5)
+    bool pop_state();   // the top state's handler back to the one below; false when vetoed (or nothing below)
     void pop_to_hero(); // PopToState 10063180 (sidebar hero button)
     int view_mode() const;                                                           // 1 cockpit, 2 HQ camera
     bool hero_controlled() const { return state() == kStateHero; }                   // FUN_10075440(hero, 1)
+    // A unit takes the player's input in the view (Unit_SetPlayerControl(unit, 1)): the hero (0), a piloted
+    // warbot (1), a remote-controlled unit (2).
+    bool unit_controlled() const { return state() == kStateHero || state() == kStatePilot || state() == kStateRemote; }
     bool interface_up() const { return state() >= kStateHqUnit && state() <= kStateInBuilding; } // CHud_UpdateHq
     // CMission::OnUnitEntersOwnBuilding 10062ad0 for the hero: SelectBuilding, then plant / institute →
     // state 5 + its screen, bunker → 4, tower → 6 (unless IsTurretDisabled), generator / mine / storage /

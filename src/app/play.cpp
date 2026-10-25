@@ -353,6 +353,11 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         bullet_pools.push_back(std::move(pool));
     }
     LiveUnit& hero = *live[hero_slot];
+    // The controlled unit (mission+0xaec, FUN_100a5600): the hero on foot, the piloted or remote-controlled unit
+    // otherwise (view-states.md). Input, the camera, the HUD and the targeting follow it.
+    std::size_t ctl = hero_slot, ctl_ci = hero_slot;
+    LiveUnit* cu = &hero;
+    combat::Combatant* cc = &hero_combat;
     UnitMotion& motion = *hero.motion;
     std::vector<LiveUnit*> live_ptrs;
     for (auto& u : live) live_ptrs.push_back(u.get());
@@ -807,12 +812,34 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         table = input::parse_translate_table({reinterpret_cast<const char*>(b.data()), b.size()});
         input::apply_layout(table, opt.layout);
     }
+    // A piloted / remote-controlled warbot is driven through M1.TBL (table_1.man; CHANGE_TABLE swaps to M2.TBL).
+    std::vector<input::Binding> unit_table;
+    if (auto tbl = resolve_path(lib.game_dir(), "m1.tbl")) {
+        const Bytes b = read_file(*tbl);
+        unit_table = input::parse_translate_table({reinterpret_cast<const char*>(b.data()), b.size()});
+        input::apply_layout(unit_table, opt.layout);
+    }
+    const std::vector<input::Binding> hero_table = table;
     input::ManManager man(std::move(table));
     input::CommandState commands;
     std::vector<input::InputEvent> events;
     float mouse_dx = 0, mouse_dy = 0;
 
     float last_angle_z = 0.5f;
+    // The warbot carrying the hero (queue+0x28; meaningful while ctl ≠ hero) and the exit-blocked flag (+0x31,
+    // cockpit lamp 4).
+    std::optional<std::size_t> inside;
+    bool exit_blocked = false;
+    // FUN_100a5600 (mission+0xaec = unit) with the unit's CManManager enabled (CManManager_EnableInput 1000f0b0:
+    // throttle and latches cleared, its table claimed).
+    auto set_control = [&](std::size_t li) {
+        ctl = li, ctl_ci = live_ci[li], cu = live[li].get(), cc = &combat.unit(ctl_ci);
+        man.set_table(li == hero_slot ? hero_table : unit_table);
+        // CManManager::SetComponentControl 1000ed20: the turret goes manual at angles (0.5, 0.5) (turret-camera.md
+        // §1.2: a warbot's barrel then stands 35° up).
+        commands = {};
+        last_angle_z = cu->motion->attitude_target().z;
+    };
     // Cameras: 0 = TURRET view (first person, the default), 1..4 = OUTER presets (JAMES_OUTER_CAMERA
     // cycles them: V modern, C classic), -1 = the port's debug orbit (F10).
     int camera_mode = 0, outer_preset = 0;
@@ -839,7 +866,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     // CTargeting_GetRadarRange (10091d80): unit property 0x50 = the radar's (class 8) GetParam(3); 1 when ≤ 0 or
     // without a radar. The detected objects (port) are the living ones within it.
     auto radar_range = [&] {
-        const auto r = hero_combat.radar_param(3);
+        const auto r = cc->radar_param(3);
         return r && *r > 0 ? *r : 1.f;
     };
     const std::uint32_t hero_clan = hero.placement->ai_index;
@@ -864,14 +891,14 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         std::vector<std::int32_t> out;
         for (std::size_t i = 0; i < combat.size(); ++i) {
             const combat::Combatant& c = combat.unit(i);
-            if (i == hero_slot || c.removed || !c.alive()) continue;
+            if (i == hero_slot || i == ctl_ci || c.removed || !c.alive()) continue;
             const std::uint32_t type = tma_types[placement_of(i).identity];
             if (type == game::kTypeBridge || type == game::kTypeRuins) continue;
             // An enemy unit that is shut down (its current order 0x13, FUN_10077860) is left out too.
             if (const std::int32_t li = ci_live[i]; li >= 0 && brains[std::size_t(li)] &&
                                                     brains[std::size_t(li)]->current_order() == 0x13 && is_enemy(std::int32_t(i)))
                 continue;
-            const Vec3 d = c.unit->position() - hero.position();
+            const Vec3 d = c.unit->position() - cu->position();
             if (d.x * d.x + d.y * d.y <= radar_range() * radar_range()) out.push_back(std::int32_t(i));
         }
         return out;
@@ -916,7 +943,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         float best_d = FLT_MAX;
         for (std::int32_t i : list) {
             if (!pick(i)) continue;
-            const Vec3 d = combat.unit(std::size_t(i)).unit->position() - hero.position();
+            const Vec3 d = combat.unit(std::size_t(i)).unit->position() - cu->position();
             const float d2 = d.x * d.x + d.y * d.y;
             if (d2 < best_d) best_d = d2, best = i;
         }
@@ -935,7 +962,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     bool repair_on = false, chameleon_on = false;
     auto system_voices = [&] {
         if (!piloting()) return;
-        const bool r = hero_combat.device_state(0xf) == 0x20u, c = hero_combat.device_state(0xa) == 0x1000u;
+        const bool r = cc->device_state(0xf) == 0x20u, c = cc->device_state(0xa) == 0x1000u;
         if (r != repair_on && say_voice) say_voice(r ? "VOICE_REPAIR_SYS_ON" : "VOICE_REPAIR_SYS_OFF");
         if (c != chameleon_on && say_voice) say_voice(c ? "VOICE_CHAMELEON_SYS_ON" : "VOICE_CHAMELEON_SYS_OFF");
         repair_on = r, chameleon_on = c;
@@ -952,7 +979,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             // detected and no target: the nearest enemy, else the nearest friend, else the nearest unit.
             if (hud_target >= 0) {
                 const combat::Combatant& t = combat.unit(std::size_t(hud_target));
-                const Vec3 d = t.unit->position() - hero.position();
+                const Vec3 d = t.unit->position() - cu->position();
                 if (t.removed || !t.alive() || d.x * d.x + d.y * d.y > radar_range() * radar_range()) set_hud_target(-1);
             }
             if (list.empty()) {
@@ -965,7 +992,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                     float best_d = FLT_MAX;
                     for (std::int32_t i : list) {
                         if (combat.unit(std::size_t(i)).building()) continue;
-                        const Vec3 d = combat.unit(std::size_t(i)).unit->position() - hero.position();
+                        const Vec3 d = combat.unit(std::size_t(i)).unit->position() - cu->position();
                         if (d.x * d.x + d.y * d.y < best_d) best_d = d.x * d.x + d.y * d.y, best = i;
                     }
                     if (best >= 0) set_hud_target(best);
@@ -978,10 +1005,10 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         for (std::size_t i = 0; i < combat.size(); ++i) {
             const combat::Combatant& c = combat.unit(i);
             const std::uint32_t clan = clan_of(i);
-            if (i == hero_slot || c.removed || !c.alive() || c.building() || clan >= tma.clans.size() || tma.clans[clan].mode != 3 ||
+            if (i == hero_slot || i == ctl_ci || c.removed || !c.alive() || c.building() || clan >= tma.clans.size() || tma.clans[clan].mode != 3 ||
                 discovered.count(c.logic_id))
                 continue;
-            const Vec3 d = c.unit->position() - hero.position();
+            const Vec3 d = c.unit->position() - cu->position();
             if (d.x * d.x + d.y * d.y >= radar_range() * radar_range()) continue;
             set_hud_target(std::int32_t(i));
             discovered.insert(c.logic_id);
@@ -1255,7 +1282,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             map_alpha_changed_ms = sim_ms;
         } else if (is("CMD_JAMES_ZOOM_MODE")) {
             // Ignored while a zoom transition runs (0.2 < fov < the camera's own).
-            const float base = hero.rig ? hero.rig->camera_fov : 1.3f;
+            const float base = cu->rig ? cu->rig->camera_fov : 1.3f;
             if (zoom_fov < 0 || zoom_fov <= ui::kZoomFov + 1e-4f || zoom_fov >= base - 1e-4f) zoomed = !zoomed;
         } else if (is("CMD_JAMES_SELECT_TARGET")) {
             // CycleRadarTarget: the entry after the current target in the detected list.
@@ -1270,7 +1297,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             select_nearest(false);
         } else if (is("CMD_JAMES_AIM_TARGET")) {
             // LockTarget: the object under the screen centre within the radar range.
-            const std::int32_t t = combat.sight_target(hero_slot, radar_range());
+            const std::int32_t t = combat.sight_target(ctl_ci, radar_range());
             if (t >= 0) set_hud_target(t);
         }
     };
@@ -1303,6 +1330,19 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 return;
             }
             if (ev.key.scancode == SDL_SCANCODE_ESCAPE && hq) hq->escape();
+            // ENTER_STATE (OnUICommandDown 10072120; not in view mode 4 [the briefing]): the hero on foot boards
+            // his target — a unit (type ⊆ 0x103e000) of his clan, alive, within 20 m (2-D) → Push(1, 0, target).
+            // [inferred] target+0x30 == 4 is read as "alive"; the capture of a relation-3 clan's unit is not ported.
+            const auto enter_key = input::ui_key("CMD_ENTER_STATE", opt.layout);
+            if (hq && enter_key && input::scan_from_hid(int(ev.key.scancode)) == enter_key->key && !briefing && !spectator &&
+                hq->state() == ui::kStateHero && hud_target >= 0) {
+                const combat::Combatant& t = combat.unit(std::size_t(hud_target));
+                const std::uint32_t type = tma_types[placement_of(std::size_t(hud_target)).identity];
+                const Vec3 d = t.unit->position() - hero.position();
+                if (type != 0 && (type & 0x103e000u) == type && !t.removed && t.alive() && d.x * d.x + d.y * d.y < 20.f * 20.f &&
+                    clan_of(std::size_t(hud_target)) == hero_clan && ci_live[std::size_t(hud_target)] >= 0)
+                    hq->push_state(ui::kStatePilot, t.logic_id);
+            }
         }
         // The in-game menu takes the pointer: its buttons on the left button; keys other than F3 / Esc do nothing.
         if (hq && hq->menu_open()) {
@@ -1328,7 +1368,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         // The HQ states (3–5, notes/hq-ui.md §2.2, §3.2, §10): the pointer is a cursor on the 640×480 virtual
         // screen, the keys drive the HQ camera and the hardcoded letters; the hero takes no input
         // (ViewTrans_*: FUN_10075440(hero, 0), stdClearKeyboard). Releases still reach the hero's tables.
-        if (hq && !hq->hero_controlled()) {
+        if (hq && !hq->unit_controlled()) {
             int ww = 640, wh = 480;
             SDL_GetWindowSize(window, &ww, &wh);
             const auto virt = [&](float x, float y) {
@@ -1455,8 +1495,8 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         events.clear();
         mouse_dx = mouse_dy = 0;
         using namespace input;
-        // In the HQ states the hero is not driven (ViewTrans_*: FUN_10075440(hero, 0)).
-        const bool hero_input = !hq || hq->hero_controlled();
+        // In the HQ states the controlled unit is not driven (ViewTrans_*: Unit_SetPlayerControl(unit, 0)).
+        const bool hero_input = !hq || hq->unit_controlled();
         // ExecuteBinding (vehicle class 0): throttle.y from FORWARD/BACK/WALK_F/WALK_B, the angular
         // command from ROTATE_*; strafing (LEFT/RIGHT heading) is not modelled yet.
         float forward = commands.get(0, 0, kMcmdForward) + commands.get(0, 0, kMcmdBack) +
@@ -1476,8 +1516,8 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             heading = (left ? 1.f : -1.f) * k * 1.5707963f;
             if (forward == 0) forward = std::max(left_v, right_v);
         }
-        motion.set_attitude_offset({0, 0, heading});
-        motion.set_throttle({0, forward, hero_input ? commands.get(0, 0, kMcmdUp) + commands.get(0, 0, kMcmdDown) : 0.f});
+        cu->motion->set_attitude_offset({0, 0, heading});
+        cu->motion->set_throttle({0, forward, hero_input ? commands.get(0, 0, kMcmdUp) + commands.get(0, 0, kMcmdDown) : 0.f});
         // HERO.TBL mouse X → ANGLE_Z: the chassis attitude target (IControl +0x48) gets the mouse delta
         // on top of the remaining turn the mover has not consumed yet (GetProperty 0x30).
         const float angle_z = commands.get(0, 0, kMcmdAngleZ);
@@ -1486,29 +1526,39 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         last_angle_z = angle_z;
         if (!hero_input) {
         } else if (dz_turn != 0) {
-            Vec3 t = motion.attitude_target();
+            Vec3 t = cu->motion->attitude_target();
             t.z = t.z + dz_turn - std::floor(t.z + dz_turn);
-            motion.set_attitude_target(t);
+            cu->motion->set_attitude_target(t);
         } else if (commands.get(0, 0, kMcmdRotateZ) != 0) {
-            motion.set_angular_command({0, 0, commands.get(0, 0, kMcmdRotateZ)});
+            cu->motion->set_angular_command({0, 0, commands.get(0, 0, kMcmdRotateZ)});
         }
         // The multigun bindings (ExecuteBinding SELECT / STATE): 1–8 toggle a gun, 0 selects all, LMB
         // sets CIS_CONTINUEFIGHT on the selected guns and its release CIS_SWITCHOFF.
         for (const auto& a : commands.take_actions()) {
             if (a.cls != 2 || !hero_input) continue;
-            if (a.cmd == kMcmdSelect) hero_combat.select(a.index);
-            else if (a.cmd == kMcmdState && a.index == -1) hero_combat.set_state_selected(std::uint32_t(a.state));
-            else if (a.cmd == kMcmdState && a.index >= 1) hero_combat.set_gun_state(std::size_t(a.index - 1), std::uint32_t(a.state));
+            if (a.cmd == kMcmdSelect) cc->select(a.index);
+            else if (a.cmd == kMcmdState && a.index == -1) cc->set_state_selected(std::uint32_t(a.state));
+            else if (a.cmd == kMcmdState && a.index >= 1) cc->set_gun_state(std::size_t(a.index - 1), std::uint32_t(a.state));
         }
-        if (opt.demo_fire && hero_combat.alive()) hero_combat.set_trigger(true);
+        if (opt.demo_fire && cc->alive()) cc->set_trigger(true);
         sim_ms = to_ms;
         briefing_tick();
         for (std::size_t i = 0; i < live.size(); ++i) {
             const combat::Combatant& c = combat.unit(live_ci[i]);
             if (c.removed) continue;
             // SetAllUnitsAIFrozen(1) during the briefing: every unit but the hero (property 0x20a).
-            if (brains[i] && c.alive() && !(briefing && i != hero_slot)) brains[i]->update(float(sim_ms)); // brain tick + motion update (pilot inside)
+            // The controlled warbot's movement and turret channels are manual (Unit_SetPlayerControl, +0x9c = 0):
+            // its brain is off while the player drives it [port: autogunner / autopilot modes not ported].
+            const bool manual = i == ctl && ctl != hero_slot;
+            if (brains[i] && c.alive() && !(briefing && i != hero_slot) && !manual) brains[i]->update(float(sim_ms)); // brain tick + motion update (pilot inside)
             else live[i]->motion->update(float(sim_ms));
+        }
+        // MainLoop: the warbot carrying the hero drags him along (his placement = the warbot's, z − its radius).
+        if (inside) {
+            Mat4 m = live[*inside]->frame.matrix;
+            m.at(2, 3) -= live[*inside]->sphere_radius;
+            hero.motion->start(float(sim_ms), m);
+            hero.frame = hero.motion->interpolate(float(sim_ms));
         }
         // The fire control's request: the target goes to the guns (SetTarget), the turret slews toward its
         // aim (state 0x400 AI point; port: the target's root part), each requested weapon fires a shot
@@ -1531,7 +1581,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         };
         for (std::size_t i = 0; i < live.size(); ++i) {
             const combat::Combatant& c = combat.unit(live_ci[i]);
-            if (!brains[i] || !c.alive() || c.removed) continue;
+            if (!brains[i] || !c.alive() || c.removed || (i == ctl && ctl != hero_slot)) continue;
             apply_fire(live_ci[i], *live[i], brains[i]->fire_control(), brains[i]->fire(), weapon_guns[i]);
         }
         // The buildings' brains (frozen with the units during the briefing); a capture changes their clan.
@@ -1564,7 +1614,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         }
         collide_units(live_ptrs, float(sim_ms));
         // Turrets: the hero's from HERO.TBL (turret channels), the others hold their aim_x/aim_y.
-        hero.aim_x = commands.get(1, 1, input::kMcmdAngleX), hero.aim_y = commands.get(1, 1, input::kMcmdAngleY);
+        cu->aim_x = commands.get(1, 1, input::kMcmdAngleX), cu->aim_y = commands.get(1, 1, input::kMcmdAngleY);
         for (std::size_t i = 0; i < live.size(); ++i)
             if (!combat.unit(live_ci[i]).removed) live[i]->pose_parts();
         // Buildings (CBuilding::SendMsg message 1, 100335d0): doors and the capture door, then the pose.
@@ -1597,26 +1647,26 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             std::int32_t best = -1;
             float best_d = FLT_MAX;
             for (std::size_t i = 0; i < combat.size(); ++i) {
-                if (i == hero_slot || combat.unit(i).removed || !combat.unit(i).alive()) continue;
+                if (i == ctl_ci || combat.unit(i).removed || !combat.unit(i).alive()) continue;
                 if (opt.aim_target ? placement_of(i).identity != *opt.aim_target
                                    : combat.unit(i).building() || !perception.hostile(hero_clan, clan_of(i)))
                     continue;
-                const Vec3 d = combat.unit(i).centre() - hero.position();
+                const Vec3 d = combat.unit(i).centre() - cu->position();
                 if (dot(d, d) < best_d) best_d = dot(d, d), best = std::int32_t(i);
             }
-            hero_combat.target = best;
-            hero_combat.aim_point.reset();
+            cc->target = best;
+            cc->aim_point.reset();
             if (best >= 0) {
-                const Vec3 to = combat.unit(std::size_t(best)).aim_centre() - hero.position();
-                hero_combat.aim_point = combat.unit(std::size_t(best)).aim_centre();
-                const Mat4& m = hero.frame.matrix;
+                const Vec3 to = combat.unit(std::size_t(best)).aim_centre() - cu->position();
+                cc->aim_point = combat.unit(std::size_t(best)).aim_centre();
+                const Mat4& m = cu->frame.matrix;
                 const float err = std::atan2(to.y, to.x) - std::atan2(m.at(1, 1), m.at(0, 1));
                 const float turns = err / 6.2831853f - std::round(err / 6.2831853f);
-                motion.set_attitude_target({0.5f, 0.5f, 0.5f - turns});
-                if (hero.rig) { // and the turret (with the camera) looks at it
-                    const ai::AimAngles a = ai::aim_angles(hero.frame.matrix, hero.position() + Vec3{0, 0, 3}, *hero_combat.aim_point);
-                    std::tie(hero.aim_x, hero.aim_y) = hero.rig->inputs_for_angles(a.yaw, a.pitch);
-                    hero.pose_parts();
+                cu->motion->set_attitude_target({0.5f, 0.5f, 0.5f - turns});
+                if (cu->rig) { // and the turret (with the camera) looks at it
+                    const ai::AimAngles a = ai::aim_angles(cu->frame.matrix, cu->position() + Vec3{0, 0, 3}, *cc->aim_point);
+                    std::tie(cu->aim_x, cu->aim_y) = cu->rig->inputs_for_angles(a.yaw, a.pitch);
+                    cu->pose_parts();
                 }
             }
         } else {
@@ -1625,8 +1675,12 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             // target, so guided guns (plasma, missiles) hold fire (CGunDevice::Update 10029f4b).
             update_targeting();
             system_voices();
-            hero_combat.target = hud_target;
+            cc->target = hud_target;
         }
+        // MainLoop: the warbot carrying the hero is dead → PopToState(0) (the exit point falls back to its xy − 1).
+        // The controlled unit is dead (MainLoop / OnUnitRemoved): one pop (state 2 → the HQ).
+        if (hq && inside && (combat.unit(live_ci[*inside]).removed || !combat.unit(live_ci[*inside]).alive())) hq->pop_to_hero();
+        else if (hq && hq->state() == ui::kStateRemote && (combat.unit(ctl_ci).removed || !cc->alive())) hq->pop_state();
         combat.update(float(sim_ms));
         for (const auto& e : combat.take_events()) {
             using T = combat::CombatEvent::Type;
@@ -1748,7 +1802,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             // From its own TURRET camera the unit is not drawn (inferred from CCameraDevice::CreateCamera
             // handing the camera to IAniMesh slot 0x84). The camera reads the posed model, not these.
             // A removed unit is no longer drawn.
-            live[i]->pose(transforms, (i == hero_slot && camera_mode == 0 && !spectator) || combat.unit(live_ci[i]).removed);
+            live[i]->pose(transforms, (i == ctl && camera_mode == 0 && !spectator) || combat.unit(live_ci[i]).removed);
         }
         for (std::size_t k = 0; k < buildings.size(); ++k) // doors; destroyed parts collapsed
             if (building_drawn[k]) buildings[k]->body().pose(transforms, buildings[k]->removed);
@@ -1787,7 +1841,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     vo.effects = [&](Vec3 eye, fx::FxFrame& f) {
         for (auto& e : effects) e.inst.render(f, eye);
     };
-    vo.follow = [&](Vec3& centre) { centre = hero.position() + Vec3{0, 0, 2.f}; };
+    vo.follow = [&](Vec3& centre) { centre = cu->position() + Vec3{0, 0, 2.f}; };
     vo.relative_mouse = true;
     // CCameraDevice::Update: eye = CameraCenter, X = TargetDirect (the barrel), up = CameraCenter's
     // vector; free look (LShift + mouse) rotates locally by Rz((0.5 − ax)·2π) · Ry((0.5 − ay)·π).
@@ -1813,7 +1867,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             return true;
         }
         // The HQ states show the system pointer (cursors .ani not decoded) instead of the captured mouse.
-        if (const bool rel = !hq || hq->hero_controlled(); opt.shot_path.empty() && rel != relative_mouse_on) {
+        if (const bool rel = !hq || hq->unit_controlled(); opt.shot_path.empty() && rel != relative_mouse_on) {
             SDL_SetWindowRelativeMouseMode(window, rel), relative_mouse_on = rel;
             // The HQ shows the engine's software cursor (FORCE_SOFTWARE_CURSOR, the shipped default) or the system one.
             if (!rel && opt.software_cursor) SDL_HideCursor();
@@ -1828,17 +1882,17 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (sound) sound->set_listener(cam.eye, cam.forward, cam.up);
             return true;
         }
-        const auto& rig = hero.rig;
-        const auto& turret_points = hero.turret_points;
+        const auto& rig = cu->rig;
+        const auto& turret_points = cu->turret_points;
         if (camera_mode < 0 || !rig || rig->camera_eye_point < 0 || std::size_t(rig->camera_eye_point) >= turret_points.size() ||
             std::size_t(rig->camera_axis_point) >= turret_points.size())
             return false;
-        const auto& nodes = hero.model.parts[hero.turret_part].model.node_world;
-        const MotionFrame& last_frame = hero.frame;
+        const auto& nodes = cu->model.parts[cu->turret_part].model.node_world;
+        const MotionFrame& last_frame = cu->frame;
         const ContactPoint &pe = turret_points[std::size_t(rig->camera_eye_point)],
                            &pa = turret_points[std::size_t(rig->camera_axis_point)];
         if (pe.part >= nodes.size() || pa.part >= nodes.size()) return false;
-        // The turret part's nodes already carry the steady mount (hero.steady_mounts).
+        // The turret part's nodes already carry the steady mount (LiveUnit::steady_mounts).
         const Mat4& base = last_frame.matrix;
         const Mat4 me = base * nodes[pe.part], ma = base * nodes[pa.part];
         const Vec3 eye = me.transform_point(pe.pos);
@@ -1875,7 +1929,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                     if (outer_preset == 0) camera_mode = 0;
                 }
             }
-            const float h = std::atan2(fwd.y, fwd.x) + outer_cur.yaw, R = hero.sphere_radius;
+            const float h = std::atan2(fwd.y, fwd.x) + outer_cur.yaw, R = cu->sphere_radius;
             cam.eye = cam.eye - Vec3{std::cos(h) * R * outer_cur.dist, std::sin(h) * R * outer_cur.dist, R * outer_cur.height};
             // ClipOuterToWorld, reduced to the ground: keep the camera 0.75 above the landscape.
             if (auto g = ground.probe(cam.eye + Vec3{0, 0, 50}, 100.f); g && cam.eye.z < g->z + 0.75f) cam.eye.z = g->z + 0.75f;
@@ -1893,6 +1947,9 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     auto unit_name = [&](std::size_t i) {
         const mission::TmaObject& o = placement_of(i);
         if (!o.instance_name.empty()) return utf8_to_cp1251(o.instance_name);
+        // Control slot 0xa4 (FUN_100761a0 / GetObjectTypeName): the HQ's names.
+        if (hq)
+            if (std::string n = hq->display_name(o.identity); !n.empty()) return n;
         std::string n = o.resource;
         if (auto cut = n.find_last_of("\\/"); cut != std::string::npos) n = n.substr(cut + 1);
         if (auto dot_at = n.find('.'); dot_at != std::string::npos) n.resize(dot_at);
@@ -1912,7 +1969,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     auto build_hud = [&](float aspect) {
         ui::HudState s;
         s.cockpit = cockpit_on;
-        const Vec3 hero_pos = hero.position();
+        const Vec3 hero_pos = cu->position();
         auto project = [&](Vec3 p) -> std::optional<ui::Vec2f> {
             if (!hud_cam) return std::nullopt;
             const float eye[3] = {hud_cam->eye.x, hud_cam->eye.y, hud_cam->eye.z};
@@ -1923,14 +1980,14 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         if (hud_cam) {
             s.fwd_x = hud_cam->forward.x, s.fwd_y = hud_cam->forward.y, s.fov = hud_cam->fov_x;
         } else { // debug orbit: the body's heading, no sight
-            const Mat4& m = hero.frame.matrix;
+            const Mat4& m = cu->frame.matrix;
             s.fwd_x = m.at(0, 1), s.fwd_y = m.at(1, 1), s.has_camera = false;
         }
         // Radar: the detected units; the ping period range·0.002 s (property 0xa9 stand-in); altitude above
         // the map's lowest point (mission+0xad8 inferred); speed in km/h.
         s.radar_range = radar_range();
         // The sweep's period: property 0xa9 (the radar's GetParam(4), 750 in every shipped radar) · 0.002 s.
-        const double period_ms = hero_combat.radar_param(4).value_or(0.f) * 0.002 * 1000;
+        const double period_ms = cc->radar_param(4).value_or(0.f) * 0.002 * 1000;
         // t / T since the last RADAR ping (the same timer, +0x35c; cockpit_sounds restarts it).
         s.sweep = period_ms > 0 ? std::clamp(float((sim_ms - radar_ping_ms) / period_ms), 0.f, 1.f) : 0.f;
         for (std::int32_t i : detected()) {
@@ -1944,23 +2001,41 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             s.blips.push_back(b);
         }
         s.altitude = hero_pos.z - ground.bounds_min().z;
-        const Vec3 v = motion.world_velocity();
+        const Vec3 v = cu->motion->world_velocity();
         s.speed_kmh = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z) * 3.6f;
         max_speed_seen = std::max(max_speed_seen, s.speed_kmh);
         s.max_speed_kmh = max_speed_seen;
         // CStatusPage_Draw (1003f4b0): lamp 0 lit with the first type-0xf device (repair) in state 0x20, lamp 2 with
         // the first type-0xa one (detection shield / chameleon) in state 0x1000 (FUN_10077260 / 10077290).
-        s.lamps[0] = hero_combat.device_state(0xf) == 0x20u ? 1 : 0;
-        s.lamps[2] = hero_combat.device_state(0xa) == 0x1000u ? 1 : 0;
-        s.lamps[3] = 1; // piloted directly (top view state 0)
-        s.lamps[5] = 1; // behaviour mode 0 (unit+0x9c; port default)
-        // Weapon rows: the hero's guns in HERO.TBL order, named by iron3d 3071..3074 (CHeroUnit_Ctor).
-        for (std::size_t g = 0; g < hero_combat.guns.size(); ++g) {
-            const combat::GunDevice& gun = hero_combat.guns[g];
+        s.lamps[0] = cc->device_state(0xf) == 0x20u ? 1 : 0;
+        s.lamps[2] = cc->device_state(0xa) == 0x1000u ? 1 : 0;
+        s.lamps[3] = !hq || hq->state() == ui::kStateHero || hq->state() == ui::kStatePilot ? 1 : 0; // piloted directly
+        s.lamps[4] = exit_blocked ? 2 : 0; // CViewStateQueue+0x31: the warbot exit is blocked (red)
+        s.lamps[5] = 1; // behaviour mode 0 (unit+0x9c; port: the autogunner / autopilot modes are not ported)
+        // Weapon rows: the hero's guns in HERO.TBL order, named by iron3d 3071..3074 (CHeroUnit_Ctor); another
+        // unit's by the research-tree display name of the gun's part, "NONAME" without one (CUnit_Update
+        // 10075ad0). [inferred] The g-th gun is the g-th weapon node (slot 4) of the unit's scheme, depth first.
+        std::vector<std::string> part_names;
+        if (ctl != hero_slot && eco && runtime)
+            if (const game::WorldObject* wo = runtime->world().find(cc->logic_id))
+                if (const mission::Scheme* sc = eco->schemes().get(wo->resource)) {
+                    const economy::Research* r = eco->research(hero_clan);
+                    std::function<void(const mission::SchemeNode&)> walk = [&](const mission::SchemeNode& n) {
+                        if (n.category == 4) {
+                            const mission::ResearchItem* it = r ? r->item(r->find_item(n.entry)) : nullptr;
+                            part_names.push_back(it && !it->name.empty() ? it->name : std::string("NONAME"));
+                        }
+                        for (const auto& c : n.children) walk(c);
+                    };
+                    walk(sc->root);
+                }
+        for (std::size_t g = 0; g < cc->guns.size(); ++g) {
+            const combat::GunDevice& gun = cc->guns[g];
             ui::HudWeapon w;
-            w.name = g < 4 ? ui_text(3071 + std::uint32_t(g)) : utf8_to_cp1251(gun.spec().bullet.second);
+            w.name = ctl == hero_slot ? (g < 4 ? ui_text(3071 + std::uint32_t(g)) : utf8_to_cp1251(gun.spec().bullet.second))
+                                      : g < part_names.size() ? part_names[g] : std::string("NONAME");
             w.ammo = gun.ammo(), w.state = gun.state();
-            w.selected = g < hero_combat.selected.size() && hero_combat.selected[g];
+            w.selected = g < cc->selected.size() && cc->selected[g];
             w.energy = gun.param(1) > 0 ? std::clamp(gun.energy() / gun.param(1), 0.f, 1.f) : 1.f;
             // Lock progress (control slot 0x28, inferred): guided guns only, 1 − timer / lock time.
             if (gun.param(9) > 0)
@@ -1969,13 +2044,13 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                                                               : 0.f;
             s.weapons.push_back(w);
         }
-        if (hero_combat.target >= 0) s.lock_point = project(combat.unit(std::size_t(hero_combat.target)).aim_centre());
+        if (cc->target >= 0) s.lock_point = project(combat.unit(std::size_t(cc->target)).aim_centre());
         // Own unit (page 2) and the selected target (page 1, with its on-screen box).
-        s.own.name = unit_name(hero_slot);
-        s.own.health = hero_combat.damage.hp_ratio() * 100;
-        s.own.energy = hero_combat.battery_fraction(); // unit property 0x73: the batteries' charge
-        s.own.shields = hero_combat.shield_charges(); // property 0x79 (CShieldDisplay_Draw only with it)
-        const std::int32_t shown = hud_target >= 0 ? hud_target : opt.demo_aim ? hero_combat.target : -1;
+        s.own.name = unit_name(ctl_ci);
+        s.own.health = cc->damage.hp_ratio() * 100;
+        s.own.energy = cc->battery_fraction(); // unit property 0x73: the batteries' charge
+        s.own.shields = cc->shield_charges(); // property 0x79 (CShieldDisplay_Draw only with it)
+        const std::int32_t shown = hud_target >= 0 ? hud_target : opt.demo_aim ? cc->target : -1;
         if (shown >= 0 && !combat.unit(std::size_t(shown)).removed) {
             const combat::Combatant& t = combat.unit(std::size_t(shown));
             ui::HudUnitPanel p;
@@ -1987,7 +2062,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             // → "[" + GetOrderTypeName (100773e0) of its first order + "]"; any other "very dangerous" one
             // (FUN_10076b40: a working weapon device whose bullet holds more than 10000 HP, device properties
             // 0x400 / 6 = ReloadBulletInfo's bullet property 0x35) → 6255 in 0xffc80000.
-            if (std::size_t(shown) != hero_slot && !t.building()) {
+            if (std::size_t(shown) != ctl_ci && !t.building()) {
                 if (clan_of(std::size_t(shown)) == hero_clan) {
                     const std::uint32_t lid = t.logic_id;
                     std::uint32_t order = eco ? eco->current_order(lid) : 0;
@@ -2034,7 +2109,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             const combat::Combatant& c = combat.unit(i);
             if (c.removed || !c.alive()) continue;
             const Vec3 p = c.unit->position();
-            s.map_dots.push_back({p.x * 256 / S, p.y * 256 / S, i == hero_slot ? 0xffffffffu : unit_colour(i)});
+            s.map_dots.push_back({p.x * 256 / S, p.y * 256 / S, i == ctl_ci ? 0xffffffffu : unit_colour(i)});
         }
         return s;
     };
@@ -2045,7 +2120,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     auto cockpit_sounds = [&](const ui::HudState& hs) {
         if (!hs.cockpit) return;
         // CRadarPage_Draw (1003ff00), with a radar (property 0xa9): RADAR every 0xa9·0.002 s (timer +0x35c).
-        if (const auto sweep = hero_combat.radar_param(4); sweep && sim_ms - radar_ping_ms > *sweep * 0.002 * 1000)
+        if (const auto sweep = cc->radar_param(4); sweep && sim_ms - radar_ping_ms > *sweep * 0.002 * 1000)
             radar_ping_ms = sim_ms, play_sound("RADAR");
         // CTargeter_DrawGaugesAndLabels (10042210), own unit: below 20 % health VOICE_LIFE_LOW, below 0.2 battery
         // VOICE_BATT_LOW, each at most every 20 s (100e4bc4).
@@ -2053,10 +2128,10 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         if (hs.own.energy < 0.2f && sim_ms - batt_voice_ms > 20000) batt_voice_ms = sim_ms, play_voice("VOICE_BATT_LOW");
         // CWeaponRow_DrawWeapon (1009ccd0), only while the satellite map is closed.
         if (hs.map_visible) return;
-        gun_latches.resize(hero_combat.guns.size(), {false, false, false});
-        const bool target_unit = hero_combat.target >= 0 && !combat.unit(std::size_t(hero_combat.target)).building();
-        for (std::size_t g = 0; g < hero_combat.guns.size() && g < hs.weapons.size(); ++g) {
-            const combat::GunDevice& gun = hero_combat.guns[g];
+        gun_latches.resize(cc->guns.size(), {false, false, false});
+        const bool target_unit = cc->target >= 0 && !combat.unit(std::size_t(cc->target)).building();
+        for (std::size_t g = 0; g < cc->guns.size() && g < hs.weapons.size(); ++g) {
+            const combat::GunDevice& gun = cc->guns[g];
             const ui::HudWeapon& w = hs.weapons[g];
             // The lock brackets (selected, state 0 / 1, a unit targeted, ammo left, lock k ≠ 0, on screen): TARGET_ZOOM
             // every 0.35 s while locking, else TARGET_READY every 0.2 s; one timer for the page (+0x59c).
@@ -2068,7 +2143,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             // The latches: a voice when one turns on while piloting. Destroyed: state 5 with the device broken
             // (property 0x300); ammo out: limited ammo at 0; energy out: property 0x62 outside [0, 1] or below 0.01.
             const float energy = gun.param(1) > 0 ? gun.energy() / gun.param(1) : gun.energy_ratio();
-            const std::array<bool, 3> now{gun.state() == combat::kGunEmpty && hero_combat.gun_broken(g), gun.ammo() == 0,
+            const std::array<bool, 3> now{gun.state() == combat::kGunEmpty && cc->gun_broken(g), gun.ammo() == 0,
                                           energy < 0 || energy > 1 || energy < 0.01f};
             static constexpr const char* kVoice[3] = {"VOICE_WEAPON_DESTR", "VOICE_WEAP_AMMO_OUT", "VOICE_WEAP_ENERGY_OUT"};
             for (int k = 0; k < 3; ++k) {
@@ -2177,6 +2252,62 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         host.sound = [&](const char* key) {
             if (auto v = ui_sounds.find(key); sound && v != ui_sounds.end()) sound->play({"sounds.lib", v->second});
         };
+        // The game side of the view-state handlers (view-states.md §3): the hero boards a warbot (0 → 1) and
+        // gets out again (1 → 0).
+        host.transition = [&](int from, int to, std::uint32_t object) {
+            if (from == ui::kStateHero && to == ui::kStatePilot) {
+                // ViewTrans_HeroToWarbot 10063c60: leave the outer view, the hero's body leaves the world, the
+                // warbot takes the player's input and its turret camera, view mode 1.
+                std::optional<std::size_t> li;
+                for (std::size_t i = 0; i < live.size(); ++i)
+                    if (live[i]->placement->identity == object && !combat.unit(live_ci[i]).removed && combat.unit(live_ci[i]).alive()) li = i;
+                if (!li) return false;
+                camera_mode = 0;
+                hero_combat.removed = true; // [inferred] detached from the container: not drawn, hit or traced
+                inside = *li;
+                set_control(*li);
+                return true;
+            }
+            if (from == ui::kStatePilot && to == ui::kStateHero) {
+                // ViewTrans_WarbotToHero 10063d60 → ComputeWarbotExitPlacement 100639a0 / FindWarbotExitPoint
+                // 100637f0: eight points at r = warbot + hero radius around the warbot; the first on the ground,
+                // z = ground + 8, the hero facing away from the warbot. None → the exit is blocked.
+                if (!inside) return true;
+                const LiveUnit& w = *live[*inside];
+                const Vec3 c = w.position();
+                const bool dead = combat.unit(live_ci[*inside]).removed || !combat.unit(live_ci[*inside]).alive();
+                std::optional<Vec3> p;
+                if (dead) p = c - Vec3{1, 1, 0};
+                const float r = w.sphere_radius + hero.sphere_radius;
+                for (int i = 0; i < 8 && !p; ++i) {
+                    const Vec3 q = c + Vec3{r * std::cos(float(i) * 0.7853982f), r * std::sin(float(i) * 0.7853982f), 0};
+                    // [inferred] FindNearestFace8 mode 2 and the face flag 0x200 test: the terrain under the point.
+                    if (const auto g = ground.probe({q.x, q.y, c.z + 50}, 200.f); g && (!contains_ci(w.model.chassis_sheet, "chas_fly") || c.z - g->z < 10)) p = Vec3{q.x, q.y, 0};
+                }
+                if (!p) {
+                    exit_blocked = true;
+                    computer_pager(6211);
+                    play_voice("VOICE_RISK_AREA");
+                    return false;
+                }
+                const auto g = ground.probe({p->x, p->y, c.z + 50}, 2000.f);
+                p->z = (g ? g->z : c.z) + 8;
+                Vec3 d = *p - c;
+                d.z = 0;
+                d = dot(d, d) > 1e-6f ? normalize(d) : Vec3{0, 1, 0};
+                Mat4 m = Mat4::identity();
+                m.at(0, 0) = d.y, m.at(1, 0) = -d.x, m.at(0, 1) = d.x, m.at(1, 1) = d.y;
+                m.at(0, 3) = p->x, m.at(1, 3) = p->y, m.at(2, 3) = p->z;
+                hero.motion->start(float(sim_ms), m);
+                hero.frame = hero.motion->interpolate(float(sim_ms));
+                hero_combat.removed = false;
+                exit_blocked = false;
+                camera_mode = 0;
+                set_control(hero_slot); // the warbot returns to its brain
+                return true;
+            }
+            return true;
+        };
         host.passable = [&](float x, float y) { // FUN_10076bc0's ground cell [inferred: inside the landscape]
             return x > ground.bounds_min().x && y > ground.bounds_min().y && x < ground.bounds_max().x && y < ground.bounds_max().y;
         };
@@ -2257,7 +2388,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         // trace; [inferred] back faces are skipped as a rendered pick would cull them).
         Vec3 from = eye;
         for (int k = 0; k < 8; ++k) {
-            const auto h = combat.trace(from, eye + dir * 3000.f, std::int32_t(hero_slot));
+            const auto h = combat.trace(from, eye + dir * 3000.f, std::int32_t(ctl_ci));
             if (!h || h->kind != combat::WorldHit::Kind::Unit || h->unit < 0) break;
             if (dot(h->face_normal, dir) < 0) {
                 pk.object = placement_of(std::size_t(h->unit)).identity;
@@ -2271,6 +2402,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     // --hq-screen opens a screen once the interface is up, --click clicks the virtual screen at a time.
     bool hq_entered = false, hq_screen_done = false;
     std::size_t hq_clicks_done = 0;
+    bool pilot_done = false;
     std::function<void()> hq_debug_tick;
     hq_debug_tick = [&] {
         if (!hq) return;
@@ -2278,6 +2410,11 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             hq_entered = true;
             hq->hero_enters_building(hero.placement->identity, *opt.hq_enter);
         }
+        if (opt.pilot && !pilot_done && sim_ms >= opt.pilot_time * 1000) {
+            pilot_done = true;
+            hq->push_state(ui::kStatePilot, *opt.pilot);
+        }
+        if (pilot_done && opt.pilot_exit >= 0 && sim_ms >= opt.pilot_exit * 1000 && hq->state() == ui::kStatePilot) hq->escape();
         if (opt.hq_screen >= 0 && !hq_screen_done && hq->interface_up()) {
             hq_screen_done = true;
             hq->expand_now();
