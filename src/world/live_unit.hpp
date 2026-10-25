@@ -64,9 +64,12 @@ public:
 
     // Floors above the landscape (object floors, bridges, building roofs): the highest surface on the
     // segment top → bottom, if any. The original's FollowGround probes the whole world (IWorld faces).
-    // DropToGround at load: the current state's contact points onto the landscape (mean height).
-    void drop_to_ground(float now_ms, const TerrainGround& ground);
     using FloorProbe = std::function<std::optional<float>(Vec3 top, Vec3 bottom)>;
+    // DropToGround: the current state's contact points onto the ground (mean height); `floor` adds the
+    // object faces (load() has none yet).
+    void drop_to_ground(float now_ms, const TerrainGround& ground, const FloorProbe& floor = {});
+    // Back to the TMA placement, then DropToGround with the object faces (play, once they exist).
+    void place(float now_ms, const TerrainGround& ground, const FloorProbe& floor);
     // After motion->update(now): ground following from the feet, then out of static walls and
     // inside the landscape box. Returns the collision push applied.
     Vec3 settle(float now_ms, const TerrainGround& ground, const StaticColliders& statics, const FloorProbe& floor = {});

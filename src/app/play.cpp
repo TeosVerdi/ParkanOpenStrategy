@@ -300,6 +300,16 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         SDL_Log("play: building %08x %s: %.0f HP, %zu doors, capture door %s", b->body().placement->identity, b->body().placement->resource.c_str(),
                 combat.unit(ci).damage.initial, b->items().size() - (b->can_be_captured() ? 1 : 0), b->can_be_captured() ? "yes" : "no");
     }
+    // Floors: object surfaces and building bodies (bridges, hangar floors), beside the landscape
+    // (LiveUnit::settle / drop_to_ground).
+    const LiveUnit::FloorProbe floor_probe = [&](Vec3 top, Vec3 bottom) -> std::optional<float> {
+        // Faces steeper than 80° are not ground (FindNearestFace10: n.z > 0.1736).
+        const auto h = combat.trace_floor(top, bottom);
+        return h && std::abs(h->normal.z) > 0.1736f ? std::optional<float>(h->point.z) : std::nullopt;
+    };
+    // DropToGround again with the object faces, now that the buildings stand: units placed on a bridge
+    // or a building's floor (heroes starting in their base) stay there.
+    for (auto& u : live) u->place(0, ground, floor_probe);
     // Index maps: live unit → combatant, building → combatant, and back. The placed units come first, then
     // the placed buildings; objects created while the mission runs (produced robots, constructed and
     // upgraded buildings) are appended to all three lists.
@@ -1212,12 +1222,6 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             }
         }
         live_ptrs.clear();
-        // Floors: object surfaces and building bodies (bridges), beside the landscape (LiveUnit::settle).
-        const LiveUnit::FloorProbe floor_probe = [&](Vec3 top, Vec3 bottom) -> std::optional<float> {
-            // Faces steeper than 80° are not ground (FindNearestFace10: n.z > 0.1736).
-            const auto h = combat.trace_floor(top, bottom);
-            return h && std::abs(h->normal.z) > 0.1736f ? std::optional<float>(h->point.z) : std::nullopt;
-        };
         for (std::size_t i = 0; i < live.size(); ++i) {
             if (combat.unit(live_ci[i]).removed) continue;
             const Vec3 push = live[i]->settle(float(sim_ms), ground, statics, floor_probe);

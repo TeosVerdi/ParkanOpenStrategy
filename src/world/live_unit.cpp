@@ -109,29 +109,46 @@ std::unique_ptr<LiveUnit> LiveUnit::load(AssetLibrary& lib, const mission::TmaOb
     return u;
 }
 
-void LiveUnit::drop_to_ground(float now_ms, const TerrainGround& ground) {
+void LiveUnit::drop_to_ground(float now_ms, const TerrainGround& ground, const FloorProbe& floor) {
     // CControlBase::DropToGround (10018800): the contact points of the current state (state 0 at load)
-    // are probed (ProbeGroundFace) and the body shifts by the mean height to the face planes (flags
-    // 0x30 / 0xc0 tilt and upright are not ported). Without contact points the body origin goes onto the
-    // ground. Port: landscape faces only here (the original probes object faces too); probe span inferred.
+    // are probed (ProbeGroundFace: landscape and object faces) and the body shifts by the summed height
+    // to the faces divided by the number of contacts (flags 0x30 / 0xc0 tilt and upright are not
+    // ported). Without contact points the body origin is probed. Port: a point's face is the highest
+    // landscape or object face at most the step limit above it, as FollowGround accepts them
+    // [inferred for DropToGround]; when no point finds one, the highest landscape face within 50 m above
+    // (port fallback for placements below the landscape, e.g. before the object faces exist).
     MotionFrame f = motion->interpolate(now_ms);
     ModelAsset& chassis = model.parts.front().model;
     pose_model_blend(chassis, f.frame_a, f.frame_b, f.weight_b);
-    // The sum runs over the points with ground under them; it is divided by the number of contacts.
-    float sum = 0;
-    int n = 0;
+    constexpr float kStep = 7.5f;
+    auto support = [&](Vec3 p) -> std::optional<float> {
+        std::optional<float> z;
+        if (auto g = ground.probe(p, kStep)) z = g->z;
+        if (floor)
+            if (auto fz = floor(p + Vec3{0, 0, kStep}, p - Vec3{0, 0, 1000.f}); fz && (!z || *fz > *z)) z = fz;
+        return z;
+    };
+    std::vector<Vec3> probes;
     for (const auto& c : motion->contacts()) {
         const auto pi = c.point;
         if (pi >= points.size() || points[pi].part >= chassis.node_world.size()) continue;
-        ++n;
-        const Vec3 foot = (f.matrix * chassis.node_world[points[pi].part]).transform_point(points[pi].pos);
-        if (auto g = ground.probe(foot + Vec3{0, 0, 50}, 100.f)) sum += g->z - foot.z;
+        probes.push_back((f.matrix * chassis.node_world[points[pi].part]).transform_point(points[pi].pos));
     }
-    if (n == 0) {
-        const Vec3 p = translation(f.matrix);
-        if (auto g = ground.probe(p + Vec3{0, 0, 50}, 100.f)) sum = g->z - p.z, n = 1;
-    }
-    if (n) motion->apply_offset({0, 0, sum / float(n)});
+    if (probes.empty()) probes.push_back(translation(f.matrix));
+    float sum = 0;
+    bool any = false;
+    for (const Vec3& p : probes)
+        if (auto z = support(p)) sum += *z - p.z, any = true;
+    if (!any) // port fallback (see above)
+        for (const Vec3& p : probes)
+            if (auto g = ground.probe(p + Vec3{0, 0, 50}, 100.f)) sum += g->z - p.z;
+    motion->apply_offset({0, 0, sum / float(probes.size())});
+}
+
+void LiveUnit::place(float now_ms, const TerrainGround& ground, const FloorProbe& floor) {
+    motion->start(now_ms, tma_placement(*placement));
+    drop_to_ground(now_ms, ground, floor);
+    frame = motion->interpolate(now_ms);
 }
 
 Vec3 LiveUnit::settle(float now_ms, const TerrainGround& ground, const StaticColliders& statics, const FloorProbe& floor) {
@@ -167,13 +184,16 @@ Vec3 LiveUnit::settle(float now_ms, const TerrainGround& ground, const StaticCol
         dz = g ? *g - p.z : 0.f;
     }
     if (!(motion->live().flags & 4)) {
-        // Flyers (state flag 4 clear): FollowGround only keeps a minimum clearance above the ground
-        // (its constant is not resolved; 1 m, as in tools/ai_tests.cpp).
-        const Vec3 p = translation(f.matrix);
+        // Flyers (state flag 4 clear; FollowGround 1001b3c3): the bounding sphere's centre is kept at
+        // least its radius above the ground under it: dz = max(0, ground − centre.z + r). The radius
+        // (ctl+0x24 slot 0x24, space 2) is clamped to 7.5 when it lies between 7.5 and 20 (1001a48a).
+        // Port: the sphere is LiveUnit's collision sphere [inferred: the same sphere].
+        const Vec3 p = f.matrix.transform_point(sphere_centre);
+        const float r = sphere_radius > 7.5f && sphere_radius < 20.f ? 7.5f : sphere_radius;
         auto g = ground.probe(p + Vec3{0, 0, 1000}, 2000.f);
-        dz = g ? std::max(0.f, g->z + 1.f - p.z) : 0.f;
+        dz = g ? std::max(0.f, g->z + r - p.z) : 0.f;
         if (floor)
-            if (auto fz = floor(p + Vec3{0, 0, kFloorStep}, p - Vec3{0, 0, 1000.f})) dz = std::max(dz, *fz + 1.f - p.z);
+            if (auto fz = floor(p + Vec3{0, 0, kFloorStep}, p - Vec3{0, 0, 1000.f})) dz = std::max(dz, *fz + r - p.z);
         clearance.clear();
     }
     motion->apply_offset({0, 0, dz});
