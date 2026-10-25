@@ -136,6 +136,10 @@ public:
 
     // Port: where a capturer walks to in a building (the capture volume's centre; see ai::SeenObject::entry).
     void set_entry(std::uint32_t lid, Vec3 p) { entries_[lid] = p; }
+    // An object created while the mission runs (a produced robot, a new or upgraded building's body).
+    void add_unit(std::uint32_t lid, std::size_t combatant, std::uint32_t clan, std::uint32_t type) {
+        units_[lid] = combatant, clans_[lid] = clan, types_[lid] = type;
+    }
 
 private:
     static constexpr float kBuildingRadius = 15.f; // port: a building that failed to load (not a combatant)
@@ -156,6 +160,22 @@ private:
     const TraceMesh& statics_;
     std::map<std::uint32_t, std::size_t> units_;
     std::map<std::uint32_t, std::uint32_t> clans_, types_;
+};
+
+// The legs of a builder or transport for the economy's walking tasks (economy::Mover): an ORDER_GO to the
+// brain (insert mode 3). Idle once the GO task has ended and the walker stopped.
+class BrainMover final : public economy::Mover {
+public:
+    explicit BrainMover(ai::AiUnit& brain) : brain_(brain) {}
+    bool go_to(Vec3 target) override {
+        ai::Order o;
+        o.type = ai::kOrderGo, o.target_kind = ai::kTargetPlace, o.place = target;
+        return brain_.give_order(o, 3);
+    }
+    bool idle() const override { return brain_.current_order() != ai::kOrderGo && !brain_.moving(); }
+
+private:
+    ai::AiUnit& brain_;
 };
 
 // The key bound to a UI command, as the in-game text names it (the SCAN_ name without its prefix).
@@ -280,8 +300,14 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         SDL_Log("play: building %08x %s: %.0f HP, %zu doors, capture door %s", b->body().placement->identity, b->body().placement->resource.c_str(),
                 combat.unit(ci).damage.initial, b->items().size() - (b->can_be_captured() ? 1 : 0), b->can_be_captured() ? "yes" : "no");
     }
-    const std::size_t first_building = live.size();
-    auto building_of = [&](std::size_t ci) -> Building* { return ci >= first_building && ci - first_building < buildings.size() ? buildings[ci - first_building].get() : nullptr; };
+    // Index maps: live unit → combatant, building → combatant, and back. The placed units come first, then
+    // the placed buildings; objects created while the mission runs (produced robots, constructed and
+    // upgraded buildings) are appended to all three lists.
+    std::vector<std::size_t> live_ci(live.size()), bld_ci(buildings.size());
+    std::vector<std::int32_t> ci_live, ci_bld;
+    for (std::size_t i = 0; i < live.size(); ++i) live_ci[i] = i, ci_live.push_back(std::int32_t(i)), ci_bld.push_back(-1);
+    for (std::size_t k = 0; k < buildings.size(); ++k) bld_ci[k] = live.size() + k, ci_live.push_back(-1), ci_bld.push_back(std::int32_t(k));
+    auto building_of = [&](std::size_t ci) -> Building* { return ci < ci_bld.size() && ci_bld[ci] >= 0 ? buildings[std::size_t(ci_bld[ci])].get() : nullptr; };
     // The TMA object of combatant `ci` (a live unit or a building).
     auto placement_of = [&](std::size_t ci) -> const mission::TmaObject& { return *combat.unit(ci).unit->placement; };
     combat::Combatant& hero_combat = combat.unit(hero_slot);
@@ -326,14 +352,15 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     ai::MsvcRand rng{1}; // the CRT's rand(), shared by every brain
     std::vector<std::unique_ptr<ai::ClanMigration>> migrations(tma.clans.size());
     std::vector<std::unique_ptr<ai::AiUnit>> brains(live.size());
-    for (std::size_t i = 0; i < live.size(); ++i) {
-        if (i == hero_slot) continue;
+    auto make_brain = [&](std::size_t i) {
         const mission::TmaObject& o = *live[i]->placement;
         const bool animal = contains_ci(o.resource, "\\ANIMAL\\");
         // Animals are flyers here (chas_fly: CanFly 1, WalkChassis 0; their chassis sheets are not
-        // traced — tools/ai_tests.cpp), robots walk.
+        // traced — tools/ai_tests.cpp). Robots: their chassis prototype's sheet (BTLU +0x160) — chas_fly.var
+        // flies (CanFly 1, WalkChassis 0); the others keep the walking default.
         ai::AiUnitConfig cfg;
         if (animal) cfg = {true, false, true};
+        else if (contains_ci(live[i]->model.chassis_sheet, "chas_fly")) cfg = {true, false, false};
         brains[i] = std::make_unique<ai::AiUnit>(*live[i]->motion, land_map, graph, [&rng] { return rng(); }, cfg);
         brains[i]->set_ground_height([&ground](float x, float y) {
             auto g = ground.probe({x, y, 1000}, 2000.f);
@@ -344,7 +371,9 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (!mig) mig = std::make_unique<ai::ClanMigration>(ai::ClanMigration{tma.clans[o.ai_index].spatial, {}, -1});
             brains[i]->set_migration(mig.get());
         }
-    }
+    };
+    for (std::size_t i = 0; i < live.size(); ++i)
+        if (i != hero_slot) make_brain(i);
 
     // Sound (notes/audio.md): in a mission a random track plays once, then a different random one; the
     // listener is the rendered camera. Not started for --shot.
@@ -406,6 +435,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         fx::EffectInstance inst;
         std::uint32_t bullet = 0;
         bool stopped = false;
+        std::int32_t end_mode = -1; // see CombatEvent::end_mode
         std::map<std::size_t, audio::Handle> voices; // sound command → voice
     };
     std::vector<LiveEffect> effects;
@@ -422,7 +452,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             play_effect_sounds(e.effect, e.pos);
             return;
         }
-        effects.push_back({fx::EffectInstance(it->second, fx_ctx, combat::CombatWorld::bullet_matrix(e.pos, e.axis), now), e.bullet, false, {}});
+        effects.push_back({fx::EffectInstance(it->second, fx_ctx, combat::CombatWorld::bullet_matrix(e.pos, e.axis), now), e.bullet, false, e.end_mode, {}});
         effects.back().inst.set_spawn_frame(e.frame); // bullet tracers: the CTPT frame (×0.03)
         if (e.scale != 1) effects.back().inst.set_scale({e.scale, e.scale, e.scale});
     };
@@ -434,8 +464,9 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (e.bullet && !e.stopped) {
                 if (auto f = flying.find(e.bullet); f != flying.end()) {
                     e.inst.set_transform(combat::CombatWorld::bullet_matrix(f->second->pos, f->second->dir));
-                } else { // the bullet hit or ran out: event 0x13 stops its effects
-                    e.inst.stop(now);
+                } else { // the bullet hit or ran out: event 0x13 stops its effects, 0xa restarts them
+                    if (e.end_mode >= 0) e.inst.start(now, std::uint32_t(e.end_mode));
+                    else e.inst.stop(now);
                     e.stopped = true;
                 }
             }
@@ -452,7 +483,11 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                         else sound->set_position(v->second, s.pos, {});
                     }
                 }
-            if (!alive) e.bullet = ~0u; // marked for removal
+            // Port: a bullet's effect goes once its stop (or its restart) has run to the end; the original
+            // destroys the bullet object, and its effect manager with it. Looping tracers otherwise restart
+            // forever (the laser's time mode 0).
+            const bool ended = e.stopped && (e.end_mode >= 0 ? now >= e.inst.end_time() : e.inst.stop_reached());
+            if (!alive || ended) e.bullet = ~0u; // marked for removal
         }
         std::erase_if(effects, [](const LiveEffect& e) { return e.bullet == ~0u; });
     };
@@ -497,10 +532,10 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                     s.centre.z, s.radius);
     }
     std::vector<std::vector<std::size_t>> weapon_guns(live.size()); // fire-control weapon → gun
-    for (std::size_t i = 0; i < live.size(); ++i) {
-        if (!brains[i]) continue;
+    auto arm_brain = [&](std::size_t i) {
+        if (!brains[i]) return;
         const auto& o = *live[i]->placement;
-        combat::Combatant& c = combat.unit(i);
+        combat::Combatant& c = combat.unit(live_ci[i]);
         ai::SelfInfo self;
         self.logic_id = o.identity, self.clan = o.ai_index, self.type = tma_types[o.identity];
         if (runtime)
@@ -530,7 +565,8 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         }
         fc.turret_error.assign(1, 0.f);
         brains[i]->set_perception(&perception, self);
-    }
+    };
+    for (std::size_t i = 0; i < live.size(); ++i) arm_brain(i);
 
     // In-mission text (notes/rsli-font.md §3): mission texts from TextRes, the HUD's own strings from
     // iron3d.dll's string table; both are drawn in the game's fonts by cp1251 byte.
@@ -771,8 +807,8 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     // (100a4840) tells the player: their capture → pager 5039 from the central computer and a voice by
     // the old owner (neutral clan or relation 1 → VOICE_NBUILD_CAPTURE, hostile → VOICE_EBUILD_CAPTURE,
     // else VOICE_BUILD_CAPTURE); their loss → VOICE_BUILD_CAPTURE.
-    auto on_building_entered = [&](std::size_t k, std::size_t i) {
-        const std::size_t ci = first_building + k;
+    auto on_building_entered = [&](std::size_t k, std::size_t i) { // i: the unit's combatant
+        const std::size_t ci = bld_ci[k];
         const std::uint32_t lid = placement_of(ci).identity, new_clan = clan_of(i), old_clan = clan_of(ci);
         if (new_clan == combat::kKilledClan) return;
         if (new_clan == old_clan) {
@@ -800,6 +836,161 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             play_voice("VOICE_BUILD_CAPTURE");
         }
     };
+
+    // Objects created while the mission runs (the economy's events; notes/base-building.md §2.2, §3.2). Each
+    // gets a TMA-like record (LiveUnit::placement), a body, a combatant, and for a robot a brain with its
+    // perception and fire control and a UnitAdapter in the world; the viewer's grow hook appends their
+    // meshes (and a building's walls) before they are drawn.
+    std::deque<mission::TmaObject> spawned_tma;
+    std::vector<std::size_t> pending_units, pending_buildings;
+    std::vector<bool> unit_drawn(live.size(), true), building_drawn(buildings.size(), true);
+    std::vector<Vec3> unit_start;
+    economy::Economy* eco = runtime ? runtime->economy() : nullptr;
+    // The economy's walking tasks move builders and transports of every clan through their brains.
+    std::map<std::uint32_t, std::unique_ptr<BrainMover>> movers;
+    auto give_mover = [&](std::size_t i) {
+        if (!eco || !brains[i]) return;
+        const std::uint32_t lid = live[i]->placement->identity;
+        const game::WorldObject* w = runtime->world().find(lid);
+        if (!w || (w->type != game::kTypeBuilder && w->type != game::kTypeTransport)) return;
+        auto& m = movers[lid];
+        m = std::make_unique<BrainMover>(*brains[i]);
+        eco->set_mover(lid, m.get());
+    };
+    // Bounding spheres for the placement test (economy radius_of): the bodies' spheres; a building type
+    // without a body yet (the ghost, a builder's site) from its level-0 design's model bounds.
+    std::map<std::uint32_t, float> type_radius;
+    if (eco) {
+        for (std::size_t i = 0; i < live.size(); ++i) give_mover(i);
+        eco->ground_height = [&ground](float x, float y) {
+            auto g = ground.probe({x, y, 2000.f}, 4000.f);
+            return g ? g->z : 0.f;
+        };
+        runtime->world().terrain_height = [&ground](float x, float y) -> std::optional<float> {
+            if (x < ground.bounds_min().x || y < ground.bounds_min().y || x > ground.bounds_max().x || y > ground.bounds_max().y) return std::nullopt;
+            auto g = ground.probe({x, y, 2000.f}, 4000.f);
+            return g ? std::optional<float>(g->z) : std::nullopt;
+        };
+        eco->radius_of = [&](const game::WorldObject& o) -> float {
+            if (auto it = unit_of.find(o.logic_id); o.logic_id != game::kNoObject && it != unit_of.end()) {
+                const combat::Combatant& c = combat.unit(it->second);
+                return c.building() ? c.unit->sphere_radius : c.radius();
+            }
+            auto [it, fresh] = type_radius.try_emplace(o.type, 0.f);
+            if (fresh && (o.type & game::kBuildingBit))
+                if (const std::string* path = eco->building_scheme(o.type, 0))
+                    if (const mission::Scheme* sc = eco->schemes().get(*path)) try {
+                            if (auto m = load_unit_model(lib, *sc)) {
+                                const Vec3 ext = m->mesh.bounds_max - m->mesh.bounds_min;
+                                it->second = 0.5f * std::sqrt(dot(ext, ext));
+                            }
+                        } catch (const std::exception&) {
+                        }
+            if (it->second <= 0) it->second = (o.type & game::kBuildingBit) ? 30.f : o.size_class >= 3 ? 8.f : 4.f; // economy's defaults
+            return it->second;
+        };
+    }
+    auto spawn_unit = [&](std::uint32_t lid, const std::string& scheme_path) {
+        const game::WorldObject* w = runtime->world().find(lid);
+        if (!w) return;
+        mission::TmaObject& o = spawned_tma.emplace_back();
+        o.kind = 1, o.resource = scheme_path, o.ai_index = w->clan, o.identity = lid;
+        o.position = {w->placed.x, w->placed.y, w->placed.z}, o.scale = {1, 1, 1};
+        std::unique_ptr<LiveUnit> u;
+        try {
+            u = LiveUnit::load(lib, o, ground, eco ? eco->schemes().get(scheme_path) : nullptr, float(sim_ms));
+        } catch (const std::exception& ex) {
+            SDL_Log("play: produced unit %08x %s: %s", lid, scheme_path.c_str(), ex.what());
+        }
+        if (!u) {
+            SDL_Log("play: produced unit %08x %s has no body (no motion graph)", lid, scheme_path.c_str());
+            return;
+        }
+        const std::size_t i = live.size();
+        live.push_back(std::move(u));
+        const std::size_t ci = combat.add_unit(*live[i], lid, w->clan, false);
+        live_ci.push_back(ci), ci_live.push_back(std::int32_t(i)), ci_bld.push_back(-1);
+        unit_of[lid] = ci, tma_clans[lid] = w->clan, tma_types[lid] = w->type;
+        perception.add_unit(lid, ci, w->clan, w->type);
+        brains.emplace_back(), weapon_guns.emplace_back();
+        make_brain(i);
+        arm_brain(i);
+        adapters.push_back(std::make_unique<UnitAdapter>(*live[i], brains[i].get()));
+        runtime->world().attach(lid, adapters.back().get()); // the runtime re-wraps it in the economy's control
+        give_mover(i);
+        unit_drawn.push_back(false), pending_units.push_back(i), unit_start.push_back(live[i]->position());
+        const Vec3 p = live[i]->position();
+        SDL_Log("play: %.1f s unit %08x (%s, clan %u) produced at (%.0f, %.0f, %.0f)", sim_ms / 1000, lid, scheme_path.c_str(), w->clan, p.x, p.y, p.z);
+    };
+    // A new building's body at its world object (BuildingPlaced; BuildingUpgraded replaces the old body).
+    auto spawn_building = [&](std::uint32_t lid) {
+        const game::WorldObject* w = runtime->world().find(lid);
+        if (!w) return;
+        mission::TmaObject& o = spawned_tma.emplace_back();
+        o.kind = 0, o.resource = w->resource, o.ai_index = w->clan, o.identity = lid, o.scale = {1, 1, 1};
+        Vec3 p = w->placed;
+        if (auto g = ground.probe({p.x, p.y, 2000.f}, 4000.f)) p.z = g->z;
+        o.position = {p.x, p.y, p.z}, o.orientation = {0, 0, eco ? eco->angle(lid) : 0.f};
+        std::unique_ptr<LiveUnit> body;
+        try {
+            body = LiveUnit::load_building(lib, o, eco ? eco->schemes().get(w->resource) : nullptr);
+        } catch (const std::exception& ex) {
+            SDL_Log("play: building %08x %s: %s", lid, w->resource.c_str(), ex.what());
+        }
+        if (!body) {
+            SDL_Log("play: building %08x %s has no body", lid, w->resource.c_str());
+            return;
+        }
+        if (auto it = unit_of.find(lid); it != unit_of.end()) // an upgrade: the old body goes silently
+            if (Building* old = building_of(it->second)) {
+                old->removed = true;
+                combat.unit(it->second).removed = true;
+                statics.remove(std::uint32_t(ci_bld[it->second] + 1));
+            }
+        const std::size_t k = buildings.size();
+        buildings.push_back(std::make_unique<Building>(std::move(body), w->type));
+        const std::size_t ci = combat.add_unit(buildings[k]->body(), lid, w->clan, false);
+        bld_ci.push_back(ci), ci_live.push_back(-1), ci_bld.push_back(std::int32_t(k));
+        unit_of[lid] = ci, tma_clans[lid] = w->clan, tma_types[lid] = w->type;
+        perception.add_unit(lid, ci, w->clan, w->type);
+        if (const auto spheres = buildings[k]->rest_capture_spheres(); !spheres.empty()) {
+            Vec3 c{};
+            for (const auto& sp : spheres) c = c + sp.centre * (1.f / float(spheres.size()));
+            if (auto g = ground.probe(c + Vec3{0, 0, 100}, 200.f)) c.z = g->z;
+            perception.set_entry(lid, c);
+        }
+        building_drawn.push_back(false), pending_buildings.push_back(k);
+        SDL_Log("play: %.1f s building %08x %s (clan %u) at (%.0f, %.0f), %.0f HP", sim_ms / 1000, lid, w->resource.c_str(), w->clan, p.x, p.y,
+                combat.unit(ci).damage.initial);
+    };
+
+    // The economy's events (MissionRuntime::set_economy_sink): bodies for the new objects, and the player's
+    // notices: VOICE_UNIT_READY for an own robot (OnWarbotBuiltVoiceCallback 10033650: own clan, not the
+    // autodemo), the research completion (ResearchUI_PollCompleted 10089e60: pager "%s (%s)" with 2010 and
+    // the item's name, VOICE_RSRCH_COMPLETE).
+    if (runtime)
+        runtime->set_economy_sink([&](const economy::EconomyEvent& e) {
+            using T = economy::EconomyEvent::Type;
+            SDL_Log("play: %.1f s economy: %s %08x (source %08x, clan %u, item %d, code %x) %s", sim_ms / 1000, economy::to_string(e.type),
+                    e.object, e.source, e.clan, e.item, e.code, e.scheme.c_str());
+            switch (e.type) {
+            case T::UnitProduced:
+                spawn_unit(e.object, e.scheme);
+                if (e.clan == hero_clan) play_voice("VOICE_UNIT_READY");
+                break;
+            case T::BuildingPlaced:
+            case T::BuildingUpgraded: spawn_building(e.object); break;
+            case T::ResearchDone:
+                if (e.clan == hero_clan && eco) {
+                    const economy::Research* r = eco->research(e.clan);
+                    const mission::ResearchItem* it = r ? r->item(e.item) : nullptr;
+                    pager = ui::PagerMessage{ui_text(1541), ui_text(2010) + " (" + (it ? it->name : std::string()) + ")", {}, sim_ms};
+                    play_voice("VOICE_RSRCH_COMPLETE");
+                }
+                break;
+            default: break;
+            }
+        });
 
     ViewerOptions vo;
     vo.title = "Parkan — " + opt.mission;
@@ -973,7 +1164,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         sim_ms = to_ms;
         briefing_tick();
         for (std::size_t i = 0; i < live.size(); ++i) {
-            const combat::Combatant& c = combat.unit(i);
+            const combat::Combatant& c = combat.unit(live_ci[i]);
             if (c.removed) continue;
             // SetAllUnitsAIFrozen(1) during the briefing: every unit but the hero (property 0x20a).
             if (brains[i] && c.alive() && !(briefing && i != hero_slot)) brains[i]->update(float(sim_ms)); // brain tick + motion update (pilot inside)
@@ -983,7 +1174,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         // aim (state 0x400 AI point; port: the target's root part), each requested weapon fires a shot
         // (state 0x200). The aim errors feed the next pass.
         for (std::size_t i = 0; i < live.size(); ++i) {
-            combat::Combatant& c = combat.unit(i);
+            combat::Combatant& c = combat.unit(live_ci[i]);
             if (!brains[i] || !c.alive() || c.removed) continue;
             const ai::FireRequest& fr = brains[i]->fire();
             const auto t = unit_of.find(fr.target);
@@ -995,7 +1186,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             float group_err = 3.1415927f;
             for (std::size_t k = 0; k < weapon_guns[i].size() && k < fc.weapons.size(); ++k) {
                 const std::size_t g = weapon_guns[i][k];
-                fc.weapons[k].aim_error = fc.weapons[k].group < 0 ? 0.f : combat.aim_error(i, g, aim);
+                fc.weapons[k].aim_error = fc.weapons[k].group < 0 ? 0.f : combat.aim_error(live_ci[i], g, aim);
                 if (fc.weapons[k].group >= 0) group_err = std::min(group_err, fc.weapons[k].aim_error);
                 if (fr.trigger & (1u << k)) c.set_gun_state(g, combat::kFireSingle);
             }
@@ -1003,7 +1194,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (fr.track && u.rig) {
                 Vec3 mount = u.position() + Vec3{0, 0, 2};
                 for (std::size_t g : weapon_guns[i])
-                    if (auto m = combat.muzzle(i, g)) {
+                    if (auto m = combat.muzzle(live_ci[i], g)) {
                         mount = *m;
                         break;
                     }
@@ -1013,34 +1204,40 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             }
         }
         live_ptrs.clear();
+        // Floors: object surfaces and building bodies (bridges), beside the landscape (LiveUnit::settle).
+        const LiveUnit::FloorProbe floor_probe = [&](Vec3 top, Vec3 bottom) -> std::optional<float> {
+            // Faces steeper than 80° are not ground (FindNearestFace10: n.z > 0.1736).
+            const auto h = combat.trace_floor(top, bottom);
+            return h && std::abs(h->normal.z) > 0.1736f ? std::optional<float>(h->point.z) : std::nullopt;
+        };
         for (std::size_t i = 0; i < live.size(); ++i) {
-            if (combat.unit(i).removed) continue;
-            const Vec3 push = live[i]->settle(float(sim_ms), ground, statics);
+            if (combat.unit(live_ci[i]).removed) continue;
+            const Vec3 push = live[i]->settle(float(sim_ms), ground, statics, floor_probe);
             if (i == hero_slot && dot(push, push) > 0) ++pushed_steps;
-            if (combat.unit(i).alive()) live_ptrs.push_back(live[i].get()); // the dead have left collision
+            if (combat.unit(live_ci[i]).alive()) live_ptrs.push_back(live[i].get()); // the dead have left collision
         }
         collide_units(live_ptrs, float(sim_ms));
         // Turrets: the hero's from HERO.TBL (turret channels), the others hold their aim_x/aim_y.
         hero.aim_x = commands.get(1, 1, input::kMcmdAngleX), hero.aim_y = commands.get(1, 1, input::kMcmdAngleY);
         for (std::size_t i = 0; i < live.size(); ++i)
-            if (!combat.unit(i).removed) live[i]->pose_parts();
+            if (!combat.unit(live_ci[i]).removed) live[i]->pose_parts();
         // Buildings (CBuilding::SendMsg message 1, 100335d0): doors and the capture door, then the pose.
         // Contacts: the live units whose sphere overlaps the building's (port reduction, building.hpp).
         for (std::size_t k = 0; k < buildings.size(); ++k) {
             Building& b = *buildings[k];
             if (b.removed) continue;
-            const std::size_t ci = first_building + k;
+            const std::size_t ci = bld_ci[k];
             if (combat.unit(ci).alive()) {
                 std::vector<Building::Contact> contacts;
                 const Vec3 bc = b.body().sphere_world();
                 for (std::size_t i = 0; i < live.size(); ++i) {
-                    if (combat.unit(i).removed) continue;
+                    if (combat.unit(live_ci[i]).removed) continue;
                     const Vec3 c = live[i]->sphere_world(), d = c - bc;
                     const float r = live[i]->sphere_radius, reach = r + b.body().sphere_radius;
-                    if (dot(d, d) <= reach * reach) contacts.push_back({std::int32_t(i), c, r, combat.unit(i).alive()});
+                    if (dot(d, d) <= reach * reach) contacts.push_back({std::int32_t(i), c, r, combat.unit(live_ci[i]).alive()});
                 }
                 const int before = b.capture_door() ? b.capture_door()->state : -1;
-                if (auto cap = b.update(float(sim_ms), contacts)) on_building_entered(k, std::size_t(*cap));
+                if (auto cap = b.update(float(sim_ms), contacts)) on_building_entered(k, live_ci[std::size_t(*cap)]);
                 if (b.capture_door() && b.capture_door()->state != before)
                     SDL_Log("play: %.2f s building %08x capture door state %d -> %d (capturer %d, %zu contacts)", sim_ms / 1000,
                             placement_of(ci).identity, before, b.capture_door()->state, b.capturer(), contacts.size());
@@ -1101,8 +1298,8 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 SDL_Log("play: %.2f s hit %zu %s by %d: -%.0f HP (%.0f / %.0f left)", sim_ms / 1000, std::size_t(e.unit), name(e.unit),
                         e.other, e.amount, v.damage.total, v.damage.initial);
                 // MBehaviour::OnDamageMsg skips buildings (not decoded further; no brain here).
-                if (std::size_t(e.unit) < brains.size() && brains[std::size_t(e.unit)] && e.other >= 0 && v.alive())
-                    brains[std::size_t(e.unit)]->on_damage(combat.unit(std::size_t(e.other)).logic_id);
+                if (const std::int32_t li = ci_live[std::size_t(e.unit)]; li >= 0 && brains[std::size_t(li)] && e.other >= 0 && v.alive())
+                    brains[std::size_t(li)]->on_damage(combat.unit(std::size_t(e.other)).logic_id);
                 break;
             }
             case T::Killed: {
@@ -1125,11 +1322,12 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                     c.forward = normalize(Vec3{hm.at(0, 1), hm.at(1, 1), -0.35f});
                     spectator = c;
                 }
-                if (std::size_t(e.unit) < live.size()) {
-                    live[std::size_t(e.unit)]->motion->pilot = nullptr;
-                    live[std::size_t(e.unit)]->motion->set_throttle({});
-                    live[std::size_t(e.unit)]->motion->set_angular_command({});
-                    if (runtime && std::size_t(e.unit) < adapters.size()) adapters[std::size_t(e.unit)]->stop();
+                if (const std::int32_t li = ci_live[std::size_t(e.unit)]; li >= 0) {
+                    LiveUnit& dead = *live[std::size_t(li)];
+                    dead.motion->pilot = nullptr;
+                    dead.motion->set_throttle({});
+                    dead.motion->set_angular_command({});
+                    if (runtime && std::size_t(li) < adapters.size()) adapters[std::size_t(li)]->stop();
                 }
                 break;
             }
@@ -1140,7 +1338,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 if (runtime) runtime->object_killed(combat.unit(std::size_t(e.unit)).logic_id);
                 if (Building* b = building_of(std::size_t(e.unit))) {
                     b->removed = true;
-                    statics.remove(std::uint32_t(std::size_t(e.unit) - first_building + 1)); // its walls go with it
+                    statics.remove(std::uint32_t(ci_bld[std::size_t(e.unit)] + 1)); // its walls go with it
                 }
                 break;
             default:
@@ -1172,12 +1370,14 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (sound && sound->music_finished()) sound->play_random_music(false);
         }
         for (std::size_t i = 0; i < live.size(); ++i) {
+            if (!unit_drawn[i]) continue; // created this frame: the grow hook appends it first
             // From its own TURRET camera the unit is not drawn (inferred from CCameraDevice::CreateCamera
             // handing the camera to IAniMesh slot 0x84). The camera reads the posed model, not these.
             // A removed unit is no longer drawn.
-            live[i]->pose(transforms, (i == hero_slot && camera_mode == 0) || combat.unit(i).removed);
+            live[i]->pose(transforms, (i == hero_slot && camera_mode == 0) || combat.unit(live_ci[i]).removed);
         }
-        for (auto& b : buildings) b->body().pose(transforms, b->removed); // doors; destroyed parts collapsed
+        for (std::size_t k = 0; k < buildings.size(); ++k) // doors; destroyed parts collapsed
+            if (building_drawn[k]) buildings[k]->body().pose(transforms, buildings[k]->removed);
         for (auto& pool : bullet_pools) {
             std::size_t k = 0;
             for (const auto& b : combat.bullets()) {
@@ -1189,6 +1389,25 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             for (; k < pool.firsts.size(); ++k)
                 for (std::size_t n = 0; n < pool.nodes.size(); ++n) transforms[pool.firsts[k] + n] = Mat4{};
         }
+    };
+    // The new objects' meshes join the scene; a new building's static parts become walls (tag = index + 1).
+    vo.grow = [&](RenderMesh& mesh) {
+        if (pending_units.empty() && pending_buildings.empty()) return false;
+        for (std::size_t i : pending_units) {
+            live[i]->first_transform = append_render_mesh(mesh, live[i]->model.mesh, Mat4::identity());
+            unit_drawn[i] = true;
+        }
+        for (std::size_t k : pending_buildings) {
+            LiveUnit& body = buildings[k]->body();
+            body.first_transform = append_render_mesh(mesh, body.model.mesh, Mat4::identity());
+            body.pose(mesh.transforms, false);
+            for (std::uint32_t t = 0; t < body.model.mesh.transforms.size(); ++t)
+                if (!buildings[k]->moving_transform(t)) statics.add(mesh, body.first_transform + t, body.first_transform + t + 1, std::uint32_t(k + 1));
+            building_drawn[k] = true;
+        }
+        if (!pending_buildings.empty()) statics.finish();
+        pending_units.clear(), pending_buildings.clear();
+        return true;
     };
     vo.effect_textures = &fx_ctx.materials.textures;
     vo.effects = [&](Vec3 eye, fx::FxFrame& f) {
@@ -1472,7 +1691,6 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     const Vec3 start_pos = hero.position();
     SDL_Log("play: hero %s at (%.0f, %.0f, %.0f), motion graph %s; %zu live units, %zu buildings", tma.objects[*hero_index].resource.c_str(),
             start_pos.x, start_pos.y, start_pos.z, hero.model.ctl_entry.c_str(), live.size(), buildings.size());
-    std::vector<Vec3> unit_start;
     for (auto& u : live) unit_start.push_back(u->position());
     int rc = run_scene_viewer(window, std::move(scene), vo);
     PlayOutcome outcome;
@@ -1489,12 +1707,13 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     for (std::size_t i = 0; i < live.size(); ++i) {
         const Vec3 a = unit_start[i], b = live[i]->position();
         const Vec3 h = b - hero.position();
-        SDL_Log("play: unit %zu %s moved %.1f m (order %u, state %u, moving %d, v=(%.2f %.2f %.2f), z %.1f); %.0f m from the hero, "
+        SDL_Log("play: unit %zu %s moved %.1f m (order %u, state %u, moving %d, v=(%.2f %.2f %.2f), at (%.1f, %.1f, %.1f), placed z %.1f); %.0f m from the hero, "
                 "%.0f / %.0f HP%s, target %d",
                 i, live[i]->placement->resource.c_str(), std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y)),
                 brains[i] ? brains[i]->current_order() : 0u, live[i]->motion->current_state(), brains[i] ? int(brains[i]->moving()) : -1,
-                live[i]->motion->velocity().x, live[i]->motion->velocity().y, live[i]->motion->velocity().z, b.z, std::sqrt(dot(h, h)),
-                combat.unit(i).damage.total, combat.unit(i).damage.initial, combat.unit(i).removed ? " (removed)" : "", combat.unit(i).target);
+                live[i]->motion->velocity().x, live[i]->motion->velocity().y, live[i]->motion->velocity().z, b.x, b.y, b.z, live[i]->placement->position[2], std::sqrt(dot(h, h)),
+                combat.unit(live_ci[i]).damage.total, combat.unit(live_ci[i]).damage.initial, combat.unit(live_ci[i]).removed ? " (removed)" : "",
+                combat.unit(live_ci[i]).target);
     }
     const Vec3 hero_pos = hero.position();
     SDL_Log("play: hero ended at (%.2f, %.2f, %.2f) after %.0f ms, state %u; %zu collision pushes; %zu wall triangles; "

@@ -113,6 +113,9 @@ public:
     void start(double now, std::optional<std::uint32_t> mode = std::nullopt);
     // StopEffect: let it reach its end, then restart in the template's mode (CFxInstance_Update).
     void stop(double now);
+    // True once a pending stop has reached its end (the restart in CFxInstance_Update). A bullet's
+    // effects are destroyed with the bullet object; the port drops them here.
+    bool stop_reached() const { return stop_reached_; }
     void set_enabled(bool on, double now); // EnableEffect / DisableEffect
     void set_param(float v) { param_ = v; } // SetEffectParam: t for mode 0, the owner quantity for 4..17
     void set_duration_factor(float f);      // SetEffectDuration
@@ -122,6 +125,7 @@ public:
     // Appends this frame's primitives. `lod` is CShade's distance class (0 near … 7 far; ≥ 8 skips).
     void render(FxFrame& out, Vec3 eye, unsigned lod = 0);
 
+    double end_time() const { return end_ms_ * 0.001; } // seconds, the game clock of start()
     float t() const { return t_; }           // effect time after the time mode, before jitter
     float age() const { return age_; }       // seconds since start
     const Mat4& world() const { return world_; }
@@ -139,7 +143,7 @@ private:
     std::vector<std::unique_ptr<Command>> cmds_;
     float start_ms_ = 0, end_ms_ = 0, param_ = 0, last_value_ = 0;
     std::uint32_t mode_ = 0;
-    bool enabled_ = true, stop_pending_ = false, attached_ = false, drawable_ = false;
+    bool enabled_ = true, stop_pending_ = false, stop_reached_ = false, attached_ = false, drawable_ = false;
     Mat4 frame_ = Mat4::identity(), placed_ = Mat4::identity();
     Mat4 base_ = Mat4::identity(), owner_ = Mat4::identity(), local_ = Mat4::identity(), world_ = Mat4::identity();
     Vec3 pos_{}, scale_{1, 1, 1};

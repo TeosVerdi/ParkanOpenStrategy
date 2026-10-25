@@ -174,17 +174,21 @@ void test_gun_device() {
     s.set_state(kFireSingle);
     for (h2.now = 0; h2.now < 1500;) s.update(h2.now += 10, h2);
     CHECK(h2.spawns.size() == 1 && s.command() == kCeaseFire);
-    // A guided bullet (seeker) waits for a target and locks for param9 seconds.
+    // A guided bullet (seeker) without a target fires unguided (state 2 falls through to the fire
+    // command); with a target it first locks for param9 seconds.
     BulletProto guided = b;
     guided.seeker = std::array<float, 3>{0.25f, 500, 250};
+    GunDevice free_fire(spec, {j}, &guided);
+    TestHost h4;
+    free_fire.set_state(kFireContinuous);
+    for (h4.now = 0; h4.now < 500;) free_fire.update(h4.now += 10, h4);
+    CHECK(!h4.spawns.empty() && h4.spawns[0] < 250 && near(free_fire.param(9), 0.25f) && near(free_fire.param(10), std::cos(0.25f)));
     GunDevice gg(spec, {j}, &guided);
     TestHost h3;
-    gg.set_state(kFireContinuous);
-    for (h3.now = 0; h3.now < 500;) gg.update(h3.now += 10, h3);
-    CHECK(h3.spawns.empty() && gg.state() == kGunReady && near(gg.param(9), 0.25f) && near(gg.param(10), std::cos(0.25f)));
     h3.target = Vec3{0, 100, 0};
-    for (; h3.now < 1200;) gg.update(h3.now += 10, h3);
-    CHECK(!h3.spawns.empty() && h3.spawns[0] > 750 && h3.spawns[0] < 900); // 250 ms lock + 125 ms recoil
+    gg.set_state(kFireContinuous);
+    for (h3.now = 0; h3.now < 700;) gg.update(h3.now += 10, h3);
+    CHECK(!h3.spawns.empty() && h3.spawns[0] > h4.spawns[0] + 200 && h3.spawns[0] < h4.spawns[0] + 300); // + the 250 ms lock
     h3.target = Vec3{0, 600, 0}; // beyond param8 = min(500, seeker 500)
     const std::size_t before = h3.spawns.size();
     for (; h3.now < 3000;) gg.update(h3.now += 10, h3);

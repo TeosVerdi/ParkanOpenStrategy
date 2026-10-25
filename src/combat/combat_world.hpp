@@ -8,7 +8,7 @@
 //   scene's triangles (TraceMesh) and the posed triangles of every live unit and building (the face hit names the
 //   object and mesh part, as Terrain's TraceRay does); units that are dead have left collision;
 // - seekers (device 0x11) are not flown: guided bullets fly straight. The gun's lock-on gate
-//   (param 9/10) is kept, so guided guns need a target (set_target);
+//   (param 9/10) is kept: with a target (set_target) guided guns lock first, without one they fire unguided;
 // - rockets with their own throttle (bullet property 0x20) start at the gun's speed like the rest;
 // - shields (types 9/0x15) are absent; armour (type 0x1b) is the last one in the unit's scheme
 //   (CreateDevice overwrites ctl+0x5b4; inferred);
@@ -122,6 +122,7 @@ struct CombatEvent {
     Vec3 axis{0, 1, 0};       // Effect: the frame's forward axis (bullet direction)
     float scale = 1;          // Effect: SetEffectScale (part explosions: the part's radius; inferred)
     Mat4 frame = Mat4::identity(); // Effect: local spawn frame (fx::contact_frame of the event's CTPT points)
+    std::int32_t end_mode = -1; // Effect on a bullet: when it is gone, −1 stop, else restart in this time mode
 };
 
 // A segment hit in the world.
@@ -158,6 +159,9 @@ public:
 
     // The nearest hit along a → b against the landscape, statics and live units except `skip`.
     std::optional<WorldHit> trace(Vec3 a, Vec3 b, std::int32_t skip) const;
+    // The first static or building surface along a → b (no landscape, no mobile units): the floors
+    // units stand on (LiveUnit::FloorProbe).
+    std::optional<WorldHit> trace_floor(Vec3 a, Vec3 b) const;
 
     // The angle (rad) between gun `g`'s current barrel and the line from its muzzle to `aim`; π when the
     // muzzle is unknown. The AI's weapon / turret aim error (device slot 0x28) stand-in.
@@ -184,6 +188,8 @@ private:
 
     AssetLibrary& lib_;
     const TerrainGround& ground_;
+    // everything = false: statics and buildings only.
+    std::optional<WorldHit> trace(Vec3 a, Vec3 b, std::int32_t skip, bool everything) const;
     const TraceMesh* statics_;
     std::vector<std::unique_ptr<Combatant>> units_;
     std::vector<Bullet> bullets_;

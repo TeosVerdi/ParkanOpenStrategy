@@ -256,6 +256,8 @@ public:
     // 1 normal, 2 during the show, 0 hidden) for the renderer.
     std::int32_t show_animation(std::uint32_t lid) const;
     int footprint(std::uint32_t lid) const;
+    // The rotation about z the object was created with (M_Task_Build's placement matrix; 0 for units).
+    float angle(std::uint32_t lid) const;
 
     struct Task;     // economy.cpp
     struct Worker;   // per object: params, task queue, timers

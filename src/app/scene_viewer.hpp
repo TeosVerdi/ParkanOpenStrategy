@@ -31,6 +31,10 @@ struct ViewerOptions {
     // Optional: called every frame with the elapsed seconds to update the mesh transforms (animation).
     // Space pauses it.
     std::function<void(double seconds, std::vector<Mat4>& transforms)> animate;
+    // Optional: called after `animate`; may append draws, transforms and textures to the mesh (objects
+    // created while running: produced robots, new buildings). Returns true when it did: the geometry is
+    // uploaded again, the new textures are added and `animate` runs once more to pose the new parts.
+    std::function<bool(RenderMesh& mesh)> grow;
     double start_time = 0; // animation clock at the first frame (and for --shot)
     // Optional: '[' and ']' call this with -1/+1 (e.g. to switch motion states); returns the title suffix.
     std::function<std::string(int step)> cycle;

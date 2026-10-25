@@ -112,6 +112,16 @@ BulletProto load_bullet(AssetLibrary& lib, std::string_view name) {
                     sp.pos[k] = points[i].pos, sp.vec[k] = points[i].vec;
                 }
                 b.spawn_points.push_back(sp);
+                std::uint32_t handle = 0;
+                std::memcpy(&handle, e.raw.data() + 0x1c, 4);
+                std::int32_t mode = -1;
+                if (const auto* hit = list(2))
+                    for (const auto& h : *hit) {
+                        std::uint32_t a = 0, m = 0;
+                        std::memcpy(&a, h.raw.data() + 0x10, 4), std::memcpy(&m, h.raw.data() + 0x14, 4);
+                        if (h.type == 0xa && a == handle) mode = std::int32_t(m);
+                    }
+                b.hit_restart_mode.push_back(mode);
             }
     if (const auto* l = list(4))
         for (const auto& e : *l)

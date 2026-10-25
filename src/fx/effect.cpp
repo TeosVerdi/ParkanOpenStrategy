@@ -845,6 +845,7 @@ bool EffectInstance::update(double now_s, std::vector<FxSoundEvent>* sounds) {
         end_ms_ = 1000.f * h.duration + now;
         mode_ = h.time_mode;
         stop_pending_ = false;
+        stop_reached_ = true;
     }
     drawable_ = true; // detail category enabled (all are at the default level)
     const float clean = v == -1.f ? v : clamp01(v);

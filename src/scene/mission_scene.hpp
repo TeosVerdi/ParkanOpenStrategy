@@ -4,6 +4,7 @@
 // scheme: the base prototype plus its turrets and weapons on their mount nodes).
 #pragma once
 
+#include "mission/scheme.hpp"
 #include "mission/tma.hpp"
 #include "scene/render_mesh.hpp"
 
@@ -38,8 +39,13 @@ struct UnitModel {
     std::vector<UnitPart> parts;
     RenderMesh mesh;                      // every part; transforms[part base + node]
     std::string ctl_archive, ctl_entry;   // the chassis prototype's motion graph (pair 4), if any
+    // The chassis prototype's Behavior sheet (BTLU +0x140 library / +0x160 entry, e.g. behpsp.res chas_fly.var):
+    // its BehChassis (CanFly, WalkChassis) drives the brain's walker.
+    std::string chassis_sheet;
 };
 std::optional<UnitModel> load_unit_model(AssetLibrary& lib, std::string_view scheme_path);
+// The same for a design held in memory (a produced robot's bld_unit_<LogicID>.dat, a new building).
+std::optional<UnitModel> load_unit_model(AssetLibrary& lib, const mission::Scheme& scheme);
 
 // Poses the chassis at the two animation times (cross-faded by `blend`; root translation removed),
 // re-attaches the components (each posed by its node_frames) and writes world · node matrices to

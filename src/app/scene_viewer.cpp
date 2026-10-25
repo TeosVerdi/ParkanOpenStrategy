@@ -189,6 +189,23 @@ void upload_mesh(Gpu& g, const RenderMesh& m) {
     for (const auto& t : m.textures) g.textures.push_back(make_texture(g.device, t.width, t.height, t.rgba.data()));
 }
 
+// After the mesh grew: new vertex/index buffers, the textures added since the last upload.
+void reupload_mesh(Gpu& g, const RenderMesh& m) {
+    if (g.vbuf) SDL_ReleaseGPUBuffer(g.device, g.vbuf);
+    if (g.ibuf) SDL_ReleaseGPUBuffer(g.device, g.ibuf);
+    const Uint32 vsize = Uint32(m.vertices.size() * sizeof(RenderVertex));
+    const Uint32 isize = Uint32(m.indices.size() * 4);
+    SDL_GPUBufferCreateInfo vb{SDL_GPU_BUFFERUSAGE_VERTEX, vsize, 0};
+    SDL_GPUBufferCreateInfo ib{SDL_GPU_BUFFERUSAGE_INDEX, isize, 0};
+    g.vbuf = SDL_CreateGPUBuffer(g.device, &vb);
+    g.ibuf = SDL_CreateGPUBuffer(g.device, &ib);
+    if (!g.vbuf || !g.ibuf) fail("SDL_CreateGPUBuffer");
+    upload(g.device, m.vertices.data(), vsize, g.vbuf, nullptr);
+    upload(g.device, m.indices.data(), isize, g.ibuf, nullptr);
+    for (std::size_t i = g.textures.size(); i < m.textures.size(); ++i)
+        g.textures.push_back(make_texture(g.device, m.textures[i].width, m.textures[i].height, m.textures[i].rgba.data()));
+}
+
 void release_mesh(Gpu& g) {
     if (g.vbuf) SDL_ReleaseGPUBuffer(g.device, g.vbuf);
     if (g.ibuf) SDL_ReleaseGPUBuffer(g.device, g.ibuf);
@@ -316,6 +333,10 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
     double anim_time = opt.start_time;
     Uint64 last_tick = SDL_GetTicksNS();
     if (opt.animate) opt.animate(anim_time, mesh.transforms);
+    if (opt.grow && opt.grow(mesh)) {
+        reupload_mesh(g, mesh);
+        if (opt.animate) opt.animate(anim_time, mesh.transforms);
+    }
     if (opt.follow) opt.follow(centre);
 
     auto ensure_depth = [&](Uint32 w, Uint32 h) {
@@ -603,6 +624,10 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
         if (!paused) anim_time += double(now - last_tick) * 1e-9;
         last_tick = now;
         if (opt.animate) opt.animate(anim_time, mesh.transforms);
+        if (opt.grow && opt.grow(mesh)) {
+            reupload_mesh(g, mesh);
+            if (opt.animate) opt.animate(anim_time, mesh.transforms);
+        }
         if (opt.follow) opt.follow(centre);
         SDL_GPUCommandBuffer* cb = SDL_AcquireGPUCommandBuffer(g.device);
         SDL_GPUTexture* swap = nullptr;

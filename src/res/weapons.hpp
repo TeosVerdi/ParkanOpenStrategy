@@ -75,6 +75,10 @@ struct BulletProto {
         std::array<Vec3, 3> pos{}, vec{};
     };
     std::vector<SpawnPoints> spawn_points;
+    // Per spawn effect, what the hit list (situation 2) does to it: −1 stop (event 0x13 on its handle, or
+    // nothing), else restart in that time mode (event 0xa StartEffect(handle, mode); the laser's beam
+    // fades in mode 1). The handle is the type-4 event's +0x1c.
+    std::vector<std::int32_t> hit_restart_mode;
     std::optional<Expl> range_expl;
     ResName range_expl_name;
     std::optional<std::array<float, 3>> seeker; // device 0x11 params: cone half-angle (rad), range (m), lock (ms)

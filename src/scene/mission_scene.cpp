@@ -126,7 +126,10 @@ std::optional<RenderMesh> load_scheme_render_mesh(AssetLibrary& lib, std::string
 std::optional<UnitModel> load_unit_model(AssetLibrary& lib, std::string_view rel) {
     auto path = resolve_path(lib.game_dir(), rel);
     if (!path) return std::nullopt;
-    const mission::Scheme scheme = mission::decode_scheme(read_file(*path));
+    return load_unit_model(lib, mission::decode_scheme(read_file(*path)));
+}
+
+std::optional<UnitModel> load_unit_model(AssetLibrary& lib, const mission::Scheme& scheme) {
     UnitModel u;
     std::map<std::string, std::int32_t> tex_ids;
     // Depth-first like add_component; parts are posed in this order, so parents come first.
@@ -148,6 +151,7 @@ std::optional<UnitModel> load_unit_model(AssetLibrary& lib, std::string_view rel
         if (parent >= 0) attach_pose(part.model, u.parts[std::size_t(parent)].model.node_world[std::size_t(node.mount)]);
         else if (const NResEntry* e = lib.find("objects.rlb", node.entry); e && e->data.size() >= 0x140) {
             u.ctl_archive = field(e->data, 0x100), u.ctl_entry = field(e->data, 0x120);
+            if (e->data.size() >= 0x180) u.chassis_sheet = field(e->data, 0x160);
         }
         part.transform_base = std::uint32_t(u.mesh.transforms.size());
         append(u.mesh, to_render_mesh(part.model), Mat4::identity(), tex_ids);

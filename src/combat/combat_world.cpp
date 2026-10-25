@@ -413,19 +413,24 @@ void CombatWorld::spawn(std::size_t u, std::size_t g, Vec3 pos, Vec3 dir) {
     for (std::size_t i = 0; i < p->spawn_effects.size(); ++i) {
         const auto& sp = p->spawn_points[i];
         events_.push_back({CombatEvent::Type::Effect, std::int32_t(u), -1, 0, pos, p->spawn_effects[i], b.id, b.dir, 1,
-                           fx::contact_frame(sp.pos, sp.vec)});
+                           fx::contact_frame(sp.pos, sp.vec), p->hit_restart_mode[i]});
     }
 }
 
-std::optional<WorldHit> CombatWorld::trace(Vec3 a, Vec3 b, std::int32_t skip) const {
+std::optional<WorldHit> CombatWorld::trace_floor(Vec3 a, Vec3 b) const { return trace(a, b, -1, false); }
+
+std::optional<WorldHit> CombatWorld::trace(Vec3 a, Vec3 b, std::int32_t skip) const { return trace(a, b, skip, true); }
+
+std::optional<WorldHit> CombatWorld::trace(Vec3 a, Vec3 b, std::int32_t skip, bool everything) const {
     std::optional<WorldHit> best;
-    if (auto h = ground_.trace(a, b)) best = WorldHit{WorldHit::Kind::Terrain, h->t, h->point, h->normal};
+    if (everything)
+        if (auto h = ground_.trace(a, b)) best = WorldHit{WorldHit::Kind::Terrain, h->t, h->point, h->normal};
     if (statics_)
         if (auto h = statics_->trace(a, b); h && (!best || h->t < best->t))
             best = WorldHit{WorldHit::Kind::Static, h->t, h->point, h->normal};
     for (std::size_t i = 0; i < units_.size(); ++i) {
         const Combatant& c = *units_[i];
-        if (std::int32_t(i) == skip || c.removed || !c.alive() || c.unit->posed.empty()) continue;
+        if (std::int32_t(i) == skip || c.removed || !c.alive() || c.unit->posed.empty() || (!everything && !c.building())) continue;
         if (!segment_hits_sphere(a, b, c.centre(), c.bound_radius_)) continue;
         const RenderMesh& mesh = c.unit->model.mesh;
         if (c.building()) c.draw_cache_.resize(mesh.draws.size());

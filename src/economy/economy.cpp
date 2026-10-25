@@ -1202,6 +1202,11 @@ int Economy::footprint(std::uint32_t lid) const {
     return w ? w->footprint : 1;
 }
 
+float Economy::angle(std::uint32_t lid) const {
+    const Worker* w = find_worker(lid);
+    return w ? w->angle : 0.f;
+}
+
 bool Economy::showing(std::uint32_t lid) const { return current_order(lid) == kOrderShowUpgrade; }
 
 void Economy::set_mover(std::uint32_t lid, Mover* m) { worker(lid).mover = m; }

@@ -22,16 +22,20 @@ std::string record_field(std::span<const std::uint8_t> rec, std::size_t off) {
 
 } // namespace
 
-std::unique_ptr<LiveUnit> LiveUnit::load_building(AssetLibrary& lib, const mission::TmaObject& o) {
-    auto path = resolve_path(lib.game_dir(), o.resource);
-    if (!path) return nullptr;
-    const mission::Scheme scheme = mission::decode_scheme(read_file(*path));
+std::unique_ptr<LiveUnit> LiveUnit::load_building(AssetLibrary& lib, const mission::TmaObject& o, const mission::Scheme* given) {
+    std::optional<mission::Scheme> read;
+    if (!given) {
+        auto path = resolve_path(lib.game_dir(), o.resource);
+        if (!path) return nullptr;
+        read = mission::decode_scheme(read_file(*path));
+    }
+    const mission::Scheme& scheme = given ? *given : *read;
     // FORT (128 bytes): {objects.rlb, agent}, {lib, .bas} (CBuilding ctor reads +0x00/+0x20 and +0x40/+0x60).
     const NResEntry* fort = lib.find("objects.rlb", scheme.root.entry);
     if (!fort || fort->type != fourcc("FORT")) return nullptr;
     const NResEntry* agent = lib.find("objects.rlb", record_field(fort->data, 0x20));
     if (!agent || agent->data.size() < 0x140) return nullptr;
-    auto model = load_unit_model(lib, o.resource);
+    auto model = load_unit_model(lib, scheme);
     if (!model || model->parts.empty()) return nullptr;
     // The agent's pairs: 0 mesh, 1 WEAR, 2 CTPT, 3 NDPR, 4 CTLD (load_unit_model reads them only from
     // records of 0x140 bytes, so the FORT root has none).
@@ -56,8 +60,9 @@ std::unique_ptr<LiveUnit> LiveUnit::load_building(AssetLibrary& lib, const missi
     return u;
 }
 
-std::unique_ptr<LiveUnit> LiveUnit::load(AssetLibrary& lib, const mission::TmaObject& o, const TerrainGround& ground) {
-    auto model = load_unit_model(lib, o.resource);
+std::unique_ptr<LiveUnit> LiveUnit::load(AssetLibrary& lib, const mission::TmaObject& o, const TerrainGround& ground,
+                                         const mission::Scheme* scheme, float start_ms) {
+    auto model = scheme ? load_unit_model(lib, *scheme) : load_unit_model(lib, o.resource);
     if (!model) return nullptr;
     const NResEntry* ce = lib.find(model->ctl_archive, model->ctl_entry);
     if (!ce) return nullptr;
@@ -98,14 +103,45 @@ std::unique_ptr<LiveUnit> LiveUnit::load(AssetLibrary& lib, const mission::TmaOb
                 u->gun_joints.push_back({i, std::move(joints)});
         }
 
-    Mat4 spawn = tma_placement(o);
-    if (auto g = ground.probe(translation(spawn) + Vec3{0, 0, 50}, 100.f)) spawn.at(2, 3) = g->z;
-    u->motion->start(0, spawn);
-    u->frame = u->motion->interpolate(0);
+    u->motion->start(start_ms, tma_placement(o));
+    u->drop_to_ground(start_ms, ground);
+    u->frame = u->motion->interpolate(start_ms);
     return u;
 }
 
-Vec3 LiveUnit::settle(float now_ms, const TerrainGround& ground, const StaticColliders& statics) {
+void LiveUnit::drop_to_ground(float now_ms, const TerrainGround& ground) {
+    // CControlBase::DropToGround (10018800): the contact points of the current state (state 0 at load)
+    // are probed and the body shifts by the mean height difference (flags 0x30 / 0xc0 tilt and upright
+    // are not ported). Without contact points the body origin goes onto the ground. Landscape only here.
+    MotionFrame f = motion->interpolate(now_ms);
+    ModelAsset& chassis = model.parts.front().model;
+    pose_model_blend(chassis, f.frame_a, f.frame_b, f.weight_b);
+    float sum = 0;
+    int n = 0;
+    for (const auto& c : motion->contacts()) {
+        const auto pi = c.point;
+        if (pi >= points.size() || points[pi].part >= chassis.node_world.size()) continue;
+        const Vec3 foot = (f.matrix * chassis.node_world[points[pi].part]).transform_point(points[pi].pos);
+        if (auto g = ground.probe(foot + Vec3{0, 0, 50}, 100.f)) sum += g->z - foot.z, ++n;
+    }
+    if (n == 0) {
+        const Vec3 p = translation(f.matrix);
+        if (auto g = ground.probe(p + Vec3{0, 0, 50}, 100.f)) sum = g->z - p.z, n = 1;
+    }
+    if (n) motion->apply_offset({0, 0, sum / float(n)});
+}
+
+Vec3 LiveUnit::settle(float now_ms, const TerrainGround& ground, const StaticColliders& statics, const FloorProbe& floor) {
+    // The landscape or an object face under p, whichever is higher; either may rise at most the step
+    // limit (7.5 m) above p (FollowGround's FindNearestFace10 acceptance).
+    constexpr float kFloorStep = 7.5f;
+    auto support = [&](Vec3 p) -> std::optional<float> {
+        std::optional<float> z;
+        if (auto g = ground.probe(p)) z = g->z;
+        if (floor)
+            if (auto f = floor(p + Vec3{0, 0, kFloorStep}, p - Vec3{0, 0, 1000.f}); f && (!z || *f > *z)) z = f;
+        return z;
+    };
     // FollowGround, reduced: the feet (the CTPT contact points of the motion graph) are probed and the
     // body is moved so the lowest support stands on the ground (dz = max(ground − foot)).
     MotionFrame f = motion->interpolate(now_ms);
@@ -117,15 +153,15 @@ Vec3 LiveUnit::settle(float now_ms, const TerrainGround& ground, const StaticCol
         const auto pi = motion->contacts()[c].point;
         if (pi >= points.size() || points[pi].part >= chassis.node_world.size()) continue;
         const Vec3 foot = (f.matrix * chassis.node_world[points[pi].part]).transform_point(points[pi].pos);
-        if (auto g = ground.probe(foot)) {
-            dz = std::max(dz, g->z - foot.z);
-            clearance.push_back({c, foot.z - g->z});
+        if (auto g = support(foot)) {
+            dz = std::max(dz, *g - foot.z);
+            clearance.push_back({c, foot.z - *g});
         }
     }
     if (dz == -FLT_MAX) {
         const Vec3 p = translation(f.matrix);
-        auto g = ground.probe(p);
-        dz = g ? g->z - p.z : 0.f;
+        auto g = support(p);
+        dz = g ? *g - p.z : 0.f;
     }
     if (!(motion->live().flags & 4)) {
         // Flyers (state flag 4 clear): FollowGround only keeps a minimum clearance above the ground
@@ -133,6 +169,8 @@ Vec3 LiveUnit::settle(float now_ms, const TerrainGround& ground, const StaticCol
         const Vec3 p = translation(f.matrix);
         auto g = ground.probe(p + Vec3{0, 0, 1000}, 2000.f);
         dz = g ? std::max(0.f, g->z + 1.f - p.z) : 0.f;
+        if (floor)
+            if (auto fz = floor(p + Vec3{0, 0, kFloorStep}, p - Vec3{0, 0, 1000.f})) dz = std::max(dz, *fz + 1.f - p.z);
         clearance.clear();
     }
     motion->apply_offset({0, 0, dz});

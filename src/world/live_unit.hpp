@@ -10,6 +10,7 @@
 #include "world/collision.hpp"
 #include "world/ground.hpp"
 
+#include <functional>
 #include <memory>
 
 namespace parkan {
@@ -17,13 +18,17 @@ namespace parkan {
 class LiveUnit {
 public:
     // A unit design placed by the TMA. nullptr when its chassis has no motion graph (it cannot move).
-    static std::unique_ptr<LiveUnit> load(AssetLibrary& lib, const mission::TmaObject& o, const TerrainGround& ground);
+    // `scheme` (optional) is the design itself when it is not a game file (a design from the HQ
+    // constructor); `start_ms` the motion clock's start (a unit created while the mission runs).
+    static std::unique_ptr<LiveUnit> load(AssetLibrary& lib, const mission::TmaObject& o, const TerrainGround& ground,
+                                          const mission::Scheme* scheme = nullptr, float start_ms = 0);
     // A building (data.tma kind 0: a UNITS\BUILDS scheme whose root is an objects.rlb FORT record): the
     // body of Terrain's CBuilding (ctor 100324d0). The FORT names the agent prototype (a BTLU record,
     // AniMesh LoadAgent) whose CTLD / CTPT / NDPR are the building's (notes/buildings.md §1). It has no
     // motion (`motion` is null) and stands at its TMA placement; doors move through `device_frames`.
     // nullptr when the scheme or its prototypes cannot be read.
-    static std::unique_ptr<LiveUnit> load_building(AssetLibrary& lib, const mission::TmaObject& o);
+    static std::unique_ptr<LiveUnit> load_building(AssetLibrary& lib, const mission::TmaObject& o,
+                                                   const mission::Scheme* scheme = nullptr);
 
     const mission::TmaObject* placement = nullptr;
     UnitModel model;
@@ -57,9 +62,14 @@ public:
     // lib/entry). nullopt when the lists do not say. The surface choice itself is not decoded.
     std::optional<std::pair<std::string, std::string>> touchdown_effect(std::int32_t event_list) const;
 
+    // Floors above the landscape (object floors, bridges, building roofs): the highest surface on the
+    // segment top → bottom, if any. The original's FollowGround probes the whole world (IWorld faces).
+    // DropToGround at load: the current state's contact points onto the landscape (mean height).
+    void drop_to_ground(float now_ms, const TerrainGround& ground);
+    using FloorProbe = std::function<std::optional<float>(Vec3 top, Vec3 bottom)>;
     // After motion->update(now): ground following from the feet, then out of static walls and
     // inside the landscape box. Returns the collision push applied.
-    Vec3 settle(float now_ms, const TerrainGround& ground, const StaticColliders& statics);
+    Vec3 settle(float now_ms, const TerrainGround& ground, const StaticColliders& statics, const FloorProbe& floor = {});
     // Collision sphere centre in the world (after settle).
     Vec3 sphere_world() const { return frame.matrix.transform_point(sphere_centre); }
     Vec3 position() const { return frame.matrix.transform_point({}); }
