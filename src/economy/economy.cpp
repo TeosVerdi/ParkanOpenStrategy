@@ -939,7 +939,7 @@ void Economy::init_object(WorldObject& o) {
         }
     }
     if (const mission::Scheme* s = o.resource.ends_with(".dat") || o.resource.ends_with(".DAT") ? schemes_.get(o.resource) : nullptr) {
-        w.size_class = o.building() ? building_size_class(*s) : robot_size(*s);
+        w.size_class = o.building() ? building_size_class(*s) : game::unit_size_class(s->root.entry);
         if (lookup_) w.st.battery_cap = battery_capacity(*s, lookup_);
         if (o.building() && lib_ && !w.bound) {
             w.own = {};
@@ -1138,7 +1138,7 @@ std::uint32_t Economy::create_object(std::string_view scheme_path, Vec3 pos, flo
         o.logic_id = lid;
         o.clan = clan;
         o.type = type;
-        o.size_class = building ? 0 : robot_size(*s);
+        o.size_class = building ? 0 : game::unit_size_class(s->root.entry);
         o.resource = std::string(scheme_path);
         o.placed = pos;
         o.armour = kPlaceholderArmour;

@@ -2,7 +2,9 @@
 //   parkan-dump <game dir> nodes <archive> <mesh>         MSH node table (index, parent, flags, name, static pose)
 //   parkan-dump <game dir> anim <archive> <mesh> <node>   per-frame key index, key time and position of one node
 //   parkan-dump <game dir> tma <mission dir>               placed objects of a mission's data.tma
+//   parkan-dump <game dir> scheme <unit .dat>              a unit scheme's flags and part tree
 #include "core/paths.hpp"
+#include "mission/scheme.hpp"
 #include "mission/tma.hpp"
 #include "res/library.hpp"
 #include "res/mesh.hpp"
@@ -72,6 +74,19 @@ int main(int argc, char** argv) {
                             o.ai_index, o.identity, o.position[0], o.position[1], o.position[2], o.resource.c_str(),
                             o.instance_name.c_str());
             }
+            return 0;
+        }
+        if (what == "scheme" && argc == 4) {
+            auto path = parkan::resolve_path(argv[1], argv[3]);
+            if (!path) throw std::runtime_error("no such file");
+            const auto s = parkan::mission::decode_scheme(parkan::read_file(*path));
+            std::printf("flags=%08x\n", s.flags);
+            auto print = [](auto& self, const parkan::mission::SchemeNode& n, int depth) -> void {
+                std::printf("%*s%s %s mount=%d category=%u %s\n", depth * 2, "", n.lib.c_str(), n.entry.c_str(), n.mount,
+                            n.category, n.name.c_str());
+                for (const auto& c : n.children) self(self, c, depth + 1);
+            };
+            print(print, s.root, 0);
             return 0;
         }
         std::fprintf(stderr, "unknown command\n");

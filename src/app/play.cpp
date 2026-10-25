@@ -1375,9 +1375,13 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 return;
             }
             if (ev.key.scancode == SDL_SCANCODE_ESCAPE && hq) hq->escape();
-            // ENTER_STATE (OnUICommandDown 10072120; not in view mode 4 [the briefing]): the hero on foot boards
-            // his target — a unit (type ⊆ 0x103e000) of his clan, alive, within 20 m (2-D) → Push(1, 0, target).
-            // [inferred] target+0x30 == 4 is read as "alive"; the capture of a relation-3 clan's unit is not ported.
+            // ENTER_STATE (OnUICommandDown 10072120; not in view mode 4 [the briefing]): the hero on foot and his
+            // target, a unit (type ⊆ 0x103e000) within 20 m (2-D). It can be boarded when its size class
+            // (unit+0x30, property 0x201) is 4 and it is not dead (Unit_IsDead 10077180: clan 0xfffe or
+            // property 0x52 ≤ 0). A neutral clan's unit (clan record +0xc, the data.tma mode, 3) is taken over
+            // first (Tut_1's "Capture the neutral warbots"); if it cannot be boarded the acknowledgement voice
+            // plays (PickAckVoiceByUnitKind, QueueUnitVoice without a unit) and that is all. Then a unit of the
+            // hero's clan is boarded: Push(1, 0, target).
             const auto enter_key = input::ui_key("CMD_ENTER_STATE", opt.layout);
             // The wingman menu (hud-leftovers.md §2.3, §7.3): JAMES_WINGMAN_MENU (0x2e4, `~`) in the cockpit views of a
             // player-controlled unit (not a manned turret, objectives closed): CWingmanMenu_OnCommand 1006dfd0 (Shift →
@@ -1409,12 +1413,28 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 hq->push_state(ui::kStateHqUnit, cc->logic_id);
             else if (hq && enter_key && input::scan_from_hid(int(ev.key.scancode)) == enter_key->key && !briefing && !spectator &&
                 hq->state() == ui::kStateHero && hud_target >= 0) {
-                const combat::Combatant& t = combat.unit(std::size_t(hud_target));
-                const std::uint32_t type = tma_types[placement_of(std::size_t(hud_target)).identity];
+                const std::size_t ti = std::size_t(hud_target);
+                combat::Combatant& t = combat.unit(ti);
+                const std::uint32_t type = tma_types[placement_of(ti).identity];
                 const Vec3 d = t.unit->position() - hero.position();
-                if (type != 0 && (type & 0x103e000u) == type && !t.removed && t.alive() && d.x * d.x + d.y * d.y < 20.f * 20.f &&
-                    clan_of(std::size_t(hud_target)) == hero_clan && ci_live[std::size_t(hud_target)] >= 0)
-                    hq->push_state(ui::kStatePilot, t.logic_id);
+                if (type != 0 && (type & 0x103e000u) == type && !t.removed && ci_live[ti] >= 0 && d.x * d.x + d.y * d.y < 20.f * 20.f) {
+                    const game::WorldObject* w = runtime ? runtime->world().find(t.logic_id) : nullptr;
+                    const std::uint32_t clan = clan_of(ti);
+                    const bool ok = w && w->size_class == 4 && t.alive() && clan != combat::kKilledClan;
+                    bool board = ok;
+                    if (clan < tma.clans.size() && tma.clans[clan].mode == 3) {
+                        SDL_Log("play: %.1f s hero takes over neutral unit %08x (size class %u): clan %u -> %u", sim_ms / 1000,
+                                t.logic_id, w ? w->size_class : 0, clan, hero_clan);
+                        t.damage.clan = hero_clan;
+                        if (runtime) runtime->unit_captured(t.logic_id, hero_clan);
+                        if (auto& b = brains[std::size_t(ci_live[ti])]) b->brain().self.clan = hero_clan;
+                        if (!ok) {
+                            hq->ack_voice(t.logic_id);
+                            board = false;
+                        }
+                    }
+                    if (board && clan_of(ti) == hero_clan) hq->push_state(ui::kStatePilot, t.logic_id);
+                }
             }
         }
         // The in-game menu takes the pointer: its buttons on the left button; keys other than F3 / Esc do nothing.

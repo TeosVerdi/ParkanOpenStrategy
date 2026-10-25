@@ -282,6 +282,8 @@ public:
                  std::uint32_t param = 0);
     std::vector<int> order_menu() const; // COrderMenu_Fill / Rebuild: the offered cmd ids, sorted, unique
     void menu_execute(int cmd);          // COrderMenu_Execute 1007bb90
+    // The acknowledgement voice by `lid`'s size class (CGame+0x4c pools, PickAckVoiceByUnitKind 1008ecc0).
+    void ack_voice(std::uint32_t lid);
     float menu_x() const { return 100; }
     float menu_y() const;                  // 0x76 + 20 · (unit rows)
     int menu_rows(std::size_t count) const; // COrderMenu_SetPos 1007b5f0: min(count, (454 − y) / 21)
@@ -412,7 +414,6 @@ private:
     std::uint32_t kind_of(std::uint32_t lid) const; // unit +0x30 (the size class)
     bool hero_selected() const;
     bool all_capturers() const;
-    void ack_voice(std::uint32_t lid);
     bool give(std::uint32_t lid, const game::UnitOrder& o, int mode);
     void begin_placement(std::uint32_t type);
     void end_placement();

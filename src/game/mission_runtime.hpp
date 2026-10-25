@@ -98,6 +98,9 @@ public:
     void object_added(std::uint32_t logic_id);                    // a spawned object, already in world()
     void object_killed(std::uint32_t logic_id);
     void object_captured(std::uint32_t logic_id, std::uint32_t new_clan);
+    // A unit taken over by the hero (ENTER_STATE on a neutral clan's unit, OnUICommandDown 10072120): the
+    // world clan and the new clan's OnObjectAdded(1); see the definition for what the original leaves alone.
+    void unit_captured(std::uint32_t logic_id, std::uint32_t new_clan);
     void object_event(std::uint32_t logic_id, std::uint32_t event); // NotifyObjectEvent to the owner's SuperAI
 
     // Objective states as OnSuperAINotify keeps them: 0 open, 1 complete, -1 failed. Primary first,

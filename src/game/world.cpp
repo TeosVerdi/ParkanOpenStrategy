@@ -19,20 +19,18 @@ std::string upper(std::string_view s) {
 
 bool starts_with(std::string_view s, std::string_view p) { return s.substr(0, p.size()) == p; }
 
-// Size letter of a chassis prototype (R_T_01, R_L_03, R_M_04, R_B_02) → property 0x201 (1 T, 2 S, 3 M, 4 L).
-std::uint32_t size_from_chassis(std::string_view entry) {
-    const std::string e = upper(entry);
-    if (e.size() < 4 || e[0] != 'R' || e[1] != '_' || e[3] != '_') return 0;
-    switch (e[2]) {
-    case 'T': return 1;
-    case 'L': return 2;
-    case 'M': return 3;
-    case 'B': return 4;
+} // namespace
+
+std::uint32_t unit_size_class(std::string_view entry) {
+    if (entry.size() < 3) return 0;
+    switch (std::tolower((unsigned char)entry[2])) {
+    case 't': return 1;
+    case 'h': case 'l': return 2;
+    case 'm': return 3;
+    case 'b': return 4;
     default: return 0;
     }
 }
-
-} // namespace
 
 bool TacticalAreal::contains(float x, float y) const {
     bool in = false;
@@ -142,7 +140,7 @@ World World::from_tma(const mission::Tma& tma, const std::filesystem::path* game
         if (game_dir && !wo.building()) {
             if (auto p = resolve_path(*game_dir, o.resource)) {
                 try {
-                    wo.size_class = size_from_chassis(mission::decode_scheme(read_file(*p)).root.entry);
+                    wo.size_class = unit_size_class(mission::decode_scheme(read_file(*p)).root.entry);
                 } catch (const std::exception&) {
                 }
             }

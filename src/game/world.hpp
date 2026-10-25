@@ -135,6 +135,11 @@ inline float combat_hits(float armour, float weapon) { return (weapon + 0.8f) * 
 // The type code for a placed object (see the file comment); 0 when the resource says nothing.
 std::uint32_t type_code_for_resource(std::string_view resource);
 
+// A unit's size class, property 0x201 (MB+0x960, unit+0x30): MBehaviour slot 0xd8 (Behavior 1000cee0), for a
+// unit (control class 4) the 3rd letter of its root part's name, case-insensitive: t 1, h/l 2, m 3, b 4, else 0
+// (the hero's R_H_02 is 2). Not M_Task_Construct's table (economy::robot_size, where e is 4 as well).
+std::uint32_t unit_size_class(std::string_view root_entry);
+
 class World {
 public:
     // Every non-static data.tma object becomes a world object (LogicID = identity, clan = ai_index).

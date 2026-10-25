@@ -372,8 +372,40 @@ void test_corpus_missions(const std::filesystem::path& game) {
 
 } // namespace
 
+// Property 0x201 for units (MBehaviour slot 0xd8, Behavior 1000cee0): the root entry's 3rd letter.
+void test_unit_size_class() {
+    CHECK(unit_size_class("R_T_02") == 1 && unit_size_class("R_L_03") == 2 && unit_size_class("R_M_04") == 3);
+    CHECK(unit_size_class("R_B_04") == 4 && unit_size_class("r_b_03") == 4);
+    CHECK(unit_size_class("R_H_02") == 2 && unit_size_class("r_h_01") == 2); // the hero / l_targ chassis
+    CHECK(unit_size_class("R_E_01") == 0 && unit_size_class("R_") == 0 && unit_size_class("") == 0);
+}
+
+// Tut_1 ("Capture the neutral warbots"): the hero takes over the neutral clan 3's units (ENTER_STATE,
+// OnUICommandDown 10072120): the world clan and the player SuperAI's OnObjectAdded(1); the old clan keeps it.
+void test_tut1_unit_capture(const std::filesystem::path& game) {
+    if (!resolve_path(game, "MISSIONS/CAMPAIGN/CAMPAIGN.00/Mission.01")) return;
+    auto rt = MissionRuntime::load(game, "MISSIONS/CAMPAIGN/CAMPAIGN.00/Mission.01");
+    const WorldObject* mf1 = rt->world().find(0xd);
+    const WorldObject* helic = rt->world().find(0x8);
+    const WorldObject* hero = rt->world().find(0x1);
+    CHECK(mf1 && mf1->clan == 3 && mf1->size_class == 3); // tut1_mf1, R_M_02: not boardable
+    CHECK(helic && helic->clan == 3 && helic->size_class == 1);
+    CHECK(hero && hero->size_class == 2);
+    for (std::uint32_t t = 0; t <= 3000; t += 33) rt->update(t);
+    SuperAI* player = rt->super_ai(0);
+    CHECK(player != nullptr);
+    if (!player) return;
+    auto knows = [&](SuperAI& ai, std::uint32_t lid) {
+        return std::any_of(ai.units().begin(), ai.units().end(), [&](const auto& u) { return u.logic_id == lid; });
+    };
+    CHECK(!knows(*player, 0xd));
+    rt->unit_captured(0xd, 0);
+    CHECK(rt->world().find(0xd)->clan == 0 && knows(*player, 0xd));
+}
+
 int game_unit_tests() {
     g_fail = 0;
+    test_unit_size_class();
     test_orders();
     test_problems();
     test_queries();
@@ -384,5 +416,6 @@ int game_unit_tests() {
 int game_corpus_tests(const std::filesystem::path& game) {
     g_fail = 0;
     test_corpus_missions(game);
+    test_tut1_unit_capture(game);
     return g_fail;
 }

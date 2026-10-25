@@ -237,6 +237,15 @@ void MissionRuntime::object_captured(std::uint32_t logic_id, std::uint32_t new_c
     if (n && n->clan < kMaxClans && registry_[n->clan]) registry_[n->clan]->on_object_added(n->building() ? 2 : 1, logic_id);
 }
 
+void MissionRuntime::unit_captured(std::uint32_t logic_id, std::uint32_t new_clan) {
+    // MBehaviour::Capture (slot 0x9c, Behavior 10008e40) for a unit (LogicID bit 31 clear) only points the
+    // behaviour at the new clan (control clan, SuperAI, ArealMap, distributor): its tasks stay, nothing leaves
+    // the old clan's lists and no Fort/Mech event runs. CUnit slot 2 (10035720) stores the clan; then the new
+    // clan's SuperAI slot 4 (record +0x50) gets OnObjectAdded(1, LogicID).
+    world_.set_clan(logic_id, new_clan);
+    if (new_clan < kMaxClans && registry_[new_clan]) registry_[new_clan]->on_object_added(1, logic_id);
+}
+
 void MissionRuntime::object_event(std::uint32_t logic_id, std::uint32_t event) {
     const WorldObject* o = world_.find(logic_id);
     if (o && o->clan < kMaxClans && registry_[o->clan]) registry_[o->clan]->notify_object_event(logic_id, event);
