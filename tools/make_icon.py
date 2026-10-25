@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Builds the app icon (res/parkan.icns, committed) from an installed game.
+"""Builds the app icons (committed) from an installed game: res/parkan.icns (the round original, used
+without Xcode) and res/AppIcon.icon/Assets/art.png (the art inside the ring, full bleed, for the Icon
+Composer icon that CMake compiles with actool; macOS 26+ shapes it).
 
 Usage: make_icon.py <game dir> [out.icns]
 
@@ -104,6 +106,13 @@ def main():
                                check=True, capture_output=True)
         os.makedirs(os.path.dirname(out), exist_ok=True)
         subprocess.run(['iconutil', '-c', 'icns', iconset, '-o', out], check=True)
+        # Full bleed: the centred square that the system's rounded-square mask keeps inside the GOG
+        # icon's art circle (radius 108 of 256: a 168 px square), scaled to 1024.
+        art = os.path.join(os.path.dirname(out), 'AppIcon.icon', 'Assets', 'art.png')
+        side = str(round(width * 168 / 256))
+        crop = os.path.join(tmp, 'crop.png')
+        subprocess.run(['sips', '-s', 'format', 'png', '-c', side, side, src, '--out', crop], check=True, capture_output=True)
+        subprocess.run(['sips', '-z', '1024', '1024', crop, '--out', art], check=True, capture_output=True)
     print(f'{out}: from {goggame[0] if goggame else exe[0]} ({width} px source)')
 
 

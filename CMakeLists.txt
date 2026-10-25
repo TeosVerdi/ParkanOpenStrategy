@@ -111,10 +111,31 @@ target_compile_options(parkan PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(parkan PROPERTIES
   MACOSX_BUNDLE_GUI_IDENTIFIER org.parkan.port
   MACOSX_BUNDLE_BUNDLE_NAME "Parkan")
-# The app icon: the GOG release's goggame-*.ico (regenerate with tools/make_icon.py <game dir>).
-target_sources(parkan PRIVATE res/parkan.icns)
-set_source_files_properties(res/parkan.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
-set_target_properties(parkan PROPERTIES MACOSX_BUNDLE_ICON_FILE parkan.icns)
+# The app icon, from the GOG release's goggame-*.ico (tools/make_icon.py <game dir> regenerates both):
+# res/AppIcon.icon (Icon Composer; the art inside the ring, full bleed) compiled by Xcode's actool into
+# Assets.car, which macOS 26+ draws in the system's icon shape (a legacy .icns is shrunk onto a grey
+# plate there). Without Xcode, res/parkan.icns (the round original).
+execute_process(COMMAND xcrun --find actool OUTPUT_VARIABLE PARKAN_ACTOOL OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(PARKAN_ACTOOL)
+  set(icon_dir ${CMAKE_CURRENT_BINARY_DIR}/app_icon)
+  add_custom_command(OUTPUT ${icon_dir}/Assets.car ${icon_dir}/AppIcon.icns
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${icon_dir}
+    COMMAND ${PARKAN_ACTOOL} ${CMAKE_CURRENT_SOURCE_DIR}/res/AppIcon.icon --compile ${icon_dir} --platform macosx
+            --minimum-deployment-target 11.0 --app-icon AppIcon --output-partial-info-plist ${icon_dir}/partial.plist
+            --output-format human-readable-text
+    DEPENDS res/AppIcon.icon/icon.json res/AppIcon.icon/Assets/art.png
+    COMMENT "Compiling the app icon (actool)")
+  target_sources(parkan PRIVATE ${icon_dir}/Assets.car ${icon_dir}/AppIcon.icns)
+  set_source_files_properties(${icon_dir}/Assets.car ${icon_dir}/AppIcon.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources GENERATED TRUE)
+  set(PARKAN_BUNDLE_ICON_NAME "\t<key>CFBundleIconName</key>\n\t<string>AppIcon</string>")
+  set_target_properties(parkan PROPERTIES MACOSX_BUNDLE_ICON_FILE AppIcon)
+else()
+  target_sources(parkan PRIVATE res/parkan.icns)
+  set_source_files_properties(res/parkan.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+  set(PARKAN_BUNDLE_ICON_NAME "")
+  set_target_properties(parkan PROPERTIES MACOSX_BUNDLE_ICON_FILE parkan.icns)
+endif()
+set_target_properties(parkan PROPERTIES MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/res/Info.plist.in)
 
 # Game data from installed folders or retail disc images (src/install: MDF/MDS, ISO, BIN/CUE,
 # ISO 9660/Joliet, InstallShield 5 cabinets, edition manifests, import). SDL-free, part of the core.
