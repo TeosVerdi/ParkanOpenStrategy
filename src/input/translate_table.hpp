@@ -42,5 +42,6 @@ std::vector<Binding> parse_translate_table(std::string_view text);
 // tools/mac_keymap.py, which applied it to the CrossOver install): keypad 5 → L, gray + → =,
 // gray - → -, gray * → \, gray / → Backspace, Page Up → ', Page Down → /. Idempotent.
 void apply_mac_defaults(std::vector<Binding>& table);
+std::uint16_t mac_default_key(std::uint16_t key); // one key of that mapping (unchanged when not listed)
 
 } // namespace parkan::input

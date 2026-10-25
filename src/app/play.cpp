@@ -183,8 +183,8 @@ private:
 };
 
 // The key bound to a UI command, as the in-game text names it (the SCAN_ name without its prefix).
-std::string key_label(std::string_view command, input::KeyLayout layout) {
-    const auto k = input::ui_key(command, layout);
+std::string key_label(std::string_view command, const input::UiKeys& ui) {
+    const auto k = ui.key(command);
     if (!k) return "?";
     std::string_view n = input::scan_name(k->key);
     if (n.starts_with("SCAN_")) n.remove_prefix(5);
@@ -744,7 +744,10 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     bool objectives_visible = false;
     double objectives_shown_ms = 0;
     bool objectives_auto_hide = false;
-    const std::string help_key = key_label("CMD_HELP", opt.layout), objectives_key = key_label("CMD_JAMES_MISSION_OBJ", opt.layout);
+    // The bindings (initGame 1005cbb0): the vehicle tables and the interface keys (addition.man).
+    const input::GameBindings bindings = input::load_game_bindings(lib.game_dir(), opt.user_dir, opt.layout);
+    const input::UiKeys& ui_keys = bindings.ui;
+    const std::string help_key = key_label("CMD_HELP", ui_keys), objectives_key = key_label("CMD_JAMES_MISSION_OBJ", ui_keys);
     double sim_ms = 0;
     if (runtime) {
         runtime->set_event_sink([&](const game::MissionEvent& e) {
@@ -804,21 +807,11 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         for (auto& g : hero_combat.guns) g.damage_mult = opt.damage_mult;
 
 
-    // Input: the hero is driven through HERO.TBL (iron3d loads it for the hero; warbots use M1/M2),
-    // rebound to the chosen layout (docs/CONTROLS.md).
-    std::vector<input::Binding> table;
-    if (auto tbl = resolve_path(lib.game_dir(), "hero.tbl")) {
-        const Bytes b = read_file(*tbl);
-        table = input::parse_translate_table({reinterpret_cast<const char*>(b.data()), b.size()});
-        input::apply_layout(table, opt.layout);
-    }
-    // A piloted / remote-controlled warbot is driven through M1.TBL (table_1.man; CHANGE_TABLE swaps to M2.TBL).
-    std::vector<input::Binding> unit_table;
-    if (auto tbl = resolve_path(lib.game_dir(), "m1.tbl")) {
-        const Bytes b = read_file(*tbl);
-        unit_table = input::parse_translate_table({reinterpret_cast<const char*>(b.data()), b.size()});
-        input::apply_layout(unit_table, opt.layout);
-    }
+    // Input: the hero is driven through HERO.TBL, a piloted / remote-controlled warbot through M1.TBL; initGame
+    // compiles both from the options menu's lists (hero.man, table_1.man), rebound to the chosen layout unless the
+    // player saved bindings (docs/CONTROLS.md).
+    std::vector<input::Binding> table = bindings.hero;
+    const std::vector<input::Binding> unit_table = bindings.unit;
     const std::vector<input::Binding> hero_table = table;
     input::ManManager man(std::move(table));
     input::CommandState commands;
@@ -1314,10 +1307,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
 
     // The HUD's UI commands (OnUICommandDown 10072120), by the scan code pressed (keys and mouse buttons).
     auto hud_command = [&](std::uint16_t scan) {
-        auto is = [&](std::string_view command) {
-            const auto k = input::ui_key(command, opt.layout);
-            return k && k->key == scan;
-        };
+        auto is = [&](std::string_view command) { return ui_keys.is(scan, command); };
         if (is("CMD_JAMES_COCKPIT_OFF")) {
             cockpit_on = !cockpit_on; // CCockpit_AnyPageVisible ? hide all : show all
         } else if (is("CMD_JAMES_SATELLITE_MAP")) {
@@ -1368,29 +1358,19 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             }
             // GAME_MENU (F3, OnUICommandDown case 0xa): the in-game menu (view state 7) opens, or closes when open;
             // not while placing a building. Esc: ROLLBACK_STATE (the HQ's own handling; on foot nothing to pop).
-            const auto menu_key = input::ui_key("CMD_GAME_MENU", opt.layout);
-            if (hq && menu_key && input::scan_from_hid(int(ev.key.scancode)) == menu_key->key && hq->mode() != ui::kModePlaceBuilding && hq->mode() != ui::kModePlaceMine) {
+            if (hq && ui_keys.is(input::scan_from_hid(int(ev.key.scancode)), "CMD_GAME_MENU") && hq->mode() != ui::kModePlaceBuilding && hq->mode() != ui::kModePlaceMine) {
                 if (hq->menu_open()) hq->pop_state();
                 else hq->open_menu();
                 return;
             }
             if (ev.key.scancode == SDL_SCANCODE_ESCAPE && hq) hq->escape();
-            // ENTER_STATE (OnUICommandDown 10072120; not in view mode 4 [the briefing]): the hero on foot and his
-            // target, a unit (type ⊆ 0x103e000) within 20 m (2-D). It can be boarded when its size class
-            // (unit+0x30, property 0x201) is 4 and it is not dead (Unit_IsDead 10077180: clan 0xfffe or
-            // property 0x52 ≤ 0). A neutral clan's unit (clan record +0xc, the data.tma mode, 3) is taken over
-            // first (Tut_1's "Capture the neutral warbots"); if it cannot be boarded the acknowledgement voice
-            // plays (PickAckVoiceByUnitKind, QueueUnitVoice without a unit) and that is all. Then a unit of the
-            // hero's clan is boarded: Push(1, 0, target).
-            const auto enter_key = input::ui_key("CMD_ENTER_STATE", opt.layout);
             // The wingman menu (hud-leftovers.md §2.3, §7.3): JAMES_WINGMAN_MENU (0x2e4, `~`) in the cockpit views of a
             // player-controlled unit (not a manned turret, objectives closed): CWingmanMenu_OnCommand 1006dfd0 (Shift →
             // pick); while open, the digits go to the menu (OnGameKeyDown 10071590) and not to the weapon selection
             // (CManManager_DisableChannel 1000f070(0)).
             if (hq && hq->view_mode() == 1 && hq->unit_controlled() && hq->state() != ui::kStateTurret && ctl_mode() != 2 &&
                 !objectives_visible) {
-                const auto wk = input::ui_key("CMD_JAMES_WINGMAN_MENU", opt.layout);
-                if (wk && input::scan_from_hid(int(ev.key.scancode)) == wk->key) {
+                if (ui_keys.is(input::scan_from_hid(int(ev.key.scancode)), "CMD_JAMES_WINGMAN_MENU")) {
                     hq->wingman_command(wingman_list(), (ev.key.mod & SDL_KMOD_SHIFT) != 0);
                     return;
                 }
@@ -1401,17 +1381,23 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 }
             }
             // JAMES_AUTO_DRIVER (0x2e8, top state 1 or 2): Unit_ToggleAutoDriver 10076410: unit+0x9c 0 → 1 → 2 → 0.
-            if (const auto ad = input::ui_key("CMD_JAMES_AUTO_DRIVER", opt.layout);
-                hq && ad && input::scan_from_hid(int(ev.key.scancode)) == ad->key &&
+            if (hq && ui_keys.is(input::scan_from_hid(int(ev.key.scancode)), "CMD_JAMES_AUTO_DRIVER") &&
                 (hq->state() == ui::kStatePilot || hq->state() == ui::kStateRemote)) {
                 int& m = hq->drive_mode[cc->logic_id];
                 m = (m + 1) % 3;
             }
+            // ENTER_STATE (OnUICommandDown 10072120; not in view mode 4 [the briefing]): the hero on foot and his
+            // target, a unit (type ⊆ 0x103e000) within 20 m (2-D). It can be boarded when its size class
+            // (unit+0x30, property 0x201) is 4 and it is not dead (Unit_IsDead 10077180: clan 0xfffe or
+            // property 0x52 ≤ 0). A neutral clan's unit (clan record +0xc, the data.tma mode, 3) is taken over
+            // first (Tut_1's "Capture the neutral warbots"); if it cannot be boarded the acknowledgement voice
+            // plays (PickAckVoiceByUnitKind, QueueUnitVoice without a unit) and that is all. Then a unit of the
+            // hero's clan is boarded: Push(1, 0, target).
             // In state 1, or 2 with an HQ-capable unit: Push(3, 0, the controlled unit) (§5).
-            if (hq && enter_key && input::scan_from_hid(int(ev.key.scancode)) == enter_key->key && hq->view_mode() != 4 &&
+            if (hq && ui_keys.is(input::scan_from_hid(int(ev.key.scancode)), "CMD_ENTER_STATE") && hq->view_mode() != 4 &&
                 (hq->state() == ui::kStatePilot || hq->state() == ui::kStateRemote) && hq->hq_capable(cc->logic_id))
                 hq->push_state(ui::kStateHqUnit, cc->logic_id);
-            else if (hq && enter_key && input::scan_from_hid(int(ev.key.scancode)) == enter_key->key && !briefing && !spectator &&
+            else if (hq && ui_keys.is(input::scan_from_hid(int(ev.key.scancode)), "CMD_ENTER_STATE") && !briefing && !spectator &&
                 hq->state() == ui::kStateHero && hud_target >= 0) {
                 const std::size_t ti = std::size_t(hud_target);
                 combat::Combatant& t = combat.unit(ti);
@@ -1481,10 +1467,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                     }
                     return;
                 }
-                auto is = [&](std::string_view command) {
-                    const auto k = input::ui_key(command, opt.layout);
-                    return scan && k && k->key == scan;
-                };
+                auto is = [&](std::string_view command) { return ui_keys.is(scan, command); };
                 static constexpr std::pair<const char*, ui::HqCamera::Key> kMoves[6] = {
                     {"CMD_JAMES_HQ_MOVE_LEFT", ui::HqCamera::Left},   {"CMD_JAMES_HQ_MOVE_RIGHT", ui::HqCamera::Right},
                     {"CMD_JAMES_HQ_MOVE_FORWARD", ui::HqCamera::Forward}, {"CMD_JAMES_HQ_MOVE_BACKWARD", ui::HqCamera::Back},
@@ -1527,15 +1510,13 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         if ((ev.type == SDL_EVENT_KEY_DOWN || ev.type == SDL_EVENT_KEY_UP) && !ev.key.repeat) {
             if (const auto scan = input::scan_from_hid(int(ev.key.scancode)))
                 events.push_back({ev.type == SDL_EVENT_KEY_DOWN, scan});
-            const auto outer_key = input::ui_key("CMD_JAMES_OUTER_CAMERA", opt.layout);
-            if (ev.type == SDL_EVENT_KEY_DOWN && outer_key && input::scan_from_hid(int(ev.key.scancode)) == outer_key->key) {
+            if (ev.type == SDL_EVENT_KEY_DOWN && ui_keys.is(input::scan_from_hid(int(ev.key.scancode)), "CMD_JAMES_OUTER_CAMERA")) {
                 // JAMES_OUTER_CAMERA (C): AdvanceOuterMode; preset 0 blends back into the TURRET view.
                 outer_preset = (outer_preset + 1) % 5;
                 if (outer_preset != 0) camera_mode = 1;
                 outer_blend_start = sim_ms;
             }
-            const auto obj_key = input::ui_key("CMD_JAMES_MISSION_OBJ", opt.layout);
-            if (ev.type == SDL_EVENT_KEY_DOWN && obj_key && input::scan_from_hid(int(ev.key.scancode)) == obj_key->key) {
+            if (ev.type == SDL_EVENT_KEY_DOWN && ui_keys.is(input::scan_from_hid(int(ev.key.scancode)), "CMD_JAMES_MISSION_OBJ")) {
                 objectives_visible = !objectives_visible; // JAMES_MISSION_OBJ toggles; no auto-hide then
                 objectives_auto_hide = false;
             }

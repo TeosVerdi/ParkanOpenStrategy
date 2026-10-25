@@ -81,6 +81,7 @@ add_library(parkan_core STATIC
   src/input/translate_table.cpp
   src/input/man_manager.cpp
   src/input/keymap.cpp
+  src/input/man_tables.cpp
 )
 target_include_directories(parkan_core PUBLIC src)
 target_compile_options(parkan_core PRIVATE -Wall -Wextra -Wpedantic)

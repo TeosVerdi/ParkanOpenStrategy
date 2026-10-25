@@ -109,17 +109,22 @@ std::vector<Binding> parse_translate_table(std::string_view text) {
     return out;
 }
 
-void apply_mac_defaults(std::vector<Binding>& table) {
+std::uint16_t mac_default_key(std::uint16_t key) {
     static const std::pair<const char*, const char*> kMap[] = {
         {"SCAN_G_5", "SCAN_L"},         {"SCAN_G_PLUS", "SCAN_W_PLUS"}, {"SCAN_G_SUB", "SCAN_W_SUB"},
         {"SCAN_G_ASTERISK", "SCAN_BSLASH"}, {"SCAN_G_SLASH", "SCAN_BS"}, {"SCAN_G_PGUP", "SCAN_QUOTE"},
         {"SCAN_G_PGDN", "SCAN_SLASH"},
     };
-    for (auto& b : table)
-        for (const auto& [from, to] : kMap) {
-            if (b.key == scan(from)) b.key = scan(to);
-            if (b.modifier == scan(from)) b.modifier = scan(to);
-        }
+    for (const auto& [from, to] : kMap)
+        if (key == scan(from)) return scan(to);
+    return key;
+}
+
+void apply_mac_defaults(std::vector<Binding>& table) {
+    for (auto& b : table) {
+        b.key = mac_default_key(b.key);
+        b.modifier = mac_default_key(b.modifier);
+    }
 }
 
 } // namespace parkan::input

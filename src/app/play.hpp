@@ -1,5 +1,5 @@
 // First playable slice: a mission with its sky, the player's hero unit driven through the original
-// binding table (M1.TBL with the MacBook remap) → motion graph → mover, following the ground, and a
+// binding tables (HERO.TBL / M1.TBL compiled from the .man lists) → motion graph → mover, following the ground, and a
 // camera that orbits the hero.
 #pragma once
 
@@ -8,6 +8,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <utility>
@@ -38,6 +39,7 @@ struct PlayOptions {
     bool demo_aim = false;    // port debug aid: turn to the nearest hostile unit and aim every bullet at it
     int camera_preset = 0;    // 0 TURRET view, 1..4 OUTER presets (for --shot checks)
     input::KeyLayout layout = input::KeyLayout::Modern; // --classic-keys: the 2001 layout
+    std::filesystem::path user_dir; // the player's files: the bindings the options menu saved (input/keymap)
     bool stabilize_camera = true; // --camera-sway: the original's data-driven cockpit sway
     // Port debug aids (buildings, notes/buildings.md): --goto x,y[,heading°] puts the hero there at the
     // start; --target <hex LogicID> makes --aim pick that object (a building too); --damage-mult k

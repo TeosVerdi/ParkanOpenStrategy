@@ -5,11 +5,12 @@
 //
 // Port decisions:
 // - Bindings are kept by name (CMD_*, SCAN_*), as the .man files spell them.
-// - The edited ui_*.man files are written to the user's folder (Shell::Config::user_dir), never into the
-//   game folder. The four merged in-game tables (addition.man, table_1/2.man, hero.man,
-//   CFormRedefineControls_BuildGameTables 10004fb0) are not rebuilt: missions use the port's key layouts
-//   (input/keymap: --classic-keys) [port limitation].
+// - The edited ui_*.man files and the four merged in-game lists (addition.man, table_2.man, table_1.man,
+//   hero.man; CFormRedefineControls_BuildGameTables 10004fb0, input/man_tables) are written to the user's
+//   folder (Shell::Config::user_dir), never into the game folder; missions load them from there
+//   (input::load_game_bindings).
 #include "core/paths.hpp"
+#include "input/man_tables.hpp"
 #include "shell/shell.hpp"
 
 #include <cmath>
@@ -325,14 +326,21 @@ private:
         refresh();
         env.play("BUTTON_CLICK");
     }
-    // CFormRedefineControls_Save 100042e0: tables 0–3 back to their .man files ("%s %s %s\n").
+    // CFormRedefineControls_Save 100042e0: tables 0–3 back to their .man files ("%s %s %s\n"), then the four
+    // in-game lists merged from them (BuildGameTables).
     void save() {
         const auto& dir = shell_.config().user_dir;
         if (dir.empty()) return;
+        std::array<input::ManTable, 4> tabs;
         for (int i = 0; i < 4; ++i) {
-            std::ofstream f(dir / kFiles[i], std::ios::binary);
-            for (const Row& r : tables_[i]) f << r.cmd << ' ' << r.modifier << ' ' << r.key << '\n';
+            std::string text;
+            for (const Row& r : tables_[i]) text += r.cmd + ' ' + r.modifier + ' ' + r.key + '\n';
+            std::ofstream(dir / kFiles[i], std::ios::binary) << text;
+            tabs[std::size_t(i)] = input::parse_man(text, false); // no joystick
         }
+        const auto game = input::build_game_tables(tabs);
+        for (std::size_t i = 0; i < 4; ++i)
+            std::ofstream(dir / input::kGameTableFiles[i], std::ios::binary) << input::write_man(game[i]);
     }
 
     ScrollList* list_ = nullptr;

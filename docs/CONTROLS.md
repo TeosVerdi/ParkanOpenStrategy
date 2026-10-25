@@ -3,9 +3,11 @@
 The port's default is a **modern layout** (WASD). `parkan --play … --classic-keys` uses the original
 2001 layout instead (with the keys a MacBook lacks moved, as in `tools/mac_keymap.py`).
 
-Both layouts are the original binding tables (`HERO.TBL`, `M1.TBL`, `M2.TBL`) with keys substituted
-when they load (`src/input/keymap.cpp`), so every command keeps the original's behaviour (ramps,
-one-shots, mouse smoothing). The game folder is not modified.
+Both layouts are the original binding tables with keys substituted when they load
+(`src/input/keymap.cpp`), so every command keeps the original's behaviour (ramps, one-shots, mouse
+smoothing). As in the original, a mission compiles `HERO.TBL` and `M1.TBL` from the options menu's
+lists (`hero.man`, `table_1.man`) and takes the interface keys from `addition.man`
+(`src/input/man_tables.cpp`). The game folder is not modified.
 
 Two port additions in the modern layout: **Option** is a bindable key (the original ignored Alt), and
 **sprint**: each movement binding walks at half its original throttle and has a Shift twin with the
@@ -29,8 +31,11 @@ As in the original (iron3d's GUI, notes/shell.md):
 
 Key bindings (Options → Controls): click a row or press Enter to capture the next key or mouse button
 (Esc included, as in the original); Delete or a right click clears it. Conflicting keys show in red and
-disable OK. The edited `ui_*.man` files are saved to the user folder; missions still use the port's
-layouts above (rebuilding the merged in-game tables from them is not ported yet).
+disable OK. OK saves the edited `ui_*.man` files and the four merged in-game lists to the user folder,
+and missions use them from then on. Saved bindings are used as shown in the menu: the modern layout
+no longer applies, and only the keys a MacBook lacks (keypad, Page Up/Down) still move. To go back to
+a layout, delete `addition.man`, `table_1.man`, `table_2.man` and `hero.man` from the user folder
+(`~/Library/Application Support/Parkan`).
 
 ## Driving (hero and warbots)
 

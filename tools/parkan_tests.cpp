@@ -7,6 +7,7 @@
 #include "input/scancodes.hpp"
 #include "input/keymap.hpp"
 #include "input/man_manager.hpp"
+#include "input/man_tables.hpp"
 #include "input/translate_table.hpp"
 #include "mission/scheme.hpp"
 #include "world/collision.hpp"
@@ -22,6 +23,7 @@
 #include <cstring>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <set>
 
@@ -270,6 +272,109 @@ void test_input() {
     CHECK(m[0].key == 0x028); // Page Up -> '
     apply_mac_defaults(m);
     CHECK(m[0].key == 0x028); // idempotent
+}
+
+// .man lists → in-game tables (input/man_tables: CKeyBindings, BuildGameTables, CreateTranslateTable).
+void test_man_tables() {
+    using namespace parkan::input;
+    // ParseManLine: an optional device word, case-insensitive names; ParseManFile stops at the first bad line.
+    const ManTable r = parse_man("cmd_obj_stop scan_null scan_g_slash\nCMD_FIRE_ALL KEY SCAN_NULL SCAN_BLANK\n"
+                                 "CMD_TURRET_UP SCAN_NULL SCAN_JOY_Y\nCMD_NOPE SCAN_NULL SCAN_A\nCMD_OBJ_STOP SCAN_NULL SCAN_B\n",
+                                 false);
+    CHECK(r.size() == 3);
+    CHECK(r[0].cmd == 0x0e && r[0].key == 0x135 && r[1].cmd == 0x42 && r[1].key == 0x39);
+    CHECK(r[2].key == kScanMouseY); // without a joystick the joystick axes become mouse axes
+    CHECK(parse_man("CMD_TURRET_UP SCAN_NULL SCAN_MOUSE_Y\n", true)[0].key == 0x24f);
+    CHECK(write_man(r) == "CMD_OBJ_STOP SCAN_NULL SCAN_G_SLASH\nCMD_FIRE_ALL SCAN_NULL SCAN_BLANK\n"
+                          "CMD_TURRET_UP SCAN_NULL SCAN_MOUSE_Y\n");
+    // CreateTranslateTable: one (modifier, key) pair is written once; a command a device cannot take leaves a
+    // "not implemented" line (which takes the pair as well); the hero's strafe release and turn differ.
+    CHECK(create_translate_table("CMD_OBJ_SPEED_MAX SCAN_NULL SCAN_MOUSE_X\nCMD_TURRET_LEFT SCAN_NULL SCAN_MOUSE_X\n"
+                                 "CMD_SELECT_WEAPON_9 SCAN_LSHIFT SCAN_W_9\nCMD_JAMES_HELP SCAN_NULL SCAN_F1\n", false) ==
+          "Command ot implemented for device: MOUSE.\n"
+          "KEY   SCAN_LSHIFT SCAN_W_9 1 CICLS_MULTIGUN MCMD_SELECT 0.0 9 0 0.0 0 // SELECT_WEAPON_(n)\n");
+    CHECK(create_translate_table("CMD_OBJ_MOVE_LEFT SCAN_NULL SCAN_A\nCMD_OBJ_TURN_LEFT SCAN_NULL SCAN_Q\n", true) ==
+          "KEY   SCAN_NULL SCAN_A 1 CICLS_UNKNOWN MCMD_LEFT  1.0 0 0 0.0 0 // OBJ_MOVE_LEFT\n"
+          "KEY   SCAN_NULL SCAN_A 0 CICLS_UNKNOWN MCMD_LEFT  0.0 1 0 0.0 0 // stop robot to left\n"
+          "KEY   SCAN_NULL SCAN_Q 1 CICLS_UNKNOWN MCMD_ROTATE_Z  0.1 0 0 0.0 0 // OBJ_TURN_LEFT\n"
+          "KEY   SCAN_NULL SCAN_Q 0 CICLS_UNKNOWN MCMD_ROTATE_Z  0.0 0 0 0.0   0   // stop turn left\n");
+    // CKeyBindings::Lookup(3, 0, scan): the first row bound to the key without a modifier.
+    const ManTable ui = {{0x2e0, 0x2a, 0x2e}, {0x2e1, 0, 0x2e}, {0x2e2, 0, 0x2e}};
+    CHECK(ui_lookup(ui, 0x2e) == 0x2e1u && !ui_lookup(ui, 0x2f));
+}
+
+// The shipped lists: the shell's merge of the four tabs gives the four in-game .man files, and compiling those
+// gives the shipped .tbl files byte for byte (both come from the same original code).
+void test_man_tables_corpus(const std::filesystem::path& game) {
+    using namespace parkan::input;
+    std::printf("man tables\n");
+    auto text = [&](const char* name) {
+        const auto p = parkan::resolve_path(game, name);
+        if (!p) return std::string();
+        const Bytes b = parkan::read_file(*p);
+        std::string s(b.begin(), b.end()), out;
+        for (char c : s)
+            if (c != '\r') out += c;
+        return out;
+    };
+    std::array<ManTable, 4> tabs;
+    const char* ui[4] = {"ui_other.man", "ui_hq.man", "ui_bots.man", "ui_hero.man"};
+    for (int i = 0; i < 4; ++i) tabs[std::size_t(i)] = parse_man(text(ui[i]), false);
+    const auto merged = build_game_tables(tabs);
+    for (int i = 0; i < 4; ++i) {
+        const bool same = write_man(merged[std::size_t(i)]) == text(kGameTableFiles[i]);
+        if (!same) std::printf("  %s differs from the merge of the tabs\n", kGameTableFiles[i]);
+        CHECK(same);
+    }
+    // Without saved bindings the mission's tables are the shipped .tbl files in the chosen layout.
+    for (const KeyLayout layout : {KeyLayout::Classic, KeyLayout::Modern}) {
+        const GameBindings g = load_game_bindings(game, {}, layout);
+        CHECK(!g.custom);
+        for (const auto& [tbl, got] : {std::pair{"hero.tbl", &g.hero}, std::pair{"m1.tbl", &g.unit}}) {
+            auto want = parse_translate_table(text(tbl));
+            apply_layout(want, layout);
+            bool same = want.size() == got->size();
+            for (std::size_t i = 0; same && i < want.size(); ++i) {
+                const Binding &a = want[i], &b = (*got)[i];
+                same = a.device == b.device && a.modifier == b.modifier && a.key == b.key && a.on_press == b.on_press &&
+                       a.cls == b.cls && a.cmd == b.cmd && a.value == b.value && a.index == b.index && a.state == b.state &&
+                       a.accel == b.accel && a.ramp_ms == b.ramp_ms && a.comment == b.comment;
+            }
+            if (!same) std::printf("  %s (%s layout) differs from the compiled list\n", tbl, layout == KeyLayout::Modern ? "modern" : "classic");
+            CHECK(same);
+        }
+        CHECK(g.ui.is(*scan_from_name("SCAN_W_ENTER"), "CMD_ENTER_STATE"));
+    }
+    // Saved bindings (the options menu's OK): the hero's forward on W and ENTER_STATE on B reach the mission as
+    // they are, with the layout not applied.
+    {
+        for (auto& r : tabs[3])
+            if (r.cmd == 3) r.key = *scan_from_name("SCAN_W");
+        for (auto& r : tabs[0])
+            if (r.cmd == 0x2da) r.key = *scan_from_name("SCAN_B");
+        const auto saved = build_game_tables(tabs);
+        const auto dir = std::filesystem::temp_directory_path() / "parkan-tests-bindings";
+        std::filesystem::create_directories(dir);
+        for (std::size_t i = 0; i < 4; ++i) std::ofstream(dir / kGameTableFiles[i], std::ios::binary) << write_man(saved[i]);
+        const GameBindings g = load_game_bindings(game, dir, KeyLayout::Modern);
+        std::filesystem::remove_all(dir);
+        CHECK(g.custom);
+        bool walk_w = false, walk_up = false;
+        for (const auto& b : g.hero) {
+            walk_w |= b.cmd == kMcmdWalkF && b.key == *scan_from_name("SCAN_W");
+            walk_up |= b.cmd == kMcmdWalkF && b.key == *scan_from_name("SCAN_G_UP");
+        }
+        CHECK(walk_w && !walk_up);
+        CHECK(g.ui.is(*scan_from_name("SCAN_B"), "CMD_ENTER_STATE") && !g.ui.is(*scan_from_name("SCAN_W_ENTER"), "CMD_ENTER_STATE"));
+        CHECK(g.ui.is(*scan_from_name("SCAN_C"), "CMD_JAMES_OUTER_CAMERA")); // the shipped key, not the modern V
+    }
+    const std::pair<const char*, const char*> pairs[3] = {{"table_1.man", "m1.tbl"}, {"table_2.man", "m2.tbl"}, {"hero.man", "hero.tbl"}};
+    for (const auto& [man, tbl] : pairs) {
+        const bool hero = std::string_view(tbl) == "hero.tbl";
+        const std::string got = create_translate_table(write_man(parse_man(text(man), false)), hero), want = text(tbl);
+        if (got != want) std::printf("  %s: compiled %zu bytes, shipped %zu\n", tbl, got.size(), want.size());
+        CHECK(got == want);
+    }
 }
 
 // CTPT (notes/formats-wea-cpt-ndp.md): u32 n, n 36-byte points {flags, meshPart, damagePart, pos, vec}, names.
@@ -597,9 +702,19 @@ void test_keymap() {
     m.process(w_up, 0, 0, 16, c);
     CHECK(c.get(0, 0, kMcmdWalkF) == 0.f);
 
-    CHECK(ui_key("CMD_JAMES_OUTER_CAMERA", KeyLayout::Modern)->key == *scan_from_name("SCAN_V"));
-    CHECK(ui_key("CMD_JAMES_OUTER_CAMERA", KeyLayout::Classic)->key == *scan_from_name("SCAN_C"));
-    CHECK(!ui_key("CMD_NO_SUCH", KeyLayout::Modern));
+    // addition.man in the layouts: the modern keys by command; classic (and saved bindings) only move the keys
+    // a MacBook lacks.
+    const ManTable addition = parse_man("CMD_JAMES_OUTER_CAMERA SCAN_NULL SCAN_C\nCMD_JAMES_HQ_MOVE_UP SCAN_NULL SCAN_G_PGUP\n"
+                                        "CMD_JAMES_COCKPIT_OFF SCAN_NULL SCAN_U\n", false);
+    const UiKeys modern = ui_keys(addition, KeyLayout::Modern, false), classic = ui_keys(addition, KeyLayout::Classic, false),
+                 saved = ui_keys(addition, KeyLayout::Modern, true);
+    CHECK(modern.key("CMD_JAMES_OUTER_CAMERA")->key == *scan_from_name("SCAN_V"));
+    CHECK(modern.is(*scan_from_name("SCAN_V"), "CMD_JAMES_OUTER_CAMERA") && !modern.is(*scan_from_name("SCAN_C"), "CMD_JAMES_OUTER_CAMERA"));
+    CHECK(classic.key("CMD_JAMES_OUTER_CAMERA")->key == *scan_from_name("SCAN_C"));
+    CHECK(classic.key("CMD_JAMES_HQ_MOVE_UP")->key == *scan_from_name("SCAN_QUOTE"));
+    CHECK(saved.key("CMD_JAMES_OUTER_CAMERA")->key == *scan_from_name("SCAN_C"));
+    CHECK(modern.is(*scan_from_name("SCAN_U"), "CMD_JAMES_COCKPIT_OFF"));
+    CHECK(!modern.key("CMD_NO_SUCH") && !modern.key("CMD_HELP"));
 }
 
 void test_text() {
@@ -640,6 +755,7 @@ void test_fonts_corpus(const std::filesystem::path& game) {
 void test_corpus(const std::filesystem::path& game) {
     test_fonts_corpus(game);
     test_unit_motion(game);
+    test_man_tables_corpus(game);
     g_failures += ai_corpus_tests(game); // tools/ai_tests.cpp
     g_failures += game_corpus_tests(game); // tools/game_tests.cpp
     g_failures += combat_corpus_tests(game); // tools/combat_tests.cpp
@@ -708,6 +824,7 @@ int main(int argc, char** argv) {
     test_anim_sampling();
     test_scheme();
     test_input();
+    test_man_tables();
     test_man_manager();
     test_collision();
     test_audio();
