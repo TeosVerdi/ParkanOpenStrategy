@@ -81,6 +81,23 @@ EnergyHost Combatant::energy_host() const {
     return host;
 }
 
+std::optional<float> Combatant::radar_param(std::size_t i) const {
+    if (energy.radar < 0 || i >= 16) return std::nullopt;
+    return energy.devices[std::size_t(energy.radar)].param[i];
+}
+
+bool Combatant::gun_broken(std::size_t g) const {
+    for (const auto& d : energy.devices)
+        if (d.gun == std::int32_t(g)) return d.part >= 0 && part_ratio(d.part) == 0;
+    return false;
+}
+
+std::optional<std::uint32_t> Combatant::device_state(std::uint32_t type) const {
+    for (const auto& d : energy.devices)
+        if (d.type == type) return d.state;
+    return std::nullopt;
+}
+
 float Combatant::part_ratio(std::int32_t t) const {
     if (t < 0 || std::size_t(t) >= damage.parts.size()) return 1.f;
     const DamagePart& p = damage.parts[damage.resolve(std::size_t(t))];
@@ -344,6 +361,7 @@ std::size_t CombatWorld::add_unit(LiveUnit& u, std::uint32_t logic_id, std::uint
             // CreateDevice (1002d4b0): ctl+0x5cc / +0x5d0 hold the force shield / the deflector.
             if (pd.cls == 9) c->energy.shield = std::int32_t(c->energy.devices.size());
             if (pd.cls == 0x15) c->energy.deflector = std::int32_t(c->energy.devices.size());
+            if (pd.cls == 8) c->energy.radar = std::int32_t(c->energy.devices.size());
             c->energy.devices.push_back(pd);
         }
         part_count[pi] = ctld.devices.size();

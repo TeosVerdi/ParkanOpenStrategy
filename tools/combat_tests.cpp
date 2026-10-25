@@ -625,6 +625,29 @@ int combat_corpus_tests(const std::filesystem::path& game) {
         CHECK(victim.energy.side_strength(0, vh) < 13.5f * 2.1f); // collapsed, regaining from 0
     }
 
+    // The HUD's device readers (hud.md §3, §5, §6): properties 0x50 / 0xa9 = the radar's (class 8, o_rdr_l_df: range
+    // 250, sweep 750) GetParam(3) / (4); the lamps' first type-0xf (repair, state 0 = off) and type-0xa (i_dsh_l_03,
+    // 0x2000) device states; device property 0x300 (broken) follows the gun device's part.
+    {
+        CombatWorld w(lib, ground, nullptr);
+        const std::size_t a = w.add_unit(*hero, hero->placement->identity, 0, true);
+        Combatant& c = w.unit(a);
+        std::printf("  radar %.0f / %.0f; repair state %#x, detection shield %#x\n", c.radar_param(3).value_or(-1), c.radar_param(4).value_or(-1),
+                    c.device_state(0xf).value_or(0xdead), c.device_state(0xa).value_or(0xdead));
+        CHECK(c.radar_param(3) == 250.f && c.radar_param(4) == 750.f);
+        CHECK(c.device_state(0xf) == 0u && c.device_state(0xa) == 0x2000u && !c.device_state(0x7f));
+        CHECK(!c.gun_broken(2));
+        std::int32_t part = -1;
+        for (const auto& d : c.energy.devices)
+            if (d.gun == 2) part = d.part;
+        CHECK(part >= 0);
+        if (part >= 0) {
+            const std::size_t p = c.damage.resolve(std::size_t(part));
+            c.damage.add_part_hp(p, -c.damage.parts[p].max_hp, 0);
+            CHECK(c.gun_broken(2));
+        }
+    }
+
     auto rt = game::MissionRuntime::load(game, mission);
     h.select(1); // deselect the MG
     h.select(3); // the laser

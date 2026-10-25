@@ -89,6 +89,7 @@ public:
     // The shield (CDeviceSet +0x5c0 = ctl+0x5cc, class 9) and the deflector (+0x5c4 = ctl+0x5d0, class 0x15):
     // CreateDevice keeps the last one of each class [inferred: as for the armour]. −1 = none.
     std::int32_t shield = -1, deflector = -1;
+    std::int32_t radar = -1; // ctl+0x5d4 (CDeviceSet +0x5c8): the last class-8 device created (1002d5b8)
     float shield_mult = 1; // shield +0x11c
     // IsShieldActive (1002c500), the device half: both exist, are on (dev+0x50 ≠ 0) and not broken.
     bool shield_active(const EnergyHost& host) const;

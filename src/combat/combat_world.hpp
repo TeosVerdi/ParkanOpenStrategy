@@ -71,6 +71,15 @@ public:
     std::optional<std::array<float, 6>> shield_charges() const { return energy.shield_charges(energy_host()); }
     // What the devices read from this unit (part ratios, the damage state, the clock; no engine load).
     EnergyHost energy_host() const;
+    // Unit properties 0x50 / 0xa9 (CUnitControl GetProperty 1000e6c0 → 0x204 GetProperty(8 / 9), 1002b410): the
+    // radar's (class 8) GetParam(3) (range) / GetParam(4) (the HUD sweep's); nullopt without a radar.
+    std::optional<float> radar_param(std::size_t i) const;
+    // Device property 0x300 of gun `g`'s device (GetDevicePropertyById 1002bb40 → CDevice slot 2): broken, its
+    // part's HP ratio is 0.
+    bool gun_broken(std::size_t g) const;
+    // The state (dev+0x50) of the first device of spec type `type` (0x204 slot 0x24(0, type), then slot 0x14);
+    // nullopt without one.
+    std::optional<std::uint32_t> device_state(std::uint32_t type) const;
     // CControlBase part value 1 (1000dc40) of damage part `transform` (a device's dev+4): its HP ratio; 1 for a
     // node without an NDPR record (port) or out of range.
     float part_ratio(std::int32_t transform) const;
