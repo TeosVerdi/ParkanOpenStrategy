@@ -475,11 +475,24 @@ void test_real_costs(const std::filesystem::path& game) {
     x.start([](std::uint32_t) { return true; });
     x.wrap_controls();
     std::printf("  b_plant1 battery %.0f, size %u\n", x.state(0x80000001)->battery_cap, x.building_size(0x80000001));
+    // Its control devices (fr_b_plant.ctl with the i_pws_f_03 / i_fsh_f_03 / i_rps_f_03 modules, then the
+    // u_pln_def_a_01 component): four batteries of 8 (power 500/s) and one type-0x1a device with param0 5, so
+    // pf = GetParam(0x300) = 5 · HP ratio 1 · k 1 (GetDevicePropertyById 1002c040, GetPowerFactor 100198e0).
+    const combat::EnergyBudget* pb = x.power(0x80000001);
+    CHECK(pb && pb->devices.size() == 14 && near(*pb->battery_capacity(), 32));
+    if (pb) {
+        std::size_t batteries = 0, consumers = 0;
+        for (const auto& d : pb->devices) batteries += d.type == 0x13 && near(d.power, 500), consumers += d.type == 0x1a && near(d.param[0], 5);
+        CHECK(batteries == 4 && consumers == 1);
+    }
+    CHECK(near(x.state(0x80000001)->power_factor(), 5));
     CHECK(x.order_construct(0x80000001, "UNITS\\UNITS\\AI\\12hel1.dat"));
     for (std::uint32_t t = 0; t < 600000 && !produced; t += 33) x.update(t);
-    std::printf("  12hel1 produced after %.1f s (ore 50.5 / power 33.5, storage %.1f left)\n", produced / 1000.0,
-                x.state(0x80000002)->ore);
-    CHECK(produced > 5000 && produced < 120000);
+    std::printf("  12hel1 produced after %.1f s (ore 50.5 / power 33.5, storage %.1f left), pf %.2f, battery %.3f\n", produced / 1000.0,
+                x.state(0x80000002)->ore, x.state(0x80000001)->power_factor(), x.state(0x80000001)->battery_frac);
+    // At pf 5 the plant collects power 5·Use_Power 4 = 20/s (33.5 → ≈ 1.7 s) and the ore cost is 50.5 / 5; the
+    // ore requests (≈ 0.2·pf of the remainder a takt) and M_Task_Construct's 5 s minimum set the time.
+    CHECK(produced > 5000 && produced < 30000);
 
     // A real research: the first available, unresearched item of a campaign tree, at a fed institute.
     auto ptrf = resolve_path(game, "MISSIONS/SCRIPTS/c1m3p.trf");

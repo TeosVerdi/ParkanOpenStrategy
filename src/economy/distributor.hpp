@@ -23,9 +23,14 @@ struct EcoState {
     float power_usage = 0;
     float ore_offboard = 0, power_out = 0; // profession Transfer_Ore_OffBoard / Transfer_Power_Out
     float ore_left = 0;                    // property 0x105 (MB+0x9e8): ore left in a mine's lodes
-    // [port approximation, base-building.md §8 step 1] Until Control's energy budget (1002d340) is ported:
-    // pf = 1 while the batteries hold charge (or the building draws nothing), 0 when they are empty.
-    float power_factor() const { return battery_cap <= 0 || battery_frac > 0 ? 1.0f : 0.0f; }
+    // The object's control devices are known (Economy: combat::EnergyBudget; battery_cap / battery_frac then
+    // mirror 0x204 properties 2 / 1): pf = Σ device property 0xe00 of its type-0x1a devices (GetPowerFactor
+    // 100198e0), refreshed every economy update.
+    bool has_devices = false;
+    float pf = 0;
+    // Without devices (headless data without files) [port approximation, base-building.md §8 step 1]: pf = 1
+    // while the batteries hold charge (or the building draws nothing), 0 when they are empty.
+    float power_factor() const { return has_devices ? pf : battery_cap <= 0 || battery_frac > 0 ? 1.0f : 0.0f; }
     // Property 0x1002: Transfer_Ore_OffBoard · pf.
     float ore_give_rate() const { return ore_offboard * power_factor(); }
 };

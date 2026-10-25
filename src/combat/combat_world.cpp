@@ -76,6 +76,12 @@ void Combatant::fire_mask(std::uint32_t mask) {
         if (mask & (1u << i)) guns[i].set_state(kFireSingle);
 }
 
+float Combatant::part_ratio(std::int32_t t) const {
+    if (t < 0 || std::size_t(t) >= damage.parts.size()) return 1.f;
+    const DamagePart& p = damage.parts[damage.resolve(std::size_t(t))];
+    return p.present ? p.ratio : 1.f; // a node without an NDPR record never breaks (port)
+}
+
 Vec3 Combatant::centre() const { return unit->frame.matrix.transform_point(bound_centre_); }
 
 Vec3 Combatant::aim_centre() const {
@@ -361,7 +367,7 @@ std::size_t CombatWorld::add_unit(LiveUnit& u, std::uint32_t logic_id, std::uint
         }
     }
     // INTO modules (FUN_1002d890): module@N reloads device N of its owner's CTLD from the module's first
-    // device (CDevice::Load without dev+4). The owner is the part the scheme node became (load_unit_model's
+    // device (the device's own class Load, without dev+4). The owner is the part the scheme node became (load_unit_model's
     // depth-first EXTO order) [inferred: N is relative to the owner's devices; the data's placeholder texts
     // match, e.g. o_tur_ht_02 device 1 "i_rdr_l" ← i_rdr_l_df@1]. Nodes with count 0 are skipped as in the
     // economy's battery sum [inferred].
@@ -380,7 +386,23 @@ std::size_t CombatWorld::add_unit(LiveUnit& u, std::uint32_t logic_id, std::uint
                 const auto ctld = module_ctld(ch.entry);
                 if (!ctld || ctld->devices.empty()) continue;
                 PowerDevice& pd = c->energy.devices[part_first[owner] + std::size_t(ch.mount)];
-                if (pd.gun < 0) power_device(ctld->devices[0], pd);
+                const CtldDevice& mod = ctld->devices[0];
+                power_device(mod, pd);
+                if (pd.gun < 0 || !is_weapon_device(mod)) continue;
+                // A clip (INTO clip@N on a gun): CGunDevice::Load (10029650) takes the clip's header — params,
+                // flags, bullet names (SetBulletName 10029940) —, refills energy to its param1 and ammo to
+                // round(param0); CDevice::Load appends the clip's joint refs to the channels (none in the data;
+                // joint base 0). FUN_1002dc20 then runs ReloadBulletInfo (100296f0) on every device after the
+                // load, so params 8..10 come from the clip's bullet: all of it is the GunDevice constructor.
+                GunDevice& old = c->guns[std::size_t(pd.gun)];
+                GunDeviceSpec spec = decode_gun_device(mod);
+                spec.id = old.spec().id, spec.part = old.spec().part; // dev+4 is not reloaded
+                std::vector<std::uint32_t> barrels = old.spec().barrels;
+                barrels.insert(barrels.end(), spec.barrels.begin(), spec.barrels.end());
+                spec.barrels = std::move(barrels);
+                spec.module = old.spec().module;
+                const BulletProto* b = spec.bullet.second.empty() ? nullptr : bullet(spec.bullet);
+                old = GunDevice(std::move(spec), old.joints(), b);
             }
         };
         walk(walk, scheme->root, 0);
@@ -750,11 +772,7 @@ void CombatWorld::process_records(float now) {
 
 void CombatWorld::update_energy(Combatant& c, float dt_s, float now) {
     EnergyHost host;
-    host.part_ratio = [&c](std::int32_t t) {
-        if (t < 0 || std::size_t(t) >= c.damage.parts.size()) return 1.f;
-        const DamagePart& p = c.damage.parts[c.damage.resolve(std::size_t(t))];
-        return p.present ? p.ratio : 1.f; // a node without an NDPR record never breaks (port)
-    };
+    host.part_ratio = [&c](std::int32_t t) { return c.part_ratio(t); };
     if (const UnitMotion* m = c.unit->motion.get()) {
         // 100265c0: max|ctl+0x1c8..0x1d0| / max|file body[6..8]| · ctl+0x154 (the live state's +0x54).
         const Vec3 v = m->velocity();

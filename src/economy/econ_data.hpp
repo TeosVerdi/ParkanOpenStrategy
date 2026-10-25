@@ -4,6 +4,7 @@
 // Spec: notes/base-building.md §1–§3, notes/designs-research.md §1, §5.4, notes/behaviour-data.md.
 #pragma once
 
+#include "combat/energy.hpp"
 #include "core/math.hpp"
 #include "mission/scheme.hpp"
 #include "mission/tma.hpp"
@@ -12,6 +13,10 @@
 #include <functional>
 #include <map>
 #include <optional>
+
+namespace parkan {
+class AssetLibrary;
+}
 
 namespace parkan::economy {
 
@@ -107,6 +112,14 @@ private:
 // 1002d4b0 case 0x13). The lookup resolves (library, entry) to the entry bytes (nullptr = missing).
 using ResourceLookup = std::function<std::span<const std::uint8_t>(std::string_view lib, std::string_view entry)>;
 float battery_capacity(const mission::Scheme& s, const ResourceLookup& lookup);
+
+// The devices of a design's control (CControlBase::LoadControlData 10008b10 / CreateDevice 1002d4b0): the root's
+// CTLD (a building's FORT root names its BTLU agent at +0x00/+0x20; the CTLD is the BTLU record's +0x100 /
+// +0x120), then each EXTO child's CTLD in depth-first order, every device; an INTO child at mount N reloads
+// device N of its owner's CTLD with the module's first device (FUN_1002d890). Without a body: no part
+// indices (−1, HP ratio 1) and every gun off and full (gun −1). Same device list as combat::CombatWorld::add_unit
+// [inferred: an EXTO child counts as a component whatever its mesh].
+std::vector<combat::PowerDevice> power_devices(const mission::Scheme& s, AssetLibrary& lib);
 
 std::string normalize_path(std::string_view p); // upper case, '/' → '\'
 

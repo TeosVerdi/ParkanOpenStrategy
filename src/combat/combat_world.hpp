@@ -15,9 +15,8 @@
 // - the impact effect is EXPL fx[0] (the hit face's surface type is not decoded);
 // - the slow tick (SlowTickDamage, then the energy budget, combat/energy.hpp) runs every 250 ms with the
 //   time elapsed since the last one (the original's LFSR jitter is not reproduced);
-// - the energy budget's devices are every part's CTLD devices with the scheme's INTO modules applied
-//   (module@N replaces device N of its owner's CTLD, FUN_1002d890), except the guns, which keep their own
-//   part's CTLD header (a clip module, e.g. i_c03_t under e_gun_tc_03, is not applied to the gun);
+// - the devices are every part's CTLD devices with the scheme's INTO modules applied (module@N reloads
+//   device N of its owner's CTLD, FUN_1002d890; a clip on a gun replaces its params and bullet);
 // - mult (property 0xb4) is 1 and the scale is the TMA z scale (GetContactPoint scales per axis).
 #pragma once
 
@@ -59,6 +58,9 @@ public:
     // Unit property 0x73 (GetPropertyImpl 1000e3d1 → 0x204 GetProperty(1)): the batteries' charge; 0 when the
     // unit has none (the HUD energy gauge).
     float battery_fraction() const { return energy.battery_fraction().value_or(0.f); }
+    // CControlBase part value 1 (1000dc40) of damage part `transform` (a device's dev+4): its HP ratio; 1 for a
+    // node without an NDPR record (port) or out of range.
+    float part_ratio(std::int32_t transform) const;
 
     // Unit-level API (ManManager / CDeviceSet in the original):
     // MCMD_SELECT: index n ≥ 1 toggles the n-th gun (selecting resets it, deselecting ceases its fire);

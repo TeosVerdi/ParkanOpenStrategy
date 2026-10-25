@@ -370,6 +370,15 @@ int combat_corpus_tests(const std::filesystem::path& game) {
         }
         CombatWorld w2(lib, ground, nullptr);
         const std::size_t ri = w2.add_unit(*r, 999, 0, false);
+        // Clip modules (INTO clip@0 → CGunDevice::Load): e_gun_lc_01 carries ammo 200, its clip i_c01_l_02 500;
+        // e_gun_mc_14 250, its clip i_c14_m_02 45 (o_c01_l_02.ctl / o_c14_m_02.ctl param0).
+        if (std::string_view(design) == "UNITS/UNITS/BATTLE/21swlk1.dat" || std::string_view(design) == "UNITS/UNITS/BATTLE/21mwlk1.dat") {
+            const std::int32_t want = std::string_view(design).ends_with("21swlk1.dat") ? 500 : 45;
+            std::size_t clipped = 0;
+            for (const auto& gun : w2.unit(ri).guns) clipped += gun.ammo() == want && !gun.spec().module.empty();
+            std::printf("  %s: %zu guns with the clip's ammo %d\n", design, clipped, want);
+            CHECK(clipped == 2);
+        }
         std::size_t g = 0;
         while (g < w2.unit(ri).guns.size() && !w2.unit(ri).mounts[g].on_turret()) ++g;
         if (g == w2.unit(ri).guns.size()) {

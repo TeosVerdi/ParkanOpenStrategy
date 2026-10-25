@@ -863,6 +863,17 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     std::vector<bool> unit_drawn(live.size(), true), building_drawn(buildings.size(), true);
     std::vector<Vec3> unit_start;
     economy::Economy* eco = runtime ? runtime->economy() : nullptr;
+    // A building's batteries and power devices are its combatant's (combat/energy.hpp): the economy reads the
+    // charge and pf from them and refills them through the distributor.
+    auto bind_power = [&](std::size_t ci) {
+        if (!eco) return;
+        combat::Combatant& c = combat.unit(ci);
+        eco->bind_power(c.logic_id, &c.energy, [&c](std::int32_t t) { return c.part_ratio(t); });
+        if (const economy::EcoState* st = eco->state(c.logic_id))
+            SDL_Log("play: building %08x power: %zu devices, battery %.0f (charge %.2f), pf %.2f", c.logic_id, c.energy.devices.size(),
+                    st->battery_cap, st->battery_frac, st->power_factor());
+    };
+    for (const std::size_t ci : bld_ci) bind_power(ci);
     // The economy's walking tasks move builders and transports of every clan through their brains.
     std::map<std::uint32_t, std::unique_ptr<BrainMover>> movers;
     auto give_mover = [&](std::size_t i) {
@@ -968,6 +979,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         buildings.push_back(std::make_unique<Building>(std::move(body), w->type));
         const std::size_t ci = combat.add_unit(buildings[k]->body(), lid, w->clan, false);
         bld_ci.push_back(ci), ci_live.push_back(-1), ci_bld.push_back(std::int32_t(k));
+        bind_power(ci);
         unit_of[lid] = ci, tma_clans[lid] = w->clan, tma_types[lid] = w->type;
         perception.add_unit(lid, ci, w->clan, w->type);
         if (const auto spheres = buildings[k]->rest_capture_spheres(); !spheres.empty()) {

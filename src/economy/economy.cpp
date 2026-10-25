@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 
 namespace parkan::economy {
 
@@ -89,6 +90,13 @@ struct Economy::Worker {
     Mover* mover = nullptr;
     std::uint32_t walk_until = 0; // fallback travel timer
     bool alive = true, initialized = false;
+    // The control devices: the economy's own budget, or the host's body's (bind_power).
+    combat::EnergyBudget own;
+    combat::EnergyBudget* power = nullptr;
+    std::function<float(std::int32_t)> part_ratio;
+    bool bound = false;
+    std::optional<std::uint32_t> last_tick; // the own budget's slow tick
+    std::uint32_t next_tick = 0;
 };
 
 // Friend access for the tasks (they live in an anonymous namespace).
@@ -815,6 +823,7 @@ Economy::Economy(World& world, const std::filesystem::path& game_dir, const miss
         }
     }
     auto lib = std::make_shared<AssetLibrary>(game_dir);
+    lib_ = lib;
     lookup_ = [lib](std::string_view l, std::string_view e) -> std::span<const std::uint8_t> {
         try {
             if (const NResEntry* r = lib->find(l, e)) return r->data;
@@ -932,6 +941,14 @@ void Economy::init_object(WorldObject& o) {
     if (const mission::Scheme* s = o.resource.ends_with(".dat") || o.resource.ends_with(".DAT") ? schemes_.get(o.resource) : nullptr) {
         w.size_class = o.building() ? building_size_class(*s) : robot_size(*s);
         if (lookup_) w.st.battery_cap = battery_capacity(*s, lookup_);
+        if (o.building() && lib_ && !w.bound) {
+            w.own = {};
+            w.own.devices = power_devices(*s, *lib_);
+            w.power = w.own.devices.empty() ? nullptr : &w.own;
+            w.last_tick.reset();
+            w.st.has_devices = w.power != nullptr;
+            if (w.power) sync_power(w);
+        }
         if (o.building()) { // [inferred] level = the scheme's place in BuildDat.lst
             if (auto it = data_.build_table.levels.find(o.type); it != data_.build_table.levels.end())
                 for (std::size_t i = 0; i < it->second.size(); ++i)
@@ -1012,6 +1029,7 @@ void Economy::on_object_removed(std::uint32_t lid) {
     w.alive = false;
     w.initialized = false; // a later object with this LogicID starts afresh
     w.mover = nullptr;
+    w.power = nullptr, w.bound = false, w.part_ratio = {}, w.own = {}, w.st.has_devices = false;
     if (const WorldObject* o = world_.find(lid)) {
         leave_distributor(lid, o->clan);
         if (auto* b = brains_ ? brains_(o->clan) : nullptr) // [inferred] a dead robot frees its brain
@@ -1263,15 +1281,69 @@ void Economy::run_tasks(Worker& w) {
     }
 }
 
+void Economy::sync_power(Worker& w) {
+    combat::EnergyBudget& b = *w.power;
+    const auto cap = b.battery_capacity();
+    w.st.battery_cap = cap.value_or(0.f);
+    w.st.battery_frac = b.battery_fraction().value_or(cap ? 1.f : 0.f);
+    combat::EnergyHost host;
+    host.part_ratio = w.part_ratio;
+    w.st.pf = b.power_factor(host);
+}
+
+void Economy::bind_power(std::uint32_t lid, combat::EnergyBudget* budget, std::function<float(std::int32_t)> part_ratio) {
+    Worker& w = worker(lid);
+    if (budget) {
+        if (w.power) budget->set_battery_fraction(w.st.battery_frac); // [port] the charge carries over
+        w.power = budget, w.bound = true, w.part_ratio = std::move(part_ratio);
+    } else {
+        w.power = w.own.devices.empty() ? nullptr : &w.own, w.bound = false, w.part_ratio = {};
+        w.last_tick.reset();
+    }
+    w.st.has_devices = w.power != nullptr;
+    if (w.power) sync_power(w);
+}
+
+const combat::EnergyBudget* Economy::power(std::uint32_t lid) const {
+    const Worker* w = find_worker(lid);
+    return w ? w->power : nullptr;
+}
+
 void Economy::update(std::uint32_t now_ms) {
     const float dt = started_ && now_ms > last_update_ ? float(now_ms - last_update_) * 0.001f : 0.f;
     now_ = last_update_ = now_ms;
-    // [port approximation] the batteries drain by the power the building's devices use.
-    for (auto& [lid, w] : workers_)
-        if (w->alive && w->st.power_usage > 0 && w->st.battery_cap > 0)
+    for (auto& [lid, w] : workers_) {
+        if (!w->alive) continue;
+        if (w->power) {
+            // SetPowerUsage (10019880) → device property 0x500; the own budget's slow tick (UpdateEnergyBudget
+            // 1002d340, every 250 ms with the time since the last one) [port: the host's combat world runs a
+            // bound body's].
+            w->power->set_power_usage(w->st.power_usage);
+            if (!w->bound && now_ms >= w->next_tick) {
+                const float tick_s = float(now_ms - w->last_tick.value_or(now_ms)) * 0.001f;
+                w->last_tick = now_ms, w->next_tick = now_ms + 250;
+                w->own.update(tick_s, no_guns_, combat::EnergyHost{});
+            }
+            sync_power(*w);
+        } else if (w->st.power_usage > 0 && w->st.battery_cap > 0) {
+            // [port approximation] no device data: the batteries drain by the power the building's devices use.
             w->st.battery_frac = std::max(0.f, w->st.battery_frac - w->st.power_usage * dt / w->st.battery_cap);
-    // CSuperAI::Takt calls distributor slot 11 every AI frame.
-    for (auto& [clan, d] : distributors_) d.takt(now_ms, rand_);
+        }
+    }
+    // CSuperAI::Takt calls distributor slot 11 every AI frame; a step's new charge goes back to the control
+    // (SetProperty(1, f), 1002ba30).
+    for (auto& [clan, d] : distributors_) {
+        if (!d.takt(now_ms, rand_)) continue;
+        for (const auto& r : d.records())
+            if (auto it = workers_.find(r.logic_id); it != workers_.end() && it->second->alive && it->second->power) {
+                Worker& w = *it->second;
+                const float before = w.power->battery_fraction().value_or(-1.f);
+                if (w.st.battery_frac != before) {
+                    w.power->set_battery_fraction(w.st.battery_frac);
+                    sync_power(w);
+                }
+            }
+    }
     // Collect first: tasks may create objects (and workers).
     std::vector<Worker*> ws;
     for (auto& [lid, w] : workers_)

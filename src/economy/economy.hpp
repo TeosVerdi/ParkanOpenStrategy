@@ -34,9 +34,14 @@
 //     (+ set_temp_building, placement_ok for the ghost) / order_upgrade (+ can_upgrade) / order_transport.
 //
 // PORT DECISIONS (not traced; marked [inferred] / [port] at their place):
-// - pf (the power factor, Σ device property 0xe00) uses the base-building.md §8 approximation: 1 while the
-//   building's batteries hold charge, 0 when empty; the batteries drain by power_usage · dt. Initial charge
-//   fraction 1.0. Battery capacity = Σ the design's type-0x13 module devices (econ_data.hpp).
+// - Power: a building's control devices (econ_data.hpp power_devices: the design's CTLD devices with its
+//   INTO modules) form a combat::EnergyBudget. The economy runs it on its own 250 ms slow tick [port: no
+//   jitter; part HP ratios 1] until the host binds the building's combat body (bind_power), whose budget the
+//   combat world runs. Every update mirrors 0x204 properties 2 / 1 into EcoState::battery_cap /
+//   battery_frac, pushes power_usage (SetPowerUsage 10019880, device property 0x500) and reads pf (Σ device
+//   property 0xe00 = GetParam(0x300) of the type-0x1a devices, GetPowerFactor 100198e0); a distributor step's
+//   new charge goes back through SetProperty(1) (1002ba30). Objects without device data (headless tests,
+//   units) keep the base-building.md §8 approximation (pf 1 while charged, drain by power_usage·dt).
 // - Task takts run on the MBehaviour task timer (0.45–0.9 s, MB+0x938); dt = elapsed since the task's
 //   previous takt. The builder's tool device is taken as powered (10029420 / 10033250 not modelled).
 // - Bounding spheres for the placement test: Economy::radius (a per-type table unless the host sets
@@ -177,6 +182,11 @@ public:
     // with a strategist, `has_superai(clan)`), the default orders (mines: Mine). Called once at start.
     void start(const std::function<bool(std::uint32_t clan)>& has_superai);
     void set_mover(std::uint32_t lid, Mover* m);
+    // The host's body of a building: its control devices (combat::Combatant::energy, run by the combat world)
+    // and their part HP ratios replace the economy's own budget; the charge carries over. nullptr unbinds.
+    void bind_power(std::uint32_t lid, combat::EnergyBudget* budget, std::function<float(std::int32_t part)> part_ratio = {});
+    // The building's control devices (the bound body's or the economy's own), nullptr without any.
+    const combat::EnergyBudget* power(std::uint32_t lid) const;
     void set_event_sink(std::function<void(const EconomyEvent&)> sink) { sink_ = std::move(sink); }
     // The clan's SuperAI brain list (ISuperAI slots 14–17; owner LogicID, -1 free).
     void set_brains(std::function<std::vector<std::uint32_t>*(std::uint32_t clan)> f) { brains_ = std::move(f); }
@@ -282,6 +292,7 @@ private:
     std::uint32_t* claim_brain(std::uint32_t clan, std::uint32_t owner);
     bool walk(std::uint32_t lid, Vec3 target); // start a walk
     bool walking_done(std::uint32_t lid) const;
+    void sync_power(Worker& w); // 0x204 properties 1 / 2 and pf into the EcoState
 
     game::World& world_;
     EconomyData data_;
@@ -300,6 +311,8 @@ private:
     std::uint32_t now_ = 0, last_update_ = 0;
     bool started_ = false;
     ResourceLookup lookup_;
+    std::shared_ptr<AssetLibrary> lib_; // the device lists of the designs (power_devices)
+    std::vector<combat::GunDevice> no_guns_; // the own budgets have no gun devices (gun −1: off and full)
 };
 
 } // namespace parkan::economy

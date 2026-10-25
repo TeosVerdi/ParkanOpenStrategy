@@ -3,6 +3,7 @@
 #include "core/paths.hpp"
 #include "game/world.hpp"
 #include "res/ctld.hpp"
+#include "res/library.hpp"
 #include "res/nres.hpp"
 
 #include <algorithm>
@@ -223,6 +224,65 @@ float battery_capacity(const mission::Scheme& s, const ResourceLookup& lookup) {
     };
     walk(s.root);
     return sum;
+}
+
+} // namespace parkan::economy
+
+namespace parkan::economy {
+
+std::vector<combat::PowerDevice> power_devices(const mission::Scheme& s, AssetLibrary& lib) {
+    std::vector<combat::PowerDevice> out;
+    auto field = [](const NResEntry& e, std::size_t off) {
+        std::string v(reinterpret_cast<const char*>(e.data.data() + off), 32);
+        v.resize(std::strlen(v.c_str()));
+        return v;
+    };
+    // The CTLD of an objects.rlb BTLU / EXTO / INTO record (+0x100 library, +0x120 entry).
+    auto ctld_of = [&](const NResEntry* e) -> std::optional<Ctld> {
+        if (!e || e->data.size() < 0x140) return std::nullopt;
+        const NResEntry* c = lib.find(field(*e, 0x100), field(*e, 0x120));
+        if (!c || c->type != fourcc("CTLD")) return std::nullopt;
+        try {
+            return decode_ctld(c->data);
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    };
+    auto load = [](const CtldDevice& d, combat::PowerDevice& pd) {
+        std::int32_t st = -1;
+        std::memcpy(&pd.type, d.header.data(), 4);
+        std::memcpy(&st, d.header.data() + 0x18, 4);
+        std::memcpy(&pd.power, d.header.data() + 0x20, 4);
+        std::memcpy(pd.param.data(), d.header.data() + 0x2c, sizeof pd.param);
+        pd.state = combat::PowerDevice::initial_state(pd.cls, st);
+    };
+    const auto walk = [&](auto&& self, const mission::SchemeNode& n, const NResEntry* rec) -> void {
+        const std::size_t first = out.size();
+        std::size_t count = 0;
+        if (auto c = ctld_of(rec)) {
+            for (const auto& d : c->devices) {
+                combat::PowerDevice pd;
+                pd.cls = d.type;
+                load(d, pd);
+                out.push_back(pd);
+            }
+            count = c->devices.size();
+        }
+        for (const auto& ch : n.children) {
+            const NResEntry* e = lib.find("objects.rlb", ch.entry);
+            if (!e) continue;
+            if (e->type == fourcc("EXTO")) {
+                if (ch.mount >= 0) self(self, ch, e);
+                continue;
+            }
+            if (e->type != fourcc("INTO") || ch.one == 0 || ch.mount < 0 || std::size_t(ch.mount) >= count) continue;
+            if (auto c = ctld_of(e); c && !c->devices.empty()) load(c->devices[0], out[first + std::size_t(ch.mount)]);
+        }
+    };
+    const NResEntry* root = lib.find("objects.rlb", s.root.entry);
+    if (root && root->type == fourcc("FORT") && root->data.size() >= 0x40) root = lib.find(field(*root, 0x00), field(*root, 0x20));
+    walk(walk, s.root, root);
+    return out;
 }
 
 } // namespace parkan::economy
