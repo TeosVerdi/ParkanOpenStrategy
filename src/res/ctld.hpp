@@ -35,7 +35,9 @@ struct CtldState {
 
 struct CtldDevice {
     std::uint32_t type = 0;
-    std::int32_t part = 0;
+    // Header +0x18: the initial state, stored to dev+0x50 at load when ≠ −1 (CDevice::Load 10021d50; −1 in every
+    // turret). Not the damage part: that is header +0x04 (weapons-damage.md §8.1, notes/device-props.md).
+    std::int32_t state_override = -1;
     std::array<std::uint8_t, 0xb0> header{};
     std::vector<std::uint32_t> joints;
     std::string text; // the unit module the device stands for (cp1251 as stored)

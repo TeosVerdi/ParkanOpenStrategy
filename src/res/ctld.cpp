@@ -62,7 +62,7 @@ Ctld decode_ctld(std::span<const std::uint8_t> data) {
     for (auto& d : c.devices) {
         std::memcpy(d.header.data(), r.bytes(d.header.size()).data(), d.header.size());
         std::memcpy(&d.type, d.header.data(), 4);
-        std::memcpy(&d.part, d.header.data() + 0x18, 4);
+        std::memcpy(&d.state_override, d.header.data() + 0x18, 4);
         std::uint32_t refs = 0;
         std::memcpy(&refs, d.header.data() + 0xac, 4);
         if (std::size_t(refs) * 4 > r.remaining()) throw FormatError("CTLD device joint list truncated");
