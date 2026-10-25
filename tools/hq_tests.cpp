@@ -219,6 +219,34 @@ void test_turret_state() {
     CHECK(hq.escape() && hq.state() == kStateHqBunker && near(hq.camera.pos.x, 610));
 }
 
+void test_wingman_menu() {
+    // CWingmanMenu (hud-leftovers.md §2.3 / §7): ~ selects all → orders; Shift+~ → pick with 1..9; a digit issues row
+    // n − 1; a new cockpit unit resets the menu; no selected wingman left → the order menu closes.
+    Base b;
+    HqController hq(b.world, nullptr, 0, b.host());
+    const std::vector<std::uint32_t> list{0x11, 0x12, 0x13};
+    hq.wingman_sync(0x10, list);
+    hq.wingman_command(list, false);
+    CHECK(hq.wingman.state == 2 && hq.wingman.selected.size() == 3);
+    hq.wingman_key('1', list, 0x10, kNoObject); // Стоять
+    CHECK(hq.wingman.state == 0 && hq.wingman.selected.empty());
+    CHECK(!b.controls[0x11].orders.empty() && !b.controls[0x13].orders.empty());
+    hq.wingman_command(list, true);
+    CHECK(hq.wingman.state == 1);
+    hq.wingman_key('2', list, 0x10, kNoObject);
+    hq.wingman_key('9', list, 0x10, kNoObject); // out of range: ignored
+    CHECK(hq.wingman.selected == std::vector<std::uint32_t>{0x12});
+    hq.wingman_command(list, false);
+    CHECK(hq.wingman.state == 2);
+    CHECK(!hq.wingman_order_enabled(4, hq.wingman_units(list), kNoObject)); // attack needs a target
+    CHECK(hq.wingman_order_enabled(4, hq.wingman_units(list), 0x20));       // an enemy unit
+    hq.wingman_sync(0x10, {0x11});                                          // 0x12 gone → closes
+    CHECK(hq.wingman.state == 0);
+    hq.wingman_command(list, false);
+    hq.wingman_sync(0x11, list); // another cockpit unit: a new menu
+    CHECK(hq.wingman.state == 0 && hq.wingman.unit == 0x11);
+}
+
 void test_states_and_selection() {
     Base b;
     HqController hq(b.world, nullptr, 0, b.host());
@@ -538,6 +566,7 @@ int hq_unit_tests() {
     test_remote_state();
     test_hq_unit_state();
     test_turret_state();
+    test_wingman_menu();
     return g_fail;
 }
 

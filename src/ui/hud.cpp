@@ -358,7 +358,7 @@ void draw_weapon_rows(OverlayFrame& out, const HudContext& c, const HudState& s)
         default: lamp = 0; break;
         }
         if (!w.selected) lamp = 4;
-        const bool active = true; // the wingman menu is not ported: the row background is always "active"
+        const bool active = s.weapon_rows_active; // the wingman menu closed
         const std::uint32_t ink = active ? 0xffffffffu : 0xff808080u;
         const std::uint32_t name_ink = !active ? 0xff808080u : (w.selected && out_of_zone) ? 0xffff5c5cu : 0xffffffffu;
         cell(kEndingText, 5);

@@ -322,6 +322,73 @@ void HqController::open_designer() {
     say("factory: the unit designer");
 }
 
+void HqController::wingman_sync(std::uint32_t cockpit_unit, const std::vector<std::uint32_t>& list) {
+    if (wingman.unit != cockpit_unit) wingman = {cockpit_unit, 0, {}};
+    if (wingman.state == 2 && wingman_units(list).empty()) wingman.selected.clear(), wingman.state = 0;
+}
+
+void HqController::wingman_command(const std::vector<std::uint32_t>& list, bool shift) {
+    WingmanMenu& w = wingman;
+    if (w.state == 0) {
+        if (list.empty()) return;
+        w.selected.clear();
+        if (!shift) {
+            w.selected = list; // CWingmanMenu_ToggleAll 1006e0d0
+            w.state = 2;
+        } else {
+            w.state = 1;
+        }
+    } else if (w.state == 1) {
+        if (!w.selected.empty()) w.state = 2;
+        else w.state = 0;
+    } else {
+        w.selected.clear(), w.state = 0;
+    }
+}
+
+std::vector<std::uint32_t> HqController::wingman_units(const std::vector<std::uint32_t>& list) const {
+    std::vector<std::uint32_t> out;
+    for (std::uint32_t id : wingman.selected)
+        if (std::find(list.begin(), list.end(), id) != list.end()) out.push_back(id);
+    return out;
+}
+
+bool HqController::wingman_order_enabled(int row, const std::vector<std::uint32_t>& units, std::uint32_t target) const {
+    // COrderMenu_Rebuild (wingman mode): rows 4 / 5 need a target not of the local player, row 5 a building
+    // (not a teleport); rows 2 and 5 need every unit of size class (+0x30) 1 or 2.
+    auto small = [&] {
+        for (std::uint32_t u : units)
+            if (const game::WorldObject* o = world_.find(u); !o || (o->size_class != 1 && o->size_class != 2)) return false;
+        return true;
+    };
+    const game::WorldObject* t = target != game::kNoObject ? world_.find(target) : nullptr;
+    switch (row) {
+    case 2: return small();
+    case 4: return t && t->clan != clan_;
+    case 5: return t && t->clan != clan_ && (t->type & game::kBuildingBit) && t->type != game::kTypeTeleport && small();
+    default: return row >= 0 && row < 7;
+    }
+}
+
+void HqController::wingman_key(char c, const std::vector<std::uint32_t>& list, std::uint32_t hero, std::uint32_t target) {
+    WingmanMenu& w = wingman;
+    if (w.state == 1) {
+        const int i = c - '1';
+        if (i < 0 || i >= int(list.size()) || i >= 16) return;
+        if (auto it = std::find(w.selected.begin(), w.selected.end(), list[std::size_t(i)]); it != w.selected.end()) w.selected.erase(it);
+        else w.selected.push_back(list[std::size_t(i)]);
+    } else if (w.state == 2) {
+        const int row = c - '1';
+        const auto units = wingman_units(list);
+        if (row < 0 || row >= 7 || units.empty() || !wingman_order_enabled(row, units, target)) return;
+        const int cmd = kWingmanOrders[std::size_t(row)].first;
+        if (cmd == 10) execute(cmd, units, game::kNoObject, {}, hero); // IssueAtPoint(units, 10, hero+0x34)
+        else if (cmd == 5 || cmd == 6) execute(cmd, units, target);
+        else execute(cmd, units);
+        w.selected.clear(), w.state = 0;
+    }
+}
+
 bool HqController::hq_capable(std::uint32_t lid) const {
     if (!own_alive(lid) || !host_.unit_stats) return false;
     const auto st = host_.unit_stats(lid);

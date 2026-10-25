@@ -369,6 +369,25 @@ public:
     MenuAction menu_click(float vx, float vy);
     // Save / Load enabled (CUiWidget +0x21; off in multiplayer and launch mode 4). [port] Saving is not ported.
     bool menu_save_enabled = false, menu_load_enabled = true;
+    // The cockpit's wingman menu (CWingmanMenu, cockpit+0x40; notes/hud-leftovers.md §2, §7). `list` = the cockpit
+    // unit's wingmen this frame (its CTargeting+0x14: the local player's units it detects, in detected order).
+    struct WingmanMenu {
+        std::uint32_t unit = game::kNoObject; // +4: rebuilt (state 0, nothing selected) when the cockpit unit changes
+        int state = 0;                        // +8: 0 closed, 1 picking wingmen, 2 the order menu
+        std::vector<std::uint32_t> selected;  // +0xc: unit ids, in selection order
+    } wingman;
+    // Per frame: CCockpit_Draw 10043e90 (a new menu for a new cockpit unit) and COrderMenu_Rebuild (state 2 closes
+    // when no selected wingman is in the list any more).
+    void wingman_sync(std::uint32_t cockpit_unit, const std::vector<std::uint32_t>& list);
+    void wingman_command(const std::vector<std::uint32_t>& list, bool shift);        // CWingmanMenu_OnCommand 1006dfd0
+    // OnGameKeyDown 10071590 while open: state 1 '1'..'9' toggles a wingman (1006e190); state 2 '1'.. picks order
+    // row n − 1 (1006e410). `hero` = the follow target, `target` = the cockpit unit's HUD target (−: none).
+    void wingman_key(char c, const std::vector<std::uint32_t>& list, std::uint32_t hero, std::uint32_t target);
+    std::vector<std::uint32_t> wingman_units(const std::vector<std::uint32_t>& list) const; // 1006e320
+    bool wingman_order_enabled(int row, const std::vector<std::uint32_t>& units, std::uint32_t target) const;
+    // The order rows of table 10104150 (wingman mode): {cmd, text}.
+    static constexpr std::array<std::pair<int, std::uint32_t>, 7> kWingmanOrders{
+        {{1, 5000}, {10, 5008}, {3, 5002}, {4, 5003}, {5, 5004}, {6, 5005}, {8, 5007}}};
     // The unit designer (CHud+8 CConstructorShell): open from the plant panel's constructor button; while open it
     // takes the whole screen and every input.
     Designer* designer() const { return designer_.get(); }
@@ -489,6 +508,9 @@ Vec3 hq_pointer_ray(const HqCamera& cam, float vx, float vy, float aspect);
 // state 5), the current screen and its title, the order menu, the selection box. `objectives` = the
 // objectives screen is up (only the strip is drawn).
 void draw_hq(OverlayFrame& out, const HudContext& c, const HqSprites& sp, const HqController& hq, bool objectives = false);
+// CWingmanPage_Draw 10043510: the cockpit's wingman rows and, in state 2, the wingman order menu.
+void draw_wingman_page(OverlayFrame& out, const HudContext& c, const HqSprites& sp, const HqController& hq,
+                       const std::vector<std::uint32_t>& list, std::uint32_t target);
 // CGameMenu_Draw 10065d00: the in-game menu's page 0 over the dimmed world (view state 7).
 void draw_game_menu(OverlayFrame& out, const HudContext& c, const HqSprites& sp, const HqController& hq);
 

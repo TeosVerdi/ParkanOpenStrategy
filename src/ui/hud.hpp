@@ -114,6 +114,7 @@ struct HudState {
     // Weapon rows (page 6).
     std::vector<HudWeapon> weapons;
     bool infinite_ammo = false;      // building turret: every ammo cell says INF
+    bool weapon_rows_active = true;  // widget+0x21: the row backgrounds, off while the wingman menu is open
     std::optional<Vec2f> lock_point; // the current target on screen (lock brackets)
     // Target (page 1) and own unit (page 2).
     HudUnitPanel own;

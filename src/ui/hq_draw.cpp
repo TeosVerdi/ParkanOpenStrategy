@@ -575,6 +575,51 @@ void draw_model_view(OverlayFrame& out, const VirtualScreen& vs, ModelView& mv, 
     out.insets.push_back(std::move(in));
 }
 
+void draw_wingman_page(OverlayFrame& out, const HudContext& c, const HqSprites& sp, const HqController& hq,
+                       const std::vector<std::uint32_t>& list, std::uint32_t target) {
+    // CWingmanPage_Draw 10043510 (hud-leftovers.md §2.2): row i at (0, 19·i), at most 16 (the page has 16 rows).
+    const Ui ui{out, c, sp, hq};
+    const auto& w = hq.wingman;
+    for (std::size_t i = 0; i < list.size() && i < 16; ++i) {
+        const std::uint32_t lid = list[i];
+        const bool sel = std::find(w.selected.begin(), w.selected.end(), lid) != w.selected.end(), enabled = w.state == 1;
+        Row r{ui, 0, 19.f * float(i)};
+        // CWingmanRow_Paint 1009d930: ending, the number (12), the lamp (3 green selected, 2 yellow2 picking, 4 black),
+        // the class and chassis icons tinted by size class (halved when neither), separator, emitter, the 135-px bar
+        // (health, name), ray end.
+        r.ending(1);
+        r.text_cell(12, std::to_string(i + 1));
+        const int lamp = sel ? 3 : enabled ? 2 : 4;
+        draw_sprite(out, c.vs, c.tex, Sprite{HudPage::UiMenu, 20.f * float(lamp), 50, 19, 19}, r.x, r.y, r.x + 19, r.y + 19);
+        r.x += 19;
+        const game::WorldObject* o = hq.world().find(lid);
+        std::uint32_t tint = unit_kind_tint(o ? o->size_class : 0);
+        if (!sel && !enabled) tint = ((tint >> 1) & 0x7f7f7fu) | 0xff000000u;
+        const auto icon = unit_class_icon(o ? o->type : 0);
+        r.icon_cell(icon ? &*icon : nullptr, tint);
+        const auto st = hq.host().unit_stats ? hq.host().unit_stats(lid) : std::nullopt;
+        const auto chassis = unit_chassis_icon(st ? st->chassis_type : 0);
+        r.icon_cell(chassis ? &*chassis : nullptr, tint);
+        r.separator();
+        r.emitter(sel ? 2 : 0);
+        r.bar(135, int(health(ui, lid)), hq.display_name(lid));
+        r.ray_end();
+    }
+    // State 2: the order menu of the selected wingmen (COrderMenu_Fill wingman mode, table 10104150): 7 rows,
+    // rect x 220..380, y 50 + 19·i. [inferred] Rows drawn as the HQ's order rows; disabled rows grey.
+    if (w.state != 2) return;
+    const auto units = hq.wingman_units(list);
+    for (int k = 0; k < 7; ++k) {
+        const bool on = hq.wingman_order_enabled(k, units, target);
+        Row r{ui, 220, 50 + 19.f * float(k)};
+        r.ending(0);
+        r.emitter(on ? 1 : 0);
+        r.bar(380 - 220 - 5 - 10 - 6, -1, std::to_string(k + 1) + ". " + ui.str(HqController::kWingmanOrders[std::size_t(k)].second),
+              on ? 0xffffffffu : 0xff808080u);
+        r.ray_end();
+    }
+}
+
 void draw_game_menu(OverlayFrame& out, const HudContext& c, const HqSprites& sp, const HqController& hq) {
     // CGameMenu_Draw 10065d00 (notes/game-menu.md): the dimmed world, DrawFramedPanel 1009af40 over the page rect,
     // then CGameMenuMainPage_Draw 10066c80. The multiplayer warning (3077) and the save page are not ported.

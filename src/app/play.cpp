@@ -915,6 +915,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     auto is_friend = [&](std::int32_t i) { return !combat.unit(std::size_t(i)).building() && clan_of(std::size_t(i)) == hero_clan; };
     // CTargeting's detected list (10091de0 over the sensor's objects; port: the living units and buildings
     // within the radar range): the local hero, bridges and ruins are left out.
+    std::function<std::vector<std::uint32_t>()> wingman_list; // set below, after the detected list
     auto detected = [&]() {
         std::vector<std::int32_t> out;
         for (std::size_t i = 0; i < combat.size(); ++i) {
@@ -929,6 +930,14 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             const Vec3 d = c.unit->position() - cu->position();
             if (d.x * d.x + d.y * d.y <= radar_range() * radar_range()) out.push_back(std::int32_t(i));
         }
+        return out;
+    };
+    // CTargeting_RebuildContacts 10091de0: the cockpit unit's wingmen = the local player's units among its contacts
+    // (CUnits, so no buildings), in contact order (hud-leftovers.md §7.2); the hero is never a contact.
+    wingman_list = [&] {
+        std::vector<std::uint32_t> out;
+        for (std::int32_t i : detected())
+            if (!combat.unit(std::size_t(i)).building() && clan_of(std::size_t(i)) == hero_clan) out.push_back(combat.unit(std::size_t(i)).logic_id);
         return out;
     };
     // The interface sounds (ui/game_resources.cfg `object sounds`), CSoundServer::PlaySound: at once.
@@ -1370,6 +1379,23 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             // his target — a unit (type ⊆ 0x103e000) of his clan, alive, within 20 m (2-D) → Push(1, 0, target).
             // [inferred] target+0x30 == 4 is read as "alive"; the capture of a relation-3 clan's unit is not ported.
             const auto enter_key = input::ui_key("CMD_ENTER_STATE", opt.layout);
+            // The wingman menu (hud-leftovers.md §2.3, §7.3): JAMES_WINGMAN_MENU (0x2e4, `~`) in the cockpit views of a
+            // player-controlled unit (not a manned turret, objectives closed): CWingmanMenu_OnCommand 1006dfd0 (Shift →
+            // pick); while open, the digits go to the menu (OnGameKeyDown 10071590) and not to the weapon selection
+            // (CManManager_DisableChannel 1000f070(0)).
+            if (hq && hq->view_mode() == 1 && hq->unit_controlled() && hq->state() != ui::kStateTurret && ctl_mode() != 2 &&
+                !objectives_visible) {
+                const auto wk = input::ui_key("CMD_JAMES_WINGMAN_MENU", opt.layout);
+                if (wk && input::scan_from_hid(int(ev.key.scancode)) == wk->key) {
+                    hq->wingman_command(wingman_list(), (ev.key.mod & SDL_KMOD_SHIFT) != 0);
+                    return;
+                }
+                if (hq->wingman.state != 0 && ev.key.key >= SDLK_0 && ev.key.key <= SDLK_9) {
+                    const std::int32_t t = hud_target >= 0 ? std::int32_t(combat.unit(std::size_t(hud_target)).logic_id) : -1;
+                    hq->wingman_key(char(ev.key.key), wingman_list(), hero.placement->identity, t >= 0 ? std::uint32_t(t) : game::kNoObject);
+                    return;
+                }
+            }
             // JAMES_AUTO_DRIVER (0x2e8, top state 1 or 2): Unit_ToggleAutoDriver 10076410: unit+0x9c 0 → 1 → 2 → 0.
             if (const auto ad = input::ui_key("CMD_JAMES_AUTO_DRIVER", opt.layout);
                 hq && ad && input::scan_from_hid(int(ev.key.scancode)) == ad->key &&
@@ -2742,7 +2768,10 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                         ui::draw_cursor(f, vs, hud_tex, c->second, hq_cursor_frame, hq->mouse_x, hq->mouse_y);
                     }
         } else if (!objectives_visible) {
-            const ui::HudState hs = build_hud(float(f.width) / float(std::max(1u, f.height)));
+            const auto wl = wingman_list();
+            if (hq) hq->wingman_sync(cc->logic_id, wl);
+            ui::HudState hs = build_hud(float(f.width) / float(std::max(1u, f.height)));
+            hs.weapon_rows_active = !hq || hq->wingman.state == 0; // the row backgrounds only with the wingman menu closed
             const std::size_t hud_quads = f.quads.size();
             ui::draw_hud(f, ui::HudContext{vs, game_font, hud_tex, hud_strings}, hs);
             // The targeters' 3D views (CTargeter_Draw 100412a0, hud-leftovers.md §1): the shown object seen from the
@@ -2786,6 +2815,10 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 in.after_quads = f.quads.size();
                 f.insets.push_back(std::move(in));
             };
+            // The wingman page (page 10; not over a manned turret).
+            if (hq && hs.cockpit && hq->state() != ui::kStateTurret)
+                ui::draw_wingman_page(f, ui::HudContext{vs, game_font, hud_tex, hud_strings}, hq_sprites, *hq, wl,
+                                      hud_target >= 0 ? combat.unit(std::size_t(hud_target)).logic_id : game::kNoObject);
             if (hs.cockpit && f.quads.size() > hud_quads) {
                 if (hs.target && hud_target >= 0) targeter_view(std::size_t(hud_target), 9, 315, 137, 443);
                 targeter_view(ctl_ci, 503, 315, 631, 443);
