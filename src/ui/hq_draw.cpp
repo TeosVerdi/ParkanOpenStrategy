@@ -575,6 +575,34 @@ void draw_model_view(OverlayFrame& out, const VirtualScreen& vs, ModelView& mv, 
     out.insets.push_back(std::move(in));
 }
 
+void draw_game_menu(OverlayFrame& out, const HudContext& c, const HqSprites& sp, const HqController& hq) {
+    // CGameMenu_Draw 10065d00 (notes/game-menu.md): the dimmed world, DrawFramedPanel 1009af40 over the page rect,
+    // then CGameMenuMainPage_Draw 10066c80. The multiplayer warning (3077) and the save page are not ported.
+    if (!hq.menu_open()) return;
+    const Ui ui{out, c, sp, hq};
+    fill_rect(out, c.vs, 0, 0, 640, 480, 0x99000000u);
+    framed_panel(ui, 200, 150, 440, 330);
+    fill_rect(out, c.vs, 205, 155, 435, 325, 0xcc328032u);
+    Row title{ui, 210, 160};
+    title.ending(1);
+    title.text_cell(215, ui.str(5085));
+    title.left = true, title.x = 430;
+    title.ending(1);
+    // CGameMenuButton_DrawLampRow 10066250 for Return, Save, Load, Exit.
+    const bool enabled[4] = {true, hq.menu_save_enabled, hq.menu_load_enabled, true};
+    for (int k = 0; k < 4; ++k) {
+        const float y0 = 210 + 25.f * float(k);
+        const bool hover = hq.mouse_x >= 210 && hq.mouse_x < 430 && hq.mouse_y >= y0 && hq.mouse_y < y0 + 25;
+        const int lamp = hover ? 2 : 1;
+        const std::uint32_t argb = !enabled[k] ? 0xff808080u : hover ? 0xffffffffu : 0xff80ff80u;
+        Row r{ui, 210, y0};
+        r.lamp_ending(lamp);
+        r.text_cell(210, ui.str(3080u + std::uint32_t(k)), argb);
+        r.left = true, r.x = 430;
+        r.lamp_ending(lamp);
+    }
+}
+
 void draw_hq(OverlayFrame& out, const HudContext& c, const HqSprites& sp, const HqController& hq, bool objectives) {
     if (!hq.interface_up()) return;
     if (hq.designer_open()) { // CHud_Draw: the constructor shell instead of the HQ interface

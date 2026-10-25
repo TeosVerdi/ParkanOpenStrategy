@@ -9,7 +9,7 @@
 // Port decisions:
 // - Files: "units/<name>.dat" (Save / Load) live in the user's preferences folder (the game folder stays read-only);
 //   Load lists them together with the game's UNITS folder. temp_unit.dat (Deliver) is kept in the scheme cache.
-// - The mount callout lines (§2.5) are drawn from the design's render-mesh node positions [inferred projection].
+// - The mount callout lines (§2.5) are not drawn [deferred]; the row labels use one colour (no font gradient).
 // - The panels' render-state calls whose arguments are hidden (§2.1 step 4, §2.4 step 3) are left out.
 #pragma once
 

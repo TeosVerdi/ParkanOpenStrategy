@@ -733,6 +733,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     };
     std::size_t leaving_frames = 0;
     bool quit = false;
+    std::optional<PlayOutcome::Exit> menu_exit; // the in-game menu's Exit / Load (CGame_LeaveWithLaunchMode 1 / 3)
     std::optional<ui::PagerMessage> pager;
     std::set<std::uint32_t> messages_seen;
     bool objectives_visible = false;
@@ -1293,9 +1294,36 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 else if (ev.key.scancode == SDL_SCANCODE_L) end_ctl.on_char('l');
                 return;
             }
-            // Esc: the HQ's own handling (OnGameKeyDown / ROLLBACK_STATE) in the HQ states; on foot the in-game
-            // menu is not ported, so Esc leaves.
-            if (ev.key.scancode == SDL_SCANCODE_ESCAPE && !(hq && hq->escape())) quit = true;
+            // GAME_MENU (F3, OnUICommandDown case 0xa): the in-game menu (view state 7) opens, or closes when open;
+            // not while placing a building. Esc: ROLLBACK_STATE (the HQ's own handling; on foot nothing to pop).
+            const auto menu_key = input::ui_key("CMD_GAME_MENU", opt.layout);
+            if (hq && menu_key && input::scan_from_hid(int(ev.key.scancode)) == menu_key->key && hq->mode() != ui::kModePlaceBuilding && hq->mode() != ui::kModePlaceMine) {
+                if (hq->menu_open()) hq->pop_state();
+                else hq->open_menu();
+                return;
+            }
+            if (ev.key.scancode == SDL_SCANCODE_ESCAPE && hq) hq->escape();
+        }
+        // The in-game menu takes the pointer: its buttons on the left button; keys other than F3 / Esc do nothing.
+        if (hq && hq->menu_open()) {
+            int ww = 640, wh = 480;
+            SDL_GetWindowSize(window, &ww, &wh);
+            const auto virt = [&](float x, float y) {
+                return std::pair{std::round(x * 640.f / float(std::max(ww, 1))), std::round(y * 480.f / float(std::max(wh, 1)))};
+            };
+            if (ev.type == SDL_EVENT_MOUSE_MOTION) {
+                const auto [vx, vy] = virt(ev.motion.x, ev.motion.y);
+                hq->mouse_move(vx, vy);
+            } else if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
+                const auto [vx, vy] = virt(ev.button.x, ev.button.y);
+                hq->mouse_move(vx, vy);
+                switch (hq->menu_click(vx, vy)) {
+                case ui::HqController::MenuAction::Load: menu_exit = PlayOutcome::Exit::LoadGame, quit = true; break;
+                case ui::HqController::MenuAction::Exit: menu_exit = PlayOutcome::Exit::Shell, quit = true; break;
+                default: break;
+                }
+            }
+            return;
         }
         // The HQ states (3–5, notes/hq-ui.md §2.2, §3.2, §10): the pointer is a cursor on the 640×480 virtual
         // screen, the keys drive the HQ camera and the hardcoded letters; the hero takes no input
@@ -1699,8 +1727,12 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         if (sound && !briefing && sound->music_finished()) sound->play_random_music(false);
     };
 
+    // CGame_SetPaused 1005fb10 (single player): the in-game menu (view state 7) freezes the game time.
+    double paused_ms = 0, last_frame_ms = -1;
     vo.animate = [&](double seconds, std::vector<Mat4>& transforms) {
-        const double now = seconds * 1000.0;
+        if (last_frame_ms >= 0 && hq && hq->menu_open()) paused_ms += seconds * 1000.0 - last_frame_ms;
+        last_frame_ms = seconds * 1000.0;
+        const double now = seconds * 1000.0 - paused_ms;
         voices.update(); // CSoundServer::UpdateQueue, every MainLoop frame
         if (end_ctl.simulating()) {
             // One stdCalculateGame a frame: a mission end inside it stops the rest of the frame's steps.
@@ -2325,6 +2357,17 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         // CHud_Draw: with the objectives screen up only it is drawn; otherwise the cockpit, the satellite
         // map, then the pager.
         hq_aspect = float(f.width) / float(std::max(1u, f.height));
+        if (hq && hq->menu_open()) {
+            // CHud_Draw 1008d680: the in-game menu open → the cursor shown and only the menu drawn (the software
+            // cursor ARROW over it).
+            ui::draw_game_menu(f, ui::HudContext{vs, game_font, hud_tex, hud_strings}, hq_sprites, *hq);
+            if (opt.software_cursor)
+                if (auto c = hq_cursors.find(ui::cursor_name(ui::kCurArrow)); c != hq_cursors.end()) {
+                    if (sim_ms - hq_cursor_tick > c->second.phase_s * 1000) hq_cursor_tick = sim_ms, hq_cursor_frame = (hq_cursor_frame + 1) & 3;
+                    ui::draw_cursor(f, vs, hud_tex, c->second, hq_cursor_frame, hq->mouse_x, hq->mouse_y);
+                }
+            return;
+        }
         if (hq && hq->interface_up()) {
             // CHud_Draw in the HQ states 3–5: the HQ interface instead of the cockpit (HqUi_Draw), the satellite
             // map, the pager in its HQ place.
@@ -2441,6 +2484,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                        : end_ctl.pending_action() == ui::EndAction::LoadGame ? PlayOutcome::Exit::LoadGame
                                                                              : PlayOutcome::Exit::Shell;
     }
+    if (menu_exit) outcome.exit = *menu_exit;
     if (window_closed) outcome.exit = PlayOutcome::Exit::QuitApp;
     if (opt.outcome) *opt.outcome = outcome;
     for (std::size_t i = 0; i < live.size(); ++i) {

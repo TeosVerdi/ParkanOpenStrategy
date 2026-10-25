@@ -9,13 +9,11 @@
 // quads on the 640×480 virtual screen.
 //
 // Port decisions (marked [inferred] / [port] / [deferred] at their place):
-// - View states 1 (piloting a warbot), 2 (remote control), 3 (HQ through a mobile HQ unit), 6 (tower
-//   turret) and 7 (menu) are kept on the stack as the original pushes them, but their views are not ported:
-//   the buttons that lead there are drawn and log the request.
-// - Cursors (ui/*.ani) are not decoded: the app shows the system pointer in the HQ states; the cursor id
-//   (UpdateHqCursor 10058be0) is kept for the tests.
-// - Tooltips (CHud's tooltip window) are not drawn.
-// - The 3D previews (factory 115×115 at (236, 23), research 127×127, the designer's model view) are not drawn.
+// - View states 1 (piloting a warbot), 2 (remote control), 3 (HQ through a mobile HQ unit) and 6 (tower turret)
+//   are refused and logged: their views need the app's controlled unit to move off the hero. State 7 (the in-game
+//   menu) is ported; the app pauses the game while it is open.
+// - Cursors: the system pointer, or with FORCE_SOFTWARE_CURSOR the ui/cursor.cfg sprites (draw_cursor).
+// - The 3D previews (factory 115×115, research 127×127, the designer's views) are overlay insets (draw_model_view).
 // - The unit designer (CConstructorShell / CConstructor) is ui::Designer (ui/designer.hpp); the factory works
 //   with the recent-project list the designer keeps (mission.cfg `object prebuild`, CConstructor_LoadPrebuildProjects
 //   1004e190).
@@ -339,6 +337,15 @@ public:
     // The 3D previews (CModelView): the plant panel's (115×115 at (236, 23)) and the research details' (127×127 at
     // (226, 18)); their turntable angle survives a change of model.
     mutable ModelView factory_view, research_view;
+    // The in-game menu (view state 7, CGameMenu CHud+0xc; notes/game-menu.md): pushed by GAME_MENU or the sidebar,
+    // popped by its Return button or Esc; the host pauses the game while it is open (CGame_SetPaused).
+    enum class MenuAction { None, Resume, Save, Load, Exit };
+    bool menu_open() const { return state() == kStateMenu; }
+    bool open_menu() { return push_state(kStateMenu); }
+    // CGameMenu_OnButton 10065ea0 on page 0: Return pops the state here; the others are the host's.
+    MenuAction menu_click(float vx, float vy);
+    // Save / Load enabled (CUiWidget +0x21; off in multiplayer and launch mode 4). [port] Saving is not ported.
+    bool menu_save_enabled = false, menu_load_enabled = true;
     // The unit designer (CHud+8 CConstructorShell): open from the plant panel's constructor button; while open it
     // takes the whole screen and every input.
     Designer* designer() const { return designer_.get(); }
@@ -459,5 +466,7 @@ Vec3 hq_pointer_ray(const HqCamera& cam, float vx, float vy, float aspect);
 // state 5), the current screen and its title, the order menu, the selection box. `objectives` = the
 // objectives screen is up (only the strip is drawn).
 void draw_hq(OverlayFrame& out, const HudContext& c, const HqSprites& sp, const HqController& hq, bool objectives = false);
+// CGameMenu_Draw 10065d00: the in-game menu's page 0 over the dimmed world (view state 7).
+void draw_game_menu(OverlayFrame& out, const HudContext& c, const HqSprites& sp, const HqController& hq);
 
 } // namespace parkan::ui

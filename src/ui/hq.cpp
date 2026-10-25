@@ -273,6 +273,19 @@ void HqController::open_designer() {
     say("factory: the unit designer");
 }
 
+HqController::MenuAction HqController::menu_click(float vx, float vy) {
+    // CGameMenuMainPage buttons (210, 210 + 25k)-(430, 235 + 25k): Return, Save, Load, Exit.
+    if (!menu_open() || !in(vx, vy, 210, 210, 430, 310)) return MenuAction::None;
+    switch (int((vy - 210) / 25)) {
+    case 0:
+        pop_state(); // ProcessTransitions
+        return MenuAction::Resume;
+    case 1: return menu_save_enabled ? MenuAction::Save : MenuAction::None;
+    case 2: return menu_load_enabled ? MenuAction::Load : MenuAction::None;
+    default: return MenuAction::Exit;
+    }
+}
+
 void HqController::key_char(char c) {
     if (designer_->open()) designer_->key_char(c);
 }
@@ -343,7 +356,8 @@ std::uint32_t HqController::kind_of(std::uint32_t lid) const {
 bool HqController::selected(std::uint32_t lid) const { return std::find(units_.begin(), units_.end(), lid) != units_.end(); }
 
 int HqController::view_mode() const {
-    const int s = state();
+    // ViewTrans_HqToMenu 10064af0 keeps view mode 2 under the menu; the others leave the view below as it was.
+    const int s = state() == kStateMenu && states_.size() >= 2 ? states_[states_.size() - 2].state : state();
     return s == kStateHqUnit || s == kStateHqBunker ? 2 : s == kStateTurret ? 6 : 1;
 }
 
@@ -362,6 +376,9 @@ bool HqController::push_state(int s, std::uint32_t object) {
     } else if (s == kStateInBuilding) {
         // ViewTrans_HeroToBuildingScreen 100648d0: clear the unit selection, the hero's control off, view mode 1.
         clear_units();
+    } else if (s == kStateMenu) {
+        // ViewTrans_HeroToMenu 10064a80 / HqToMenu 10064af0 / BuildingScreenToMenu 10064c40: the controlled unit's
+        // input off, CGameMenu_Show(1) (page 0; the host pauses).
     } else {
         say("view: state " + std::to_string(s) + " is not ported (requested for " + std::to_string(object) + ")");
         return false;
@@ -400,7 +417,8 @@ void HqController::pop_state() {
     if (to == kStateHero && (from == kStateHqBunker || from == kStateInBuilding)) leave_to_hero();
     if (from == kStateInBuilding && screen_ != kScreenNone) set_screen(kScreenNone);
     states_.pop_back();
-    if (state() == kStateHqBunker) enter_hq(state_object());
+    // ViewTrans_MenuTo* (10064b50 / 10064bd0 / 10064c60): Show(0), the view below continues as it was.
+    if (state() == kStateHqBunker && from != kStateMenu) enter_hq(state_object());
     say("view: pop to " + std::to_string(state()));
 }
 
@@ -810,6 +828,10 @@ bool HqController::escape() {
     // OnGameKeyDown 10071240: placement → cancel; view mode 2: the satellite map, else the open screen.
     // [inferred] With nothing open, ROLLBACK_STATE (the same key) pops the view state.
     if (state() == kStateHero) return false;
+    if (state() == kStateMenu) { // ROLLBACK_STATE pops the menu
+        pop_state();
+        return true;
+    }
     if (designer_->open()) {
         designer_->key_escape();
         return true;
@@ -1040,7 +1062,7 @@ bool HqController::click_interface(float vx, float vy) {
             else if (kSidebar[i].screen) set_screen(sidebar_selected(i) ? kScreenNone : kSidebar[i].screen);
             else if (i == 9) say("chat terminal (not ported)");
             else if (i == 10) map_open = !map_open;
-            else if (i == 11) say("game menu: Push(7) (not ported)");
+            else if (i == 11) open_menu();
             return true;
         }
     }

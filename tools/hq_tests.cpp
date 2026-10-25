@@ -127,6 +127,21 @@ void test_camera() {
     CHECK(near(a.fov(), 1.04f - 0.3f, 1e-4f));
 }
 
+void test_game_menu() {
+    // View state 7 (view-states.md §7, game-menu.md): over the hero and over the HQ (view mode 2 kept).
+    Base b;
+    HqController hq(b.world, nullptr, 0, b.host());
+    CHECK(hq.open_menu() && hq.menu_open() && !hq.interface_up() && !hq.hero_controlled());
+    CHECK(!hq.open_menu()); // 7 → 7 has no handler
+    CHECK(hq.menu_click(320, 247) == HqController::MenuAction::None && hq.menu_open()); // Save disabled
+    CHECK(hq.menu_click(320, 222) == HqController::MenuAction::Resume && hq.state() == kStateHero);
+    hq.hero_enters_building(0x10, 0x80000001);
+    hq.camera.pos.x = 777;
+    CHECK(hq.open_menu() && hq.view_mode() == 2);
+    CHECK(hq.menu_click(320, 272) == HqController::MenuAction::Load && hq.menu_click(320, 297) == HqController::MenuAction::Exit);
+    CHECK(hq.escape() && hq.state() == kStateHqBunker && near(hq.camera.pos.x, 777)); // the HQ view continues
+}
+
 void test_states_and_selection() {
     Base b;
     HqController hq(b.world, nullptr, 0, b.host());
@@ -441,6 +456,7 @@ int hq_unit_tests() {
     test_sidebar_animation();
     test_draw();
     test_designer_helpers();
+    test_game_menu();
     return g_fail;
 }
 
