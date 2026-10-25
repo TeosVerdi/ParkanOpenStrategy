@@ -104,7 +104,7 @@ struct SelfInfo {
     bool has_weapons = true;    // QI(0x204) slot 4 property 5 != 0: interrupt attacks, Follow's slot 12
     std::uint32_t size_class = 0; // property 0x201: 1 T, 2 S, 3 M, 4 L (only < 3 capture buildings)
     bool animal() const { return type == kTypeAnimal; }
-    bool building() const { return (logic_id & kBuildingBit) != 0; }
+    bool building() const { return logic_id != kNoObject && (logic_id & kBuildingBit) != 0; }
 };
 
 // MTask: slot 3 SetTarget, 6 StartTask, 7 OnBehaviourTakt (false = the task is over), 9 CheckLimits,
@@ -143,9 +143,13 @@ public:
     const Task* current_task() const { return tasks_.empty() ? nullptr : tasks_.front().get(); }
     float progress() const { return progress_; }
 
-    // OnTakt (10004c40) for an AI unit, every game tick: the observer (100234e0), MovementTakt (slot 56),
-    // then the fire control (10023ff0). Without a Perception only MovementTakt runs (no combat layer).
+    // OnTakt (10004c40) for an AI unit, every game tick: the observer (100234e0), MovementTakt (slot 56;
+    // a building — LogicID bit 31 — runs slot 57, building_takt, instead), then the fire control (10023ff0).
+    // Without a Perception only MovementTakt runs (no combat layer).
     void takt(std::uint32_t now, Wizard& wz);
+    // Slot 57 (100054a0), a building's tick: its task stack every 64–128 ms (the Stop task asks the fire
+    // control for fire at will).
+    void building_takt(std::uint32_t now);
     // MovementTakt alone.
     void movement_takt(std::uint32_t now, Wizard& wz);
     // OnDamageMsg (100064b0): hit by `attacker` → InsertInterrupt({1, attacker}). True if an
@@ -172,6 +176,7 @@ public:
     FireControl fire;                   // MB+0x35c
     ClanMigration* migration = nullptr; // the unit's clan areals (animals)
     MTimer task_timer{0, 7, 7};        // +0x938: 0.45–0.9 s task + path tick
+    MTimer building_timer{0, 1, 1};    // +0x930 (ctor 1000398f): a building's task tick, 64–128 ms
     MTimer refresh_timer{0, 7, 7};     // +0x948: walker refresh between task ticks
     MTimer decision_timer{0, 15, 15};  // +0x958: 0.96–1.92 s CheckRepair / CheckTargets
     MTimer interrupt_timer{0, 31, 46}; // decision part +0x28 (MTimer(2, 3), ctor at 1000387b): 2–4.9 s

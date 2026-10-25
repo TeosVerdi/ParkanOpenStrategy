@@ -1,7 +1,11 @@
 // End-of-mission tests (notes/mission-end.md): the end message's layout for each game state, the
 // controller's transitions and keys, and campaign progression (dispatcher.ini, next mission) — on
 // synthetic data and on a game folder. Linked into parkan-tests.
+#include "combat/combat_world.hpp"
 #include "core/bytes.hpp"
+#include "game/mission_runtime.hpp"
+#include "mission/tma.hpp"
+#include "res/terrain.hpp"
 #include "core/paths.hpp"
 #include "res/library.hpp"
 #include "res/textres.hpp"
@@ -247,6 +251,82 @@ void test_corpus_end(const std::filesystem::path& game) {
     }
 }
 
+// The hero's death (notes/mission-end.md §2.1, weapons-damage.md §5): Tut_2's hero (class 3) shot down by
+// a second robot's laser (property 0xb4 = 7: 7 × the bullet's HP punches through its shield). AddPartHP
+// (10010f30) gives it clan 0xfffe at the killing blow and nothing more: no removal, part 0 not emptied, the
+// other parts keep their HP and stay on (DetachPartDebris skips class 3), it stays in collision. iron3d drops it from its registry in the same frame
+// (1007daa0 → OnUnitRemoved): VOICE_UNIT_LOST, then the failure (VOICE_MISSION_FAIL), the world stops.
+void test_corpus_hero_death(const std::filesystem::path& game) {
+    std::printf("mission end: the hero's death in Tut_2\n");
+    AssetLibrary lib(game);
+    const std::string mission = "MISSIONS/CAMPAIGN/CAMPAIGN.00/Mission.02";
+    const mission::Tma tma = mission::decode_tma(read_file(*resolve_path(*resolve_path(game, mission), "data.tma")));
+    std::string map_dir = tma.land_path;
+    map_dir.resize(map_dir.find_last_of("\\/"));
+    const Terrain terrain = decode_terrain(read_file(*resolve_path(game, map_dir + "/Land.msh")));
+    const TerrainGround ground(terrain);
+    const mission::TmaObject* hero_o = nullptr;
+    for (const auto& o : tma.objects)
+        if (o.identity == 1) hero_o = &o;
+    CHECK(hero_o);
+    if (!hero_o) return;
+    auto hero = LiveUnit::load(lib, *hero_o, ground), foe = LiveUnit::load(lib, *hero_o, ground);
+    const Mat4 m = hero->frame.matrix;
+    Mat4 t2 = m;
+    for (int r = 0; r < 3; ++r) t2.at(r, 0) = -m.at(r, 0), t2.at(r, 1) = -m.at(r, 1);
+    t2.at(0, 3) += m.at(0, 1) * 40, t2.at(1, 3) += m.at(1, 1) * 40;
+    foe->motion->start(0, t2);
+    foe->frame = foe->motion->interpolate(0);
+    combat::CombatWorld world(lib, ground, nullptr);
+    const std::size_t hi = world.add_unit(*hero, 1, 0, true);
+    const std::size_t fi = world.add_unit(*foe, 2, 1, false);
+    combat::Combatant& h = world.unit(hi);
+    combat::Combatant& f = world.unit(fi);
+    f.selected.assign(f.guns.size(), false); // the laser only
+    f.selected[2] = true;
+    f.guns[2].damage_mult = 7;
+    f.set_trigger(true);
+    MissionEndController end;
+    float now = 0, killed = -1, hp_at_kill = 0;
+    std::size_t removed = 0, hits_after = 0;
+    while (now < 30000) {
+        hero->pose_parts();
+        foe->pose_parts();
+        f.aim_point = h.aim_centre();
+        world.update(now += 33);
+        for (const auto& e : world.take_events()) {
+            if (e.type == combat::CombatEvent::Type::Killed && e.unit == std::int32_t(hi)) {
+                killed = now, hp_at_kill = h.damage.total;
+                CHECK(std::string(end.hero_killed()) == kVoiceMissionFail);
+            }
+            if (e.type == combat::CombatEvent::Type::Removed && e.unit == std::int32_t(hi)) ++removed;
+            if (killed >= 0 && now > killed && e.type == combat::CombatEvent::Type::Hit && e.unit == std::int32_t(hi)) ++hits_after;
+        }
+        if (killed >= 0 && now > killed + 10000) break;
+    }
+    std::size_t with_hp = 0;
+    for (const auto& p : h.damage.parts) with_hp += p.present && p.hp > 0;
+    std::printf("  killed at %.2f s, %.0f HP left in %zu parts (of %.0f), %zu removals, %zu hits on it later; state %d\n", killed / 1000,
+                hp_at_kill, with_hp, h.damage.initial, removed, hits_after, int(end.state()));
+    CHECK(killed > 0 && h.damage.clan == combat::kKilledClan && !h.alive() && !h.removed && removed == 0);
+    CHECK(!h.damage.removal_at && hp_at_kill > 0 && with_hp > 0 && h.damage.parts[h.damage.root].destroyed());
+    for (bool d : hero->detached) CHECK(!d); // nothing thrown off
+    CHECK(end.state() == GameState::Failed && !end.simulating());
+    // Still in collision: the foe's shots go on hitting it (in the game the world has stopped by then).
+    CHECK(hits_after > 0);
+    const auto tr = world.trace(foe->position() + Vec3{0, 0, 3}, h.aim_centre(), std::int32_t(fi));
+    CHECK(tr && tr->unit == std::int32_t(hi));
+    // The voices: VOICE_UNIT_LOST (OnUnitRemoved, own unit) then VOICE_MISSION_FAIL, both in voices.lib.
+    if (const auto cfg = resolve_path(game, "UI/game_resources.cfg")) {
+        const Bytes b = read_file(*cfg);
+        std::map<std::string, std::string> voices;
+        for (const auto& o : game::parse_cfg({reinterpret_cast<const char*>(b.data()), b.size()}))
+            if (o.name == "voices")
+                for (const auto& [k, v] : o.entries) voices[k] = v;
+        CHECK(voices.count("VOICE_UNIT_LOST") && lib.find("voices.lib", voices["VOICE_UNIT_LOST"]));
+    }
+}
+
 void test_corpus_campaign(const std::filesystem::path& game) {
     std::vector<Campaign> tree = scan_campaigns(game);
     CHECK(tree.size() == 6);
@@ -308,6 +388,7 @@ int end_corpus_tests(const std::filesystem::path& game) {
     g_fail = 0;
     std::printf("mission end\n");
     test_corpus_end(game);
+    test_corpus_hero_death(game);
     test_corpus_campaign(game);
     return g_fail;
 }

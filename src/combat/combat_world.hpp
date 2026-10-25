@@ -6,12 +6,20 @@
 // Port choices and approximations (inferred where marked):
 // - hit test: the bullet's swept segment against the landscape (TerrainGround::trace), the static
 //   scene's triangles (TraceMesh) and the posed triangles of every live unit and building (the face hit names the
-//   object and mesh part, as Terrain's TraceRay does); units that are dead have left collision;
+//   object and mesh part, as Terrain's TraceRay does); dead units have left collision (the player's robot stays);
 // - seekers (device 0x11): CSeekerDevice::Track + CBulletControl::Update's homing turn (fly()); the gun's
 //   lock-on gate (param 9/10) is kept, so guided guns need a target (set_target);
 // - rockets with their own throttle (bullet property 0x20) start at the gun's speed like the rest;
-// - shields (types 9/0x15) are absent; armour (type 0x1b) is the last one in the unit's scheme
-//   (CreateDevice overwrites ctl+0x5b4; inferred);
+// - force shields (classes 9 + 0x15, combat/energy.hpp): the bullet tests the shield sphere — the mesh's
+//   IVisual GetBoundingSphere(2) (IsShieldActive 1002c500 → AniMesh 10014580), taken as the sphere around
+//   the static pose's part spheres (radius-weighted centre, AniMesh 10009510; inferred: that function is
+//   read only in part) — as a point (bullet radius 0, inferred) before the face hit
+//   (CBulletControl::OnCollision 1000d0c0). Only a sphere the bullet enters during the step counts: the
+//   original takes the object hits from the collision manager's spheres (SweptSphereTOI, whose overlap
+//   case would also report a bullet already inside, e.g. a bunker's shot inside the sphere of the plant
+//   beside it; the collision sphere of a building is not traced: inferred). The hit effect follows the
+//   unit's frame (its part: inferred root);
+// - armour (type 0x1b) is the last one in the unit's scheme (CreateDevice overwrites ctl+0x5b4; inferred);
 // - the impact effect is EXPL fx[0] (the hit face's surface type is not decoded);
 // - the slow tick (SlowTickDamage, then the energy budget, combat/energy.hpp) runs every 250 ms with the
 //   time elapsed since the last one (the original's LFSR jitter is not reproduced);
@@ -58,6 +66,11 @@ public:
     // Unit property 0x73 (GetPropertyImpl 1000e3d1 → 0x204 GetProperty(1)): the batteries' charge; 0 when the
     // unit has none (the HUD energy gauge).
     float battery_fraction() const { return energy.battery_fraction().value_or(0.f); }
+    // Unit property 0x79 (GetPropertyImpl 1000dcc0 → 0x204 slot 0x2c, 1002c430): the six shield sides
+    // 0..1 for the HUD (front, back, left, right, top, bottom); nullopt without a shield and deflector.
+    std::optional<std::array<float, 6>> shield_charges() const { return energy.shield_charges(energy_host()); }
+    // What the devices read from this unit (part ratios, the damage state, the clock; no engine load).
+    EnergyHost energy_host() const;
     // CControlBase part value 1 (1000dc40) of damage part `transform` (a device's dev+4): its HP ratio; 1 for a
     // node without an NDPR record (port) or out of range.
     float part_ratio(std::int32_t transform) const;
@@ -84,6 +97,9 @@ public:
     Vec3 centre() const;      // world bounding-sphere centre
     Vec3 aim_centre() const;  // the root part's mesh sphere centre (the point to aim at), else centre()
     float radius() const { return bound_radius_; }
+    // The shield sphere (IVisual GetBoundingSphere, space 2): world centre and radius.
+    Vec3 shield_centre() const { return unit->frame.matrix.transform_point(shield_centre_); }
+    float shield_radius() const { return shield_radius_; }
     // A building (Terrain CBuilding over a BTLU agent; notes/buildings.md): a static body, no motion.
     bool building() const { return unit && unit->is_static(); }
 
@@ -91,7 +107,10 @@ private:
     friend class CombatWorld;
     Vec3 bound_centre_{}; // in the unit frame
     float bound_radius_ = 1;
+    Vec3 shield_centre_{}; // in the unit frame
+    float shield_radius_ = 0;
     float next_slow_tick_ = 0;
+    std::uint32_t shield_fx_ = 0;         // shield +0xd8: the next of its three hit effects (10025ca0)
     std::optional<float> last_slow_tick_; // ctl+0xec
     // Buildings: the world-space triangles of each draw, rebuilt when its node matrix changes (doors),
     // with a bounding sphere per draw for the segment test (port: the meshes are large and static).
@@ -112,6 +131,7 @@ struct Bullet {
     float range_left = 0;
     float mult = 1;
     std::int32_t target = -1; // the seeker's target (the gun's at the shot; CSeekerDevice +0x98), −1 none
+    float hp = 0;             // ctl+0x590: its HP (NDPR part 0 × mult), spent punching through shields
     bool alive = true;
     bool fresh = true; // spawned this step: flies from the next one (AddObjectToGame)
 };
@@ -121,7 +141,8 @@ struct CombatEvent {
     enum class Type {
         Shot,    // unit fired gun `other` (Bullet spawned at pos)
         Hit,     // a bullet exploded at pos; unit = the unit hit (−1 terrain/static/air), other = shooter
-        Damaged, // OnDamageMsg: unit was in a damage record of attacker `other`; amount = HP lost
+        Damaged, // OnDamageMsg: unit was in a damage record of attacker `other` (or a bullet of `other`
+                 // punched through its shield, amount 0); amount = HP lost
         Killed,  // unit's clan became 0xfffe (amount = time)
         Removed, // unit's removal time passed: MissionRuntime::object_killed, hide it
         Effect,  // start effect `effect` at pos (bullet tracer/muzzle, impact, part explosion)
@@ -139,6 +160,14 @@ struct CombatEvent {
     // Effect on a bullet: BulletProto::end_actions for situations 2/3/4, and the bullet's removal delay.
     std::array<std::int32_t, 3> end_actions{BulletProto::kEffectKeep, BulletProto::kEffectKeep, BulletProto::kEffectKeep};
     float removal_ms = 0;
+    // Effect: the world matrix to start it at, instead of bullet_matrix(pos, axis); with `attached` it
+    // follows unit `unit` from there (CreateEffect attached to the object: the shield's hit effects).
+    std::optional<Mat4> placement{};
+    bool attached = false;
+    // Effect: an instance key; starting one restarts the instance with the same key (the shield's ring of
+    // three, 10025ca0). 0 = a new instance.
+    std::uint32_t handle = 0;
+    std::int32_t start_mode = -1; // Effect: StartEffect's time mode (−1: the template's own start)
 };
 
 // A segment hit in the world.
@@ -183,8 +212,28 @@ public:
     // The angle (rad) between gun `g`'s current barrel and the line from its muzzle to `aim`; π when the
     // muzzle is unknown. The AI's weapon / turret aim error (device slot 0x28) stand-in.
     float aim_error(std::size_t unit, std::size_t gun, Vec3 aim) const;
+    // CTurretDevice state 0x400 ("AI point") on unit `u`'s turret toward `aim`: the yaw / pitch channels slew
+    // (TurretRig::slew, `dt_s` s) toward the angles seen from the first gun's muzzle, and the gun channels
+    // add kGunElevation · the ballistic elevation of the turret's first ballistic gun (AimGunChannel; one
+    // offset for every gun channel: port); each turret gun's fire-enabled byte (dev+0x118) is whether its
+    // shot can reach `aim`. Nothing without a turret.
+    void ai_aim(std::size_t u, Vec3 aim, float dt_s);
+    // The weapon's aim error for the fire control (device slot 0x28 stand-in): for a free-flying bullet on
+    // a turret, the sight's error (its shots converge on the sight); for a ballistic one, the barrel against
+    // the direction AimGunChannel commands (from the turret centre to `aim`, raised by kGunElevation · its
+    // elevation); else aim_error.
+    float ai_aim_error(std::size_t u, std::size_t g, Vec3 aim) const;
     // Gun `g`'s muzzle in the world (current pose), if it has one.
     std::optional<Vec3> muzzle(std::size_t unit, std::size_t gun) const;
+
+    // AimGunChannel's ballistic solution (10028200), for a shot at `d` (target − muzzle) at speed `v` under
+    // gravity `g` (the gun's +0x98 · IWorld gravity: 0 for a bullet without ballistics): the flight time
+    // T² = 2(B ∓ √(B² − g²|d|²))/g², B = v² − g·d.z (the shorter when positive), the launch direction
+    // (d.xy/T, (g·T²/2 + d.z)/T) and the angle between it and `d`. nullopt: out of reach (the gun's
+    // fire-enabled byte dev+0x118 is cleared). g = 0 or v = 0: angle 0.
+    static std::optional<float> ballistic_elevation(Vec3 d, float v, float g);
+    static constexpr float kGravity = 10.f;     // IWorld::GetGravity default (control-physics.md)
+    static constexpr float kGunElevation = 0.83f; // 1003cb38: the share of that angle AimGunChannel adds
 
     // MatrixFromDir (1002b0f0): y = dir, x = dir × up(0,0,1), at `pos`.
     static Mat4 bullet_matrix(Vec3 pos, Vec3 dir);
@@ -197,7 +246,12 @@ private:
     void spawn(std::size_t unit, std::size_t gun, Vec3 pos, Vec3 dir);
     std::optional<Vec3> seek(const Bullet& b) const;
     void fly(Bullet& b, float dt_ms, float now);
-    void explode(const Bullet& b, const Expl& e, Vec3 pos, std::int32_t target, std::int32_t part);
+    void explode(const Bullet& b, const Expl& e, Vec3 pos, std::int32_t target, std::int32_t part, std::int32_t side = -1);
+    // GetShieldSide (1002c590) for a hit at world point `p`: the side (−1: no active shield) and, when its
+    // strength is > 0, the hit effect (10025ca0).
+    std::int32_t shield_side(std::size_t unit, Vec3 p);
+    // AbsorbByShield (1000ff00) on a copy of `rec` for victim `v`: the shield takes min(strength, damage).
+    void absorb_by_shield(std::size_t v, DamageRecord& rec);
     void process_records(float now);
     void apply_record(std::size_t victim, const DamageRecord& rec, float now);
     void drain_explosions(std::size_t unit);

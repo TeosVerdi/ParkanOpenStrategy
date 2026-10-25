@@ -74,7 +74,13 @@ float EnergyBudget::demand(const PowerDevice& d, const std::vector<GunDevice>& g
         if (d.state == 0x1000) v -= get_param(d, 4, host) * dt;
         return v;
     }
-    default: // CDevice 10021860 (also the shield's need with full charges: 10025700, see the file comment)
+    case 9: { // 10025700: idle draw + param2 per unit of charge restored, min(param1·health·dt, missing)
+        float sum = 0;
+        for (const float c : d.sides) sum += c;
+        const float regen = get_param(d, 0x101, host) * dt, missing = (6 - sum) * shield_capacity(d);
+        return -(dt * d.power) - get_param(d, 2, host) * (missing < regen ? missing : regen);
+    }
+    default: // CDevice 10021860
         return -(dt * d.power);
     }
 }
@@ -117,7 +123,19 @@ void EnergyBudget::grant(PowerDevice& d, std::vector<GunDevice>& guns, float dt,
         if (e < 0 && d.state == 0x1000) d.state = 0x2000;
         return;
     }
-    default: // CDevice 10021890 (engines, 0x1a, shields: see the file comment)
+    case 9: { // 100257b0: what is left after the idle draw charges (or, under-supplied, drains) the sides
+        d.ratio = ratio;
+        const float e = -(demand(d, guns, dt, host) * ratio) - dt * d.power;
+        if (e == 0) return;
+        const float p2 = get_param(d, 2, host);
+        float x;
+        if (p2 > 0) x = e / p2;
+        else x = e > 0 ? get_param(d, 0x101, host) * dt : -(get_param(d, 0x101, host) * dt);
+        const float cap = shield_capacity(d);
+        if (cap > 0) spread_charge(d, x / (cap * 6)); // 1003c978 = 6
+        return;
+    }
+    default: // CDevice 10021890 (engines, 0x1a, the deflector 0x15)
         d.ratio = ratio;
         return;
     }
@@ -156,6 +174,66 @@ void EnergyBudget::update(float dt, std::vector<GunDevice>& guns, const EnergyHo
     const float k = dt > 0.0001f ? 1.f / dt : 0.f;      // 1003bc8c
     drain_a = -((bucket_[2] + bucket_[5] + bucket_[0]) * k);
     drain_b = -((bucket_[4] + bucket_[3] + bucket_[0]) * k);
+}
+
+// FUN_10025a90: `x` (a fraction of the six sides' total) is spread over the sides, a gain in proportion
+// to what each lacks, a loss in proportion to what each holds; at most all of it.
+void EnergyBudget::spread_charge(PowerDevice& d, float x) {
+    float mean = 0;
+    for (const float c : d.sides) mean += c;
+    mean *= 1.f / 6; // 1003c980
+    if (x > 0) {
+        if (mean == 1) return;
+        const float f = std::min(1.f, x / (1 - mean));
+        for (float& c : d.sides) c += (1 - c) * f;
+    } else if (x < 0 && mean != 0) {
+        const float f = std::min(1.f, -x / mean);
+        for (float& c : d.sides) c -= f * c;
+    }
+}
+
+bool EnergyBudget::shield_active(const EnergyHost& host) const {
+    if (shield < 0 || deflector < 0) return false;
+    const PowerDevice &s = devices[std::size_t(shield)], &f = devices[std::size_t(deflector)];
+    return s.state != 0 && !broken(s, host) && f.state != 0 && !broken(f, host);
+}
+
+float EnergyBudget::side_strength(std::size_t side, const EnergyHost& host) const {
+    if (shield < 0 || deflector < 0 || side >= 6) return 0;
+    const PowerDevice& s = devices[std::size_t(shield)];
+    // 1003ccb0[side] = 0x300 | side; FUN_10025bc0: GetParam(0) · +0x98[side].
+    return get_param(devices[std::size_t(deflector)], 0x300 | std::uint32_t(side), host) * (shield_capacity(s) * s.sides[side]);
+}
+
+void EnergyBudget::set_side_strength(std::size_t side, float strength, const EnergyHost& host) {
+    if (shield < 0 || deflector < 0 || side >= 6) return;
+    const float w = get_param(devices[std::size_t(deflector)], 0x300 | std::uint32_t(side), host);
+    if (!(w > 0)) return;
+    PowerDevice& s = devices[std::size_t(shield)];
+    const float cap = shield_capacity(s);
+    if (cap == 0) return; // port guard: FUN_10025be0 divides by GetParam(0) (no data has capacity 0)
+    // FUN_10025be0(side, strength/w − GetParam(0)·charge): charge += Δ / GetParam(0), clamped to [0, 1].
+    float& c = s.sides[side];
+    c = std::clamp(c + (strength / w - cap * c) / cap, 0.f, 1.f);
+}
+
+std::optional<std::array<float, 6>> EnergyBudget::shield_charges(const EnergyHost& host) const {
+    if (shield < 0 || deflector < 0) return std::nullopt;
+    const PowerDevice& f = devices[std::size_t(deflector)];
+    const float h = host.part_ratio && f.part >= 0 ? host.part_ratio(f.part) : 1.f; // part value 1 of dev+4
+    std::array<float, 6> out = devices[std::size_t(shield)].sides;
+    for (float& c : out) c = c * h * f.ratio;
+    return out;
+}
+
+std::size_t EnergyBudget::shield_side(Vec3 d) {
+    const float ax = std::abs(d.x), ay = std::abs(d.y), az = std::abs(d.z);
+    if (ax <= d.y && az <= d.y) return 0;
+    if (d.y <= -ax && d.y <= -az) return 1;
+    if (d.x <= -ay && d.x <= -az) return 2;
+    if (ay <= d.x && az <= d.x) return 3;
+    if (ax <= d.z && ay <= d.z) return 4;
+    return 5;
 }
 
 std::optional<float> EnergyBudget::battery_fraction() const {

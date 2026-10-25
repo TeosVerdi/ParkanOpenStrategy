@@ -3,6 +3,7 @@
 // a fake world; corpus tests on the game: every placed building loads with its HP, a deterministic
 // capture of Tut_2's Large Factory that completes the script's objective 0, and the hangar shot down to
 // its removal, which the Tut_2 script reports as a failed mission. Linked into parkan-tests.
+#include "ai/ai_unit.hpp"
 #include "ai/behaviour.hpp"
 #include "ai/wizard.hpp"
 #include "combat/combat_world.hpp"
@@ -228,8 +229,19 @@ void test_corpus_hp(AssetLibrary& lib, const std::filesystem::path& game, const 
             // The building's pose (no door moved) equals the static pose of its render mesh at the placement.
             const LiveUnit& u = b.body();
             const Mat4 place = tma_placement(o);
+            // Turret parts (bunkers, towers) are posed by their rig at its default aim, like a unit's turret.
+            auto turret = [&](std::size_t t) {
+                if (!u.rig) return false;
+                for (std::size_t pi = u.model.parts.size(); pi-- > 0;) {
+                    if (t < u.model.parts[pi].transform_base) continue;
+                    for (int q = int(pi); q >= 0; q = u.model.parts[std::size_t(q)].parent)
+                        if (std::size_t(q) == u.turret_part) return true;
+                    return false;
+                }
+                return false;
+            };
             for (std::size_t t = 1; t < u.posed.size() && t < u.model.mesh.transforms.size(); ++t) {
-                if (b.moving_transform(t)) continue;
+                if (b.moving_transform(t) || turret(t)) continue;
                 const Mat4 want = place * u.model.mesh.transforms[t];
                 float err = 0;
                 for (int r = 0; r < 3; ++r)
@@ -395,6 +407,129 @@ void test_tut2_destroy(AssetLibrary& lib, const std::filesystem::path& game) {
     CHECK(rt->mission_over() && !rt->mission_complete()); // tut2_pl2: GetObjectClan(0x80000003) == ERROR → failed
 }
 
+// Building guns (MBehaviour slot 57 + MFireControl::Takt 10023ff0 for a building; CTurretDevice state 0x400
+// and AimGunChannel 10028200; the gun devices fire through the combat world): Tut_3's bunker (sbunk01:
+// fr_l_bunker, turret e_bnt_lt_01 with two e_gun_fc_08 mortars, bullet bf_f_01: speed 45, ballistic, range
+// 250) and a hostile robot 50° to the right of its front.
+void test_bunker_fire(AssetLibrary& lib, const std::filesystem::path& game) {
+    std::printf("buildings corpus: Tut_3's bunker fires at an enemy (fire control, turret aim)\n");
+    const std::string mission = "MISSIONS/CAMPAIGN/CAMPAIGN.00/Mission.03";
+    const mission::Tma tma = mission::decode_tma(read_file(*resolve_path(*resolve_path(game, mission), "data.tma")));
+    std::unique_ptr<Terrain> terrain;
+    const TerrainGround ground = load_ground(game, tma, terrain);
+    const mission::TmaObject *bunker_o = nullptr, *hero_o = nullptr;
+    for (const auto& o : tma.objects) {
+        if (o.kind == 0 && o.resource.find("BUNKER") != std::string::npos) bunker_o = &o;
+        if (o.identity == 1) hero_o = &o;
+    }
+    CHECK(bunker_o && hero_o);
+    if (!bunker_o || !hero_o) return;
+    struct Result {
+        std::size_t shots = 0, landed = 0;
+        float first_shot = -1, yaw_error = 10, lateral = 0, along = 0, want_along = 0;
+    };
+    auto fight = [&](float dist) {
+        Result r;
+        Building bunker(LiveUnit::load_building(lib, *bunker_o));
+        LiveUnit& body = bunker.body();
+        combat::CombatWorld world(lib, ground, nullptr);
+        const std::size_t bi = world.add_unit(body, bunker_o->identity, bunker_o->ai_index, false);
+        combat::Combatant& b = world.unit(bi);
+        CHECK(body.rig && b.guns.size() == 2 && b.mounts[0].on_turret() && b.mounts[1].on_turret());
+        if (!body.rig || b.guns.size() != 2) return r;
+        auto enemy = LiveUnit::load(lib, *hero_o, ground);
+        const Mat4& bm = body.frame.matrix;
+        const Vec3 fwd = normalize(Vec3{bm.at(0, 1), bm.at(1, 1), 0}), right = normalize(Vec3{bm.at(0, 0), bm.at(1, 0), 0});
+        Vec3 at = body.position() + (fwd * std::cos(0.87f) + right * std::sin(0.87f)) * dist;
+        if (auto g = ground.probe(at + Vec3{0, 0, 500}, 1000)) at.z = g->z;
+        enemy->motion->start(0, Mat4::translation(at));
+        enemy->frame = enemy->motion->interpolate(0);
+        const std::size_t ei = world.add_unit(*enemy, 7, 0, false);
+        combat::Combatant& e = world.unit(ei);
+        FakeWorld fw;
+        ai::SeenObject so;
+        so.logic_id = 7, so.clan = 0, so.pos = enemy->position(), so.radius = e.radius();
+        fw.objs.push_back(so);
+        ai::MsvcRand rng{1};
+        LandMap lm = big_square();
+        const ai::ArealGraph graph = ai::ArealGraph::build(lm);
+        ai::BuildingAi brain(lm, graph, [&rng] { return rng(); }, [&body] { return body.frame.matrix; });
+        ai::SelfInfo self;
+        self.logic_id = bunker_o->identity, self.clan = bunker_o->ai_index, self.type = 0x80010000;
+        auto& fc = brain.fire_control();
+        fc.weapons.clear();
+        for (std::size_t g = 0; g < b.guns.size(); ++g) { // as play.cpp arms a brain
+            ai::Weapon w;
+            w.group = 0;
+            const auto& joints = b.guns[g].joints();
+            const std::uint32_t j = b.guns[g].barrel_joint(0);
+            const float step_ms = j < joints.size() && joints[j].rate > 0 ? 1000.f / joints[j].rate : 0.f;
+            w.rate = 1000.f / std::max(1.f, step_ms + b.guns[g].param(3));
+            w.height = b.guns[g].bullet()->range, w.near = 5, w.opt = (w.height + 1) * 0.5f, w.far = (w.height + 1) * 2;
+            w.aim_error = 3.1415927f;
+            fc.weapons.push_back(w);
+        }
+        fc.turret_error.assign(1, 3.1415927f);
+        brain.set_perception(&fw, self);
+        // The shell's flight on the commanded barrel (pitch to the target + 0.83 of the ballistic elevation),
+        // over level ground at the target's height: where it should come down.
+        std::optional<Vec3> muzzle0;
+        for (float now = 33; now < 20000; now += 33) {
+            brain.update(now);
+            const ai::FireRequest& fr = brain.fire();
+            b.target = fr.target == 7 ? std::int32_t(ei) : -1;
+            if (b.target >= 0) {
+                const Vec3 aim = e.aim_centre();
+                float err = 3.1415927f;
+                for (std::size_t g = 0; g < b.guns.size(); ++g) {
+                    fc.weapons[g].aim_error = world.ai_aim_error(bi, g, aim);
+                    err = std::min(err, fc.weapons[g].aim_error);
+                    if (fr.trigger & (1u << g)) b.set_gun_state(g, combat::kFireSingle);
+                }
+                fc.turret_error[0] = err;
+                if (fr.track) world.ai_aim(bi, aim, 0.033f);
+            }
+            body.pose_parts();
+            enemy->pose_parts();
+            world.update(now);
+            for (const auto& ev : world.take_events()) {
+                if (ev.type == combat::CombatEvent::Type::Shot && ev.unit == std::int32_t(bi)) {
+                    if (!r.shots++) {
+                        r.first_shot = now;
+                        muzzle0 = ev.pos;
+                        r.yaw_error = world.ai_aim_error(bi, std::size_t(ev.other), e.aim_centre());
+                    }
+                }
+                if (ev.type == combat::CombatEvent::Type::BulletEnded && ev.amount == 2 && muzzle0) {
+                    ++r.landed;
+                    const Vec3 to = e.aim_centre() - *muzzle0, h = normalize(Vec3{to.x, to.y, 0});
+                    const Vec3 d = ev.pos - *muzzle0;
+                    r.along = dot(d, h), r.lateral = std::abs(dot(d, Vec3{-h.y, h.x, 0}));
+                    const float elev = combat::CombatWorld::ballistic_elevation(to, 45, 10).value_or(0);
+                    const float th = std::atan2(to.z, std::hypot(to.x, to.y)) + combat::CombatWorld::kGunElevation * elev;
+                    const float vh = 45 * std::cos(th), vz = 45 * std::sin(th), dz = ev.pos.z - muzzle0->z;
+                    const float t = (vz + std::sqrt(vz * vz - 2 * 10 * dz)) / 10;
+                    r.want_along = vh * t;
+                }
+            }
+        }
+        return r;
+    };
+    const Result near = fight(120);
+    std::printf("  at 120 m: first shot %.2f s (barrel %.3f rad off its command), %zu shots, %zu landed: %.1f m along (want %.1f), %.2f m aside\n",
+                near.first_shot / 1000, near.yaw_error, near.shots, near.landed, near.along, near.want_along, near.lateral);
+    // The turret slews first (0.6 t/s yaw over 50°), then the weapon timers pace the shots.
+    CHECK(near.shots >= 5 && near.first_shot > 300 && near.yaw_error < 0.05f && near.landed >= 4);
+    // The turret aims from its centre; the mortars sit parallel beside it (≈ 1.8 m), and their elevation is
+    // taken from the muzzle: the shells land within 2 m of the line's prediction.
+    CHECK(std::abs(near.along - near.want_along) < 2.f && near.lateral < 2.5f);
+    // Beyond the mortar's reach (v²/g = 202.5 m on the level): AimGunChannel finds no flight time, the
+    // guns' fire-enabled byte is cleared (state 7) and nothing is fired.
+    const Result far = fight(240);
+    std::printf("  at 240 m: %zu shots\n", far.shots);
+    CHECK(far.shots == 0);
+}
+
 } // namespace
 
 int building_unit_tests() {
@@ -415,5 +550,6 @@ int building_corpus_tests(const std::filesystem::path& game) {
     }
     test_tut2_capture(lib, game);
     test_tut2_destroy(lib, game);
+    test_bunker_fire(lib, game);
     return g_fail;
 }

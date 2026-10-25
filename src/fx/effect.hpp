@@ -92,6 +92,9 @@ std::shared_ptr<const FxEffect> load_effect(AssetLibrary& lib, std::string_view 
 // The origin is the points' centroid.
 Mat4 contact_frame(const std::array<Vec3, 3>& pos, const std::array<Vec3, 3>& vec);
 
+// The inverse of an affine matrix (identity when singular): an attached effect's matrix relative to its owner.
+Mat4 inverse_affine(const Mat4& m);
+
 class EffectInstance {
 public:
     // CreateEffect: the instance starts at `now` (unless header flag 0x40) and sits at `world`.

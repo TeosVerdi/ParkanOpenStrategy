@@ -15,7 +15,6 @@ namespace parkan::combat {
 
 namespace {
 
-constexpr float kGravity = 10.f;        // IWorld::GetGravity default (control-physics.md)
 constexpr float kLateralDamping = 3.f;  // CBulletControl::Update: v_x, v_z → 0 at 3 m/s² (body[21] = 0)
 constexpr float kSightNear = 5.f;       // ConvergeOnSight: the sight ray starts 5 m out
 constexpr float kSightFar = 4000.f;     // … and runs to 1e6 m (port: 4 km, past every map)
@@ -74,6 +73,12 @@ void Combatant::set_gun_state(std::size_t gun, std::uint32_t state) {
 void Combatant::fire_mask(std::uint32_t mask) {
     for (std::size_t i = 0; i < guns.size() && i < 32; ++i)
         if (mask & (1u << i)) guns[i].set_state(kFireSingle);
+}
+
+EnergyHost Combatant::energy_host() const {
+    EnergyHost host;
+    host.part_ratio = [this](std::int32_t t) { return part_ratio(t); };
+    return host;
 }
 
 float Combatant::part_ratio(std::int32_t t) const {
@@ -316,6 +321,8 @@ std::size_t CombatWorld::add_unit(LiveUnit& u, std::uint32_t logic_id, std::uint
         std::memcpy(&pd.power, dev.header.data() + 0x20, 4);
         std::memcpy(pd.param.data(), dev.header.data() + 0x2c, sizeof pd.param);
         pd.state = PowerDevice::initial_state(pd.cls, st);
+        // CDevice::Load → slot 9 (+0x6c, +0x8c): the shield's effect (10025600); a gun's bullet is its own.
+        if (pd.cls == 9) pd.effect = {record_field(dev.header, 0x6c), record_field(dev.header, 0x8c)};
     };
     for (std::size_t pi = 0; pi < model.parts.size(); ++pi) {
         const UnitPart& part = model.parts[pi];
@@ -334,6 +341,9 @@ std::size_t CombatWorld::add_unit(LiveUnit& u, std::uint32_t logic_id, std::uint
             std::int32_t id = 0;
             std::memcpy(&id, dev.header.data() + 4, 4);
             pd.part = id < 0 ? -1 : std::int32_t(part.transform_base) + id;
+            // CreateDevice (1002d4b0): ctl+0x5cc / +0x5d0 hold the force shield / the deflector.
+            if (pd.cls == 9) c->energy.shield = std::int32_t(c->energy.devices.size());
+            if (pd.cls == 0x15) c->energy.deflector = std::int32_t(c->energy.devices.size());
             c->energy.devices.push_back(pd);
         }
         part_count[pi] = ctld.devices.size();
@@ -425,6 +435,29 @@ std::size_t CombatWorld::add_unit(LiveUnit& u, std::uint32_t logic_id, std::uint
         }
     }
     c->bound_radius_ = std::max(0.5f, std::sqrt(r2) * 1.25f);
+    // The mesh's bounding sphere (AniMesh 10009510): the part spheres in the static pose, centred at
+    // their radius-weighted mean, reaching the farthest sphere's edge.
+    {
+        Vec3 sum{};
+        float weight = 0;
+        std::vector<std::pair<Vec3, float>> sph;
+        for (std::size_t t = 0; t < d.parts.size() && t < model.mesh.transforms.size(); ++t) {
+            const DamagePart& p = d.parts[t];
+            if (!p.present || p.sphere_radius <= 0) continue;
+            const Vec3 q = model.mesh.transforms[t].transform_point(p.sphere_centre);
+            sph.push_back({q, p.sphere_radius});
+            sum = sum + q * p.sphere_radius, weight += p.sphere_radius;
+        }
+        if (weight > 0) {
+            c->shield_centre_ = sum * (1 / weight);
+            for (const auto& [q, r] : sph) {
+                const Vec3 e = q - c->shield_centre_;
+                c->shield_radius_ = std::max(c->shield_radius_, std::sqrt(dot(e, e)) + r);
+            }
+        } else {
+            c->shield_centre_ = c->bound_centre_, c->shield_radius_ = c->bound_radius_;
+        }
+    }
     units_.push_back(std::move(c));
     return units_.size() - 1;
 }
@@ -461,6 +494,92 @@ float CombatWorld::aim_error(std::size_t u, std::size_t g, Vec3 aim) const {
     return std::acos(std::clamp(dot(dir, to), -1.f, 1.f));
 }
 
+namespace {
+// `d` turned up by `angle` in its vertical plane.
+Vec3 raise(Vec3 d, float angle) {
+    const float h = std::hypot(d.x, d.y), len = std::sqrt(dot(d, d));
+    if (h <= 0 || len <= 0) return d;
+    const float e = std::atan2(d.z, h) + angle;
+    return Vec3{d.x / h * std::cos(e), d.y / h * std::cos(e), std::sin(e)} * len;
+}
+} // namespace
+
+void CombatWorld::ai_aim(std::size_t u, Vec3 aim, float dt_s) {
+    Combatant& c = *units_[u];
+    LiveUnit& body = *c.unit;
+    if (!body.rig) return;
+    // The angles are taken about the turret's centre (AngleAboutAxis 10026e20 on the TurretCenter /
+    // TurretDirect points: the yaw joint's point A, the sight origin the guns converge from), else from
+    // the first gun's muzzle. p5 of AimGunChannel: the world z of that point's vector (1 for a level turret).
+    Vec3 mount = body.position() + Vec3{0, 0, 2}, axis{0, 0, 1};
+    bool centred = false;
+    for (const auto& gm : c.mounts)
+        if (gm.on_turret() && part_point(c, gm.sight_part, gm.sight_points, gm.sight_origin, mount, &axis)) {
+            centred = true;
+            break;
+        }
+    for (std::size_t g = 0; g < c.guns.size() && !centred; ++g)
+        if (auto mz = muzzle(u, g)) {
+            mount = *mz;
+            break;
+        }
+    const float up_z = axis.z;
+    // The angles in the body frame (yaw > 0 right, pitch > 0 up; ai::aim_angles).
+    const Mat4& m = body.frame.matrix;
+    const Vec3 fwd{m.at(0, 1), m.at(1, 1), m.at(2, 1)}, right{m.at(0, 0), m.at(1, 0), m.at(2, 0)}, up{m.at(0, 2), m.at(1, 2), m.at(2, 2)};
+    const Vec3 d = aim - mount;
+    const float x = dot(d, right), y = dot(d, fwd), z = dot(d, up);
+    const float yaw = std::atan2(x, y), pitch = std::atan2(z, std::hypot(x, y));
+    const auto [tx, ty] = body.rig->inputs_for_angles(yaw, pitch);
+    body.rig->slew(body.aim_x, body.aim_y, tx, ty, dt_s);
+    float elev = 0;
+    bool found = false;
+    for (std::size_t g = 0; g < c.guns.size(); ++g) {
+        const BulletProto* b = c.guns[g].bullet();
+        if (!c.mounts[g].on_turret() || !b) continue;
+        const Vec3 from = muzzle(u, g).value_or(mount);
+        const auto e = ballistic_elevation(aim - from, b->speed, b->physics == 3 ? kGravity : 0.f);
+        c.guns[g].enabled = e.has_value();
+        if (e && b->physics == 3 && !found) elev = *e, found = true;
+    }
+    body.gun_aim_y = found ? body.rig->inputs_for_angles(yaw, pitch + kGunElevation * elev * up_z).second - ty : 0.f;
+}
+
+float CombatWorld::ai_aim_error(std::size_t u, std::size_t g, Vec3 aim) const {
+    const Combatant& c = *units_[u];
+    const BulletProto* b = g < c.guns.size() ? c.guns[g].bullet() : nullptr;
+    const auto from = muzzle(u, g);
+    Vec3 o, sd;
+    if (b && b->physics == 0 && g < c.mounts.size() && sight(c, c.mounts[g], o, sd)) {
+        // A free-flying bullet converges on the sight (ConvergeOnSight): the sight's error counts.
+        const Vec3 to = aim - o;
+        const float len = std::sqrt(dot(to, to));
+        return len > 0 ? std::acos(std::clamp(dot(sd, to * (1 / len)), -1.f, 1.f)) : 0.f;
+    }
+    if (!b || b->physics != 3 || !from || !c.mounts[g].on_turret()) return aim_error(u, g, aim);
+    // The barrel against the direction the turret commands from its centre (the yaw joint's point A): the
+    // line to `aim` raised by AimGunChannel's share of the elevation; the guns sit parallel beside it.
+    Vec3 centre = *from, unused;
+    part_point(c, c.mounts[g].sight_part, c.mounts[g].sight_points, c.mounts[g].sight_origin, centre, &unused);
+    const Vec3 d = aim - centre;
+    const auto e = ballistic_elevation(aim - *from, b->speed, kGravity);
+    return aim_error(u, g, *from + raise(d, kGunElevation * e.value_or(0.f)));
+}
+
+std::optional<float> CombatWorld::ballistic_elevation(Vec3 d, float v, float g) {
+    if (g == 0 || v == 0) return 0.f;
+    const float a = g * g * 0.25f;               // 1003b378
+    const float bq = v * v - g * d.z;
+    const float disc = bq * bq - dot(d, d) * a * 4; // 1003b384
+    if (!(disc > 0)) return std::nullopt;
+    const float k = 0.5f / a, root = std::sqrt(disc) * k; // 1003b190
+    const float t2 = k * bq < root ? root + k * bq : k * bq - root;
+    if (!(t2 > 0)) return std::nullopt;
+    const float t = std::sqrt(t2);
+    const Vec3 launch{d.x / t, d.y / t, (t2 * g * 0.5f + d.z) / t};
+    return std::acos(std::clamp(dot(normalize(launch), normalize(d)), -1.f, 1.f)); // FUN_10033680 (inferred: acos)
+}
+
 Mat4 CombatWorld::bullet_matrix(Vec3 pos, Vec3 dir) {
     const Vec3 y = normalize(dir);
     Vec3 x = cross(y, Vec3{0, 0, 1});
@@ -492,6 +611,7 @@ void CombatWorld::spawn(std::size_t u, std::size_t g, Vec3 pos, Vec3 dir) {
     b.range_left = p->range;
     b.mult = gun.damage_mult;
     b.target = c.target; // QI(b, 0x204).SetTarget(&dev+0x108): the gun's target, part 0
+    b.hp = b.mult * p->hit_points(); // part 0's max HP: hitPoints × mult (property 0xb4 → dev+0x180)
     bullets_.push_back(b);
     ++shots;
     events_.push_back({CombatEvent::Type::Shot, std::int32_t(u), std::int32_t(g), 0, pos, {}});
@@ -515,7 +635,10 @@ std::optional<WorldHit> CombatWorld::trace(Vec3 a, Vec3 b, std::int32_t skip, bo
             best = WorldHit{WorldHit::Kind::Static, h->t, h->point, h->normal, -1, -1, h->face_normal};
     for (std::size_t i = 0; i < units_.size(); ++i) {
         const Combatant& c = *units_[i];
-        if (std::int32_t(i) == skip || c.removed || !c.alive() || c.unit->posed.empty() || (!everything && !c.building())) continue;
+        // The dead leave collision (CCollObject message 7), except the player's robot (class 3).
+        if (std::int32_t(i) == skip || c.removed || (!c.alive() && !c.damage.player) || c.unit->posed.empty() ||
+            (!everything && !c.building()))
+            continue;
         if (!segment_hits_sphere(a, b, c.centre(), c.bound_radius_)) continue;
         const RenderMesh& mesh = c.unit->model.mesh;
         if (c.building()) c.draw_cache_.resize(mesh.draws.size());
@@ -523,7 +646,8 @@ std::optional<WorldHit> CombatWorld::trace(Vec3 a, Vec3 b, std::int32_t skip, bo
             const RenderDraw& d = mesh.draws[di];
             if (d.transform >= c.unit->posed.size()) continue;
             const std::size_t part = c.damage.resolve(d.transform);
-            if (part < c.damage.parts.size() && c.damage.parts[part].destroyed()) continue; // thrown off as debris
+            // Thrown off as debris (DetachPartDebris 100102a0; never the player's robot, class 3).
+            if (part < c.damage.parts.size() && c.damage.parts[part].destroyed() && !c.damage.player) continue;
             const Mat4& m = c.unit->posed[d.transform];
             if (c.building()) {
                 Combatant::DrawCache& dc = c.draw_cache_[di];
@@ -634,7 +758,55 @@ void CombatWorld::fly(Bullet& b, float dt_ms, float now) {
     }
     const Vec3 from = b.pos, to = b.pos + step;
     b.range_left -= len;
-    if (auto h = trace(from, to, b.shooter)) {
+    auto h = trace(from, to, b.shooter);
+    // OnCollision (1000d0c0), the object hits first, nearest first while nearer than the face hit: only a
+    // shield side matters (GetShieldSide −1: skip). A bullet whose HP does not exceed the side's strength
+    // stops there (situation 2, its explosion's face hit {object, −2, side}); a stronger one collapses the
+    // side (DrainShieldSide(side, 0), after OnDamageMsg to the object, both only while its shooter exists),
+    // loses that strength (ApplyDamageTotal(−s)) and flies on.
+    {
+        struct SphereHit {
+            float t;
+            std::size_t unit;
+            Vec3 point;
+        };
+        std::vector<SphereHit> spheres;
+        const Vec3 seg = to - from;
+        const float len2 = dot(seg, seg);
+        for (std::size_t i = 0; i < units_.size(); ++i) {
+            const Combatant& c = *units_[i];
+            if (std::int32_t(i) == b.shooter || c.removed || !c.alive() || c.energy.shield < 0) continue;
+            const Vec3 centre = c.shield_centre(), rel = from - centre;
+            const float r = c.shield_radius(), c0 = dot(rel, rel) - r * r;
+            if (c0 <= 0 || len2 <= 0) continue; // only a sphere the bullet enters this step (inferred)
+            const float bq = dot(rel, seg), disc = bq * bq - len2 * c0;
+            if (bq >= 0 || disc < 0) continue;
+            const float t = (-bq - std::sqrt(disc)) / len2;
+            if (t <= 1) spheres.push_back({t, i, from + seg * t});
+        }
+        std::sort(spheres.begin(), spheres.end(), [](const SphereHit& x, const SphereHit& y) { return x.t < y.t; });
+        for (const SphereHit& sh : spheres) {
+            if (h && h->t <= sh.t) break; // the face is nearer
+            const std::int32_t side = shield_side(sh.unit, sh.point);
+            if (side < 0) continue;
+            Combatant& c = *units_[sh.unit];
+            const float s = c.energy.side_strength(std::size_t(side), c.energy_host());
+            if (b.hp <= s) {
+                b.pos = sh.point;
+                b.alive = false;
+                events_.push_back({CombatEvent::Type::BulletEnded, -1, b.shooter, 2, sh.point, {}, b.id});
+                if (p.expl) explode(b, *p.expl, sh.point, std::int32_t(sh.unit), kShieldPart, side);
+                b.hp = 0;
+                return;
+            }
+            if (b.shooter >= 0 && !units_[std::size_t(b.shooter)]->removed) {
+                events_.push_back({CombatEvent::Type::Damaged, std::int32_t(sh.unit), b.shooter, 0, sh.point, {}});
+                c.energy.set_side_strength(std::size_t(side), 0, c.energy_host());
+            }
+            b.hp -= s;
+        }
+    }
+    if (h) {
         // OnCollision (1000d0c0) → situation 2: SelfExplode, part 0's EXPL.
         b.pos = h->point;
         b.alive = false;
@@ -657,13 +829,74 @@ void CombatWorld::fly(Bullet& b, float dt_ms, float now) {
     (void)now;
 }
 
-void CombatWorld::explode(const Bullet& b, const Expl& e, Vec3 pos, std::int32_t target, std::int32_t part) {
+std::int32_t CombatWorld::shield_side(std::size_t u, Vec3 p) {
+    Combatant& c = *units_[u];
+    const EnergyHost host = c.energy_host();
+    if (!c.energy.shield_active(host)) return -1; // slot 0x30 fails
+    // The hit point relative to the shield sphere's centre, in the object's frame (GetPlacement(2) and
+    // FastProc +0x8c).
+    const Vec3 centre = c.shield_centre(), d = p - centre;
+    const Mat4& m = c.unit->frame.matrix;
+    const Vec3 local{dot(d, normalize(rotate(m, {1, 0, 0}))), dot(d, normalize(rotate(m, {0, 1, 0}))), dot(d, normalize(rotate(m, {0, 0, 1})))};
+    const std::size_t side = EnergyBudget::shield_side(local);
+    const PowerDevice& dev = c.energy.devices[std::size_t(c.energy.shield)];
+    if (c.energy.side_strength(side, host) > 0 && !dev.effect.first.empty() && !dev.effect.second.empty() && dot(d, d) > 0) {
+        // 10025ca0: the next of the shield's three effects (handles from 100254e0) gets the matrix
+        // {x = the direction to the hit, y ⟂ in the horizontal plane, z = x × y} at the shield centre
+        // (SetEffectMatrix, space 2), the scale (r, r, r) (SetEffectScale) and StartEffect(mode 1).
+        const Vec3 n = normalize(d);
+        Vec3 v;
+        if (n.x == 0) v = {1, 0, 0}; // 10048550
+        else if (n.y == 0) v = {0, 1, 0}; // 10048560
+        else {
+            v = {-n.y, n.x, 0};
+            if (n.z != 0) v = normalize(v);
+        }
+        const Vec3 w = cross(n, v);
+        Mat4 frame = Mat4::identity();
+        frame.at(0, 0) = n.x, frame.at(1, 0) = n.y, frame.at(2, 0) = n.z;
+        frame.at(0, 1) = v.x, frame.at(1, 1) = v.y, frame.at(2, 1) = v.z;
+        frame.at(0, 2) = w.x, frame.at(1, 2) = w.y, frame.at(2, 2) = w.z;
+        frame.at(0, 3) = centre.x, frame.at(1, 3) = centre.y, frame.at(2, 3) = centre.z;
+        CombatEvent ev{CombatEvent::Type::Effect, std::int32_t(u), -1, 0, centre, dev.effect, 0, n, c.shield_radius()};
+        ev.placement = frame;
+        ev.attached = true;
+        ev.handle = std::uint32_t(u + 1) << 2 | c.shield_fx_;
+        ev.start_mode = 1;
+        events_.push_back(ev);
+        c.shield_fx_ = (c.shield_fx_ + 1) % 3;
+    }
+    return std::int32_t(side);
+}
+
+void CombatWorld::absorb_by_shield(std::size_t v, DamageRecord& rec) {
+    Combatant& c = *units_[v];
+    if (c.energy.shield < 0) return; // ctl+0x38 has no shield
+    std::int32_t side;
+    if (rec.target == std::int32_t(v) && rec.target_part == kShieldPart) {
+        side = rec.target_side; // the face hit is this shield's
+    } else {
+        // A splash whose centre lies outside the shield sphere but within the record's radius of it.
+        const Vec3 d = rec.pos - c.shield_centre();
+        const float dist = std::sqrt(dot(d, d)), r = c.shield_radius();
+        if (!(dist < r + rec.radius) || !(dist > r)) return;
+        side = shield_side(v, rec.pos);
+    }
+    if (side < 0 || side >= 6) return;
+    const EnergyHost host = c.energy_host();
+    const float s = c.energy.side_strength(std::size_t(side), host);
+    const float taken = rec.damage < s ? rec.damage : s;
+    rec.damage -= taken;
+    c.energy.set_side_strength(std::size_t(side), s - taken, host);
+}
+
+void CombatWorld::explode(const Bullet& b, const Expl& e, Vec3 pos, std::int32_t target, std::int32_t part, std::int32_t side) {
     ++hits;
     events_.push_back({CombatEvent::Type::Hit, target, b.shooter, 0, pos, {}});
     if (!e.fx[0].second.empty()) events_.push_back({CombatEvent::Type::Effect, target, b.shooter, 0, pos, e.fx[0], 0, b.dir, 1});
     DamageRecord r;
     r.kind = e.kind;
-    r.target = target, r.target_part = part;
+    r.target = target, r.target_part = part, r.target_side = side;
     r.attacker = b.shooter;
     r.pos = pos;
     // mult·E.damage + the bullet's part-0 HP (hitPoints × mult; 0 when the attacker is gone).
@@ -692,24 +925,28 @@ void CombatWorld::apply_record(std::size_t v, const DamageRecord& rec, float now
     const bool was_killed = d.killed;
     // OnDamageRecord (1000ebc0): the victim's Behaviour hears of the attacker first.
     if (rec.kind == 2) {
-        if (rec.target_part < 0) return; // a shield-only hit (no shields here)
-        if (!d.invulnerable && std::int32_t(v) != rec.attacker) {
+        if (rec.target_part < 0) { // a shield-only hit: AbsorbByShield on a copy, no part damage
+            DamageRecord copy = rec;
+            absorb_by_shield(v, copy);
+        } else if (!d.invulnerable && std::int32_t(v) != rec.attacker) {
             const std::size_t part = d.resolve(std::size_t(rec.target_part));
             float r;
             const Vec3 pc = part_centre(c, part, r);
             d.damage_part_from_record(part, std::int32_t(v), rec, pc, r, now);
             // A destroyed part is thrown off with the parts under it (DetachPartDebris; port reading:
-            // they are destroyed with it).
-            if (d.parts[part].destroyed()) d.propagate_destruction(now);
+            // they are destroyed with it). DetachPartDebris leaves class 3 (the player's robot) alone.
+            if (d.parts[part].destroyed() && !d.player) d.propagate_destruction(now);
             d.update_part_stage(part, true);
         }
     } else if (rec.kind == 3 || rec.kind == 4) {
-        if (!d.invulnerable && std::int32_t(v) != rec.attacker && rec.damage != 0) {
+        DamageRecord copy = rec; // the shield takes its share of the copy first
+        absorb_by_shield(v, copy);
+        if (!d.invulnerable && std::int32_t(v) != rec.attacker && copy.damage != 0) {
             for (std::size_t i = 0; i < d.parts.size(); ++i) {
                 if (!d.parts[i].present) continue;
                 float r;
                 const Vec3 pc = part_centre(c, i, r);
-                d.damage_part_from_record(i, std::int32_t(v), rec, pc, r, now);
+                d.damage_part_from_record(i, std::int32_t(v), copy, pc, r, now);
             }
             d.propagate_destruction(now);
             for (std::size_t i = 0; i < d.parts.size(); ++i) d.update_part_stage(i, true);
@@ -771,8 +1008,7 @@ void CombatWorld::process_records(float now) {
 }
 
 void CombatWorld::update_energy(Combatant& c, float dt_s, float now) {
-    EnergyHost host;
-    host.part_ratio = [&c](std::int32_t t) { return c.part_ratio(t); };
+    EnergyHost host = c.energy_host();
     if (const UnitMotion* m = c.unit->motion.get()) {
         // 100265c0: max|ctl+0x1c8..0x1d0| / max|file body[6..8]| · ctl+0x154 (the live state's +0x54).
         const Vec3 v = m->velocity();
@@ -843,7 +1079,7 @@ void CombatWorld::update(float now) {
         det.resize(c.damage.parts.size(), false);
         for (std::size_t t = 0; t < det.size(); ++t) {
             const std::size_t p = c.damage.resolve(t);
-            det[t] = p != c.damage.root && p < c.damage.parts.size() && c.damage.parts[p].destroyed();
+            det[t] = !c.damage.player && p != c.damage.root && p < c.damage.parts.size() && c.damage.parts[p].destroyed();
         }
     }
 }

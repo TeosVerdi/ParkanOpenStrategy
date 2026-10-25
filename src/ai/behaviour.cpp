@@ -728,8 +728,16 @@ bool Behaviour::on_damage(std::uint32_t attacker) {
 void Behaviour::takt(std::uint32_t t, Wizard& wz) {
     now = t;
     if (world && observe_timer.check_and_rearm(now, rand)) observe(walker.unit_state());
-    movement_takt(t, wz);
+    if (self.building()) building_takt(t);
+    else movement_takt(t, wz);
     if (world) fire.takt(*this, now);
+}
+
+void Behaviour::building_takt(std::uint32_t t) {
+    // Class slot 57 (100054a0): the task stack on the +0x930 timer; the decision layer's 10017c70 before it
+    // only feeds the alert state; the type-0x80000004 default order (slot 59) is not modelled.
+    now = t;
+    if (building_timer.check_and_rearm(now, rand)) progress_ = task_takt(walker.unit_state());
 }
 
 void Behaviour::movement_takt(std::uint32_t t, Wizard& wz) {

@@ -21,6 +21,8 @@ Vec3 rotate(const Mat4& m, Vec3 v) {
 float length(Vec3 v) { return std::sqrt(dot(v, v)); }
 Vec3 mul(Vec3 a, Vec3 b) { return {a.x * b.x, a.y * b.y, a.z * b.z}; }
 
+} // namespace
+
 Mat4 inverse_affine(const Mat4& m) {
     const Vec3 a = col(m, 0), b = col(m, 1), c = col(m, 2);
     const Vec3 r0 = cross(b, c), r1 = cross(c, a), r2 = cross(a, b);
@@ -35,6 +37,8 @@ Mat4 inverse_affine(const Mat4& m) {
     set_col(inv, 3, Vec3{} - rotate(inv, t));
     return inv;
 }
+
+namespace {
 
 // pow() calls are skipped for an exponent of exactly 1.0 (the `== 0x3f800000` tests).
 float curve(float x, float e) { return e == 1.f ? x : std::pow(x, e); }

@@ -81,6 +81,8 @@ public:
     // Turret target 0..1 per axis (TurretRig::node_frames): HERO.TBL's turret channels for the hero,
     // the AI's aim for the others; the manual-entry default straight ahead.
     float aim_x = TurretRig::kManualX, aim_y = TurretRig::kManualY;
+    // Added to aim_y for the gun joints only (AimGunChannel 10028200: the ballistic elevation of AI aiming).
+    float gun_aim_y = 0;
     // Further joint-driven keyframe times applied after the turret rig: the gun devices' barrel
     // channels (recoil), set by combat. {part index, mesh node, frame}.
     struct JointFrame {

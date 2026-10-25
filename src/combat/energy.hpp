@@ -8,9 +8,13 @@
 //   engines (3) ← P, then 0 ← the rest, sensors | shields (2 | 5), weapons (4), and last the batteries (1)
 //   give up what was used: ratio = used / offered.
 //
+// The force shield (class 9, ctor 10025460) keeps six side charges (+0x98, fractions of its capacity
+// param0 · +0x11c, 1.0 at construction); with the deflector (class 0x15, a generic device whose params 0..5
+// weigh the sides) it is the unit's shield (CDeviceSet ctl+0x5cc / +0x5d0; notes/weapons-damage.md §4.2).
+//
 // Port choices (inferred where marked):
-// - shields (type 9) keep their six side charges full (absorption is not modelled, combat/damage.hpp), so
-//   their need is the idle draw only; the under-powered drain of the charges (FUN_10025a90) is deferred;
+// - the shield's +0x11c (0x204 SetProperty 0x11, which also sets the guns' dev+0x180) keeps its ctor value 1
+//   (no caller of property 0x11 traced); the per-side change records (+0xb0, network) are not kept;
 // - repair (type 0xf) heals through DamageState::apply_damage_total, the replay lock (ctl+0x618) is never
 //   set, and the device's "include destroyed parts" byte (+0x94, 0 at construction) is never changed;
 // - the slow tick has no jitter (combat_world.hpp).
@@ -37,6 +41,8 @@ struct PowerDevice {
     float ratio = 1;           // dev+0x4c: the share of its need it last received (a battery's charge)
     float usage = 0;           // type 0x1a dev+0xa4: power usage (device property 0x500, SetPowerUsage)
     std::int32_t gun = -1;     // a gun device: index into the unit's guns (its energy lives there)
+    std::array<float, 6> sides{1, 1, 1, 1, 1, 1}; // class 9 +0x98: the side charges, ±y, −x, +x, ±z (0..1)
+    ResName effect;            // header +0x6c / +0x8c (slot 9, 10025600): the shield's hit effect
     // The device's state after CDevice::Load: class default, then spec +0x18 unless −1.
     static std::uint32_t initial_state(std::uint32_t cls, std::int32_t spec_state);
 };
@@ -80,11 +86,32 @@ public:
     // CDevice::GetParam (10021d00): param[f & 0xff], × the part's HP ratio (0x100), × dev+0x4c (0x200).
     static float get_param(const PowerDevice& d, std::uint32_t f, const EnergyHost& host);
 
+    // The shield (CDeviceSet +0x5c0 = ctl+0x5cc, class 9) and the deflector (+0x5c4 = ctl+0x5d0, class 0x15):
+    // CreateDevice keeps the last one of each class [inferred: as for the armour]. −1 = none.
+    std::int32_t shield = -1, deflector = -1;
+    float shield_mult = 1; // shield +0x11c
+    // IsShieldActive (1002c500), the device half: both exist, are on (dev+0x50 ≠ 0) and not broken.
+    bool shield_active(const EnergyHost& host) const;
+    // GetShieldSideStrength (1002ca30): deflector GetParam(0x300 | side) · shield GetParam(0) · charge(side);
+    // 0 without both devices.
+    float side_strength(std::size_t side, const EnergyHost& host) const;
+    // DrainShieldSide (1002ca80): side `side`'s strength becomes `strength` (FUN_10025be0, clamped to the
+    // capacity); nothing when the deflector's weight of that side is ≤ 0.
+    void set_side_strength(std::size_t side, float strength, const EnergyHost& host);
+    // Unit property 0x79 (0x204 slot 0x2c, 1002c430): charge(side) · the deflector's part HP ratio · its
+    // dev+0x4c, the HUD's shield sides (CShieldDisplay_Draw); nullopt without both devices.
+    std::optional<std::array<float, 6>> shield_charges(const EnergyHost& host) const;
+    // GetShieldSide's side choice (1002c590) for `d` = hit point − shield centre in the unit frame: 0 +y
+    // (front), 1 −y, 2 −x, 3 +x, 4 +z, 5 −z, by the dominant axis (ties to the lower side).
+    static std::size_t shield_side(Vec3 d);
+
 private:
     float demand(const PowerDevice& d, const std::vector<GunDevice>& guns, float dt, const EnergyHost& host) const;
     void grant(PowerDevice& d, std::vector<GunDevice>& guns, float dt, float ratio, const EnergyHost& host);
     float pass(std::uint32_t mask, float avail, std::vector<GunDevice>& guns, float dt, const EnergyHost& host);
     bool broken(const PowerDevice& d, const EnergyHost& host) const;
+    float shield_capacity(const PowerDevice& d) const { return d.param[0] * shield_mult; } // GetParam(0), 100255c0
+    static void spread_charge(PowerDevice& d, float x); // FUN_10025a90
     std::array<float, 6> bucket_{}; // DAT_100486cc
 };
 

@@ -247,6 +247,60 @@ void test_energy_budget() {
           energy_category(9) == 5 && energy_category(8) == 2 && energy_category(0xf) == 0 && energy_category(0x1a) == 3);
 }
 
+// Force shield (classes 9 + 0x15) in the energy budget: the hero's o_fsh_l_02 (capacity 1850, 15 per s,
+// 0.04 energy per unit of charge, idle 2.0/s) with the deflector o_def_l_02 (0.9 per side, idle 0.2/s).
+void test_shield_budget() {
+    std::printf("combat: shield charges in the energy budget\n");
+    auto make = [](float battery_power) {
+        EnergyBudget e;
+        PowerDevice bat;
+        bat.cls = bat.type = 0x13, bat.power = battery_power, bat.param[0] = 1e6f, bat.state = PowerDevice::initial_state(0x13, -1);
+        PowerDevice sh;
+        sh.cls = sh.type = 9, sh.power = 2, sh.param[0] = 1850, sh.param[1] = 15, sh.param[2] = 0.04f;
+        sh.state = PowerDevice::initial_state(9, -1);
+        PowerDevice def;
+        def.cls = def.type = 0x15, def.power = 0.2f, def.state = PowerDevice::initial_state(0x15, -1);
+        for (int i = 0; i < 6; ++i) def.param[std::size_t(i)] = 0.9f;
+        e.devices = {bat, sh, def};
+        e.shield = 1, e.deflector = 2;
+        return e;
+    };
+    std::vector<GunDevice> guns;
+    EnergyHost host;
+    EnergyBudget e = make(100);
+    CHECK(e.shield_active(host) && near(e.side_strength(0, host), 1665)); // 0.9 · 1850 · 1
+    // Full: the idle draws only (shield 2, deflector 0.2).
+    e.update(1, guns, host);
+    CHECK(near(e.drain_a, 2.2f) && near(e.side_strength(3, host), 1665));
+    // A 60-point hit on the front: 1605 left (charge 1605 / 1665), 66.67 units of charge missing.
+    e.set_side_strength(0, 1605, host);
+    CHECK(near(e.devices[1].sides[0], 1605.f / 1665, 1e-5f) && near(e.side_strength(0, host), 1605, 1e-2f));
+    // One second: param1 = 15 units restored for 0.6 energy (need 2.6), spread over what the sides lack
+    // (only the front): +15 · 0.9 = 13.5 strength.
+    e.update(1, guns, host);
+    std::printf("  front after 1 s: %.2f (drain %.3f /s)\n", e.side_strength(0, host), e.drain_a);
+    CHECK(near(e.drain_a, 2.8f, 1e-3f) && near(e.side_strength(0, host), 1618.5f, 0.02f));
+    for (int i = 0; i < 4; ++i) e.update(1, guns, host); // 15 more each second: full after 66.67/15 = 4.44 s
+    CHECK(near(e.side_strength(0, host), 1665, 0.02f));
+    // Under-supplied (battery 1/s for a need of 2.2): k = 1/2.2; the shield's e = 2k − 2 < 0 drains the
+    // sides by e/0.04 units, in proportion to their charge; property 0x79 = charge · deflector ratio k.
+    EnergyBudget lo = make(1);
+    lo.update(1, guns, host);
+    const float k = 1 / 2.2f, drop = (2 * k - 2) / 0.04f / (6 * 1850);
+    const auto hud = lo.shield_charges(host);
+    std::printf("  under-supplied: charge %.6f (want %.6f), 0x79 %.4f\n", lo.devices[1].sides[0], 1 + drop, hud ? (*hud)[0] : -1.f);
+    CHECK(near(lo.devices[1].sides[0], 1 + drop, 1e-6f) && hud && near((*hud)[0], (1 + drop) * k, 1e-5f));
+    CHECK(near(lo.side_strength(1, host), 0.9f * k * 1850 * (1 + drop), 0.01f));
+    // The sides (GetShieldSide 1002c590): the dominant axis of the hit point in the unit frame.
+    CHECK(EnergyBudget::shield_side({0, 5, 1}) == 0 && EnergyBudget::shield_side({1, -5, 0}) == 1 &&
+          EnergyBudget::shield_side({-3, 1, 2}) == 2 && EnergyBudget::shield_side({3, -1, 2}) == 3 &&
+          EnergyBudget::shield_side({1, 1, 4}) == 4 && EnergyBudget::shield_side({1, 1, -4}) == 5);
+    // No deflector: no shield.
+    EnergyBudget none = make(100);
+    none.deflector = -1;
+    CHECK(!none.shield_active(host) && none.side_strength(0, host) == 0 && !none.shield_charges(host));
+}
+
 } // namespace
 
 int combat_unit_tests() {
@@ -255,6 +309,7 @@ int combat_unit_tests() {
     test_damage_state();
     test_gun_device();
     test_energy_budget();
+    test_shield_budget();
     return g_fail;
 }
 
@@ -490,6 +545,84 @@ int combat_corpus_tests(const std::filesystem::path& game) {
                     (6.8f * c.battery_fraction() - 2.39f) * 0.25f, laser.energy(), c.battery_fraction(), c.energy.drain_a, c.energy.drain_b, worst);
         CHECK(worst < 2e-3f);
         CHECK(near(c.energy.drain_a, 2.39f, 1e-3f) && near(c.energy.drain_b, (6.8f * c.battery_fraction() - 2.39f), 0.01f));
+    }
+
+    // Force shield (CBulletControl::OnCollision 1000d0c0, AbsorbByShield 1000ff00): a second hero 40 m in
+    // front, facing the first, takes its MG fire on the front side of its shield.
+    {
+        auto target = LiveUnit::load(lib, *hero->placement, ground);
+        Mat4 m = hero->frame.matrix;
+        const Vec3 fwd{m.at(0, 1), m.at(1, 1), 0};
+        Mat4 t2 = m;
+        for (int r = 0; r < 3; ++r) t2.at(r, 0) = -m.at(r, 0), t2.at(r, 1) = -m.at(r, 1); // turned about z by 180°
+        t2.at(0, 3) += fwd.x * 40, t2.at(1, 3) += fwd.y * 40;
+        target->motion->start(0, t2);
+        target->frame = target->motion->interpolate(0);
+        CombatWorld w(lib, ground, nullptr);
+        const std::size_t a = w.add_unit(*hero, hero->placement->identity, 0, true);
+        const std::size_t b = w.add_unit(*target, 2, 1, false);
+        Combatant& shooter = w.unit(a);
+        Combatant& victim = w.unit(b);
+        const EnergyHost vh = victim.energy_host();
+        CHECK(victim.energy.shield >= 0 && victim.energy.deflector >= 0 && victim.energy.shield_active(vh));
+        const float full = victim.energy.side_strength(0, vh);
+        const PowerDevice& sd = victim.energy.devices[std::size_t(victim.energy.shield)];
+        std::printf("  shield %s/%s: capacity %.0f, front %.1f; hit points %.0f; MG bullet HP %.0f, damage %.0f\n", sd.effect.first.c_str(),
+                    sd.effect.second.c_str(), sd.param[0], full, victim.damage.total, mg.hit_points(), mg.hit_damage());
+        target->pose_parts();
+        hero->pose_parts();
+        shooter.aim_point = victim.aim_centre();
+        shooter.set_trigger(true); // the MG
+        float now = 0, first = -1, last = -1;
+        std::size_t stopped = 0, fx = 0, bad_end = 0;
+        const float hp_before = victim.damage.total;
+        while (now < 3000) {
+            hero->pose_parts();
+            target->pose_parts();
+            w.update(now += 25);
+            for (const auto& e : w.take_events()) {
+                if (e.type == CombatEvent::Type::BulletEnded && e.amount == 2) {
+                    ++stopped, last = now;
+                    if (first < 0) first = now;
+                    const Vec3 d = e.pos - victim.shield_centre();
+                    bad_end += std::abs(std::sqrt(dot(d, d)) - victim.shield_radius()) > 0.01f; // on the sphere
+                }
+                if (e.type == CombatEvent::Type::Effect && e.unit == std::int32_t(b) && e.handle && e.placement) ++fx;
+            }
+        }
+        shooter.set_trigger(false);
+        // Each stopped bullet (HP 59 ≤ the side) puts a kind-2 record {target, −2, side 0} of 60 (mult·EXPL 1 +
+        // HP 59) on the shield; the sides regain 15 units of charge a second (13.5 of strength) meanwhile.
+        const float front = victim.energy.side_strength(0, vh), regen = front - (full - 60.f * float(stopped));
+        std::printf("  %u MG shots, %zu stopped on the sphere (r %.2f), %zu hit effects; front %.1f → %.1f (regained %.1f in %.2f s), HP "
+                    "%.0f → %.0f\n",
+                    shooter.guns[0].shots(), stopped, victim.shield_radius(), fx, full, front, regen, (last - first) / 1000, hp_before,
+                    victim.damage.total);
+        CHECK(near(full, 0.9f * 1850) && near(mg.hit_points(), 59) && stopped >= 8 && bad_end == 0 && fx == stopped);
+        CHECK(victim.damage.total == hp_before);
+        CHECK(regen > 13.5f * ((last - first) / 1000 - 0.25f) && regen < 13.5f * ((last - first) / 1000 + 0.5f));
+        // A front side weaker than the bullet's HP: the bullet collapses it, flies on and hits the body.
+        victim.energy.set_side_strength(0, 30, vh);
+        shooter.set_trigger(true); // one shot
+        std::size_t notices = 0;
+        float lost = 0;
+        for (int i = 0; i < 80; ++i) {
+            hero->pose_parts();
+            target->pose_parts();
+            w.update(now += 25);
+            for (const auto& e : w.take_events())
+                if (e.type == CombatEvent::Type::Shot) {
+                    shooter.set_trigger(false);
+                } else if (e.type == CombatEvent::Type::Damaged && e.unit == std::int32_t(b)) {
+                    if (e.amount == 0) ++notices;
+                    lost += e.amount;
+                }
+        }
+        std::printf("  through a 30-point side: %zu notice(s), %.2f HP lost, front %.2f\n", notices, lost, victim.energy.side_strength(0, vh));
+        // The face hit's full 60, less the armour (device 0x1b: 60·(a + 60·b)).
+        const float want = victim.damage.armour ? victim.damage.armour->apply(60) : 60.f;
+        CHECK(notices == 1 && near(lost, want, 0.01f) && near(victim.damage.total, hp_before - want, 0.01f));
+        CHECK(victim.energy.side_strength(0, vh) < 13.5f * 2.1f); // collapsed, regaining from 0
     }
 
     auto rt = game::MissionRuntime::load(game, mission);

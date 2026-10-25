@@ -2,8 +2,7 @@
 // ctl+0x558, totals +0x58c/+0x590/+0x594) and the functions that change it. Spec:
 // notes/weapons-damage.md §3.3 (records), §4 (damage), §5 (death); notes/formats-wea-cpt-ndp.md "NDPR".
 //
-// Not modelled: force shields (AbsorbByShield 1000ff00: every shield-side test is "no shield"),
-// debris (DetachPartDebris), the replay lock (ctl+0x618), break-off states (runtime flags 0x40..0x100).
+// Not modelled: debris (DetachPartDebris), the replay lock (ctl+0x618), break-off states (runtime flags 0x40..0x100).
 #pragma once
 
 #include "core/math.hpp"
@@ -14,13 +13,15 @@
 namespace parkan::combat {
 
 inline constexpr std::uint32_t kKilledClan = 0xFFFE; // DETID_KILLED: GetClan after death
+inline constexpr std::int32_t kShieldPart = -2;      // a face hit on a shield (OnCollision 1000d0c0: {id, −2, side})
 
 // The damage record (0x48 bytes, pushed by UpdatePartStage 10011220, consumed by ProcessDamageQueue
 // 10012ce0). Object references are indices into the combat world's units; -1 = none (bullets, statics).
 struct DamageRecord {
     std::uint32_t kind = 1;       // *EXPL: 1 effect only, 2 direct, 3 splash, 4 splash with 0 part damage
     std::int32_t source = -1, source_part = -1; // the exploding object (skipped by its own record)
-    std::int32_t target = -1, target_part = -1; // the face hit (kind 2 damages only this part)
+    std::int32_t target = -1, target_part = -1; // the face hit (kind 2 damages only this part; kShieldPart:
+    std::int32_t target_side = -1;               // the shield side +0x14, AbsorbByShield takes it all)
     std::int32_t attacker = -1;   // ctl+0x54c: the shooter
     Vec3 pos{};                   // +0x1c
     float damage = 0;             // +0x34
@@ -76,7 +77,7 @@ public:
     float mult = 1;                              // ctl+0x660 (property 0xb4)
     std::uint32_t clan = 0;                      // ctl+0x550
     bool invulnerable = false;                   // ctl+0x5b0 (property 0xa2)
-    bool player = false;                         // class 3 (the hero): never removed
+    bool player = false;                         // class 3 (the hero): no removal, no debris, part 0 kept
     std::int32_t removal_delay_ms = 0;           // body[18]
     std::optional<float> removal_at;             // ctl+0x59c
     bool killed = false;                         // part 0 / a vital part reached 0 (clan := 0xfffe)
@@ -90,8 +91,8 @@ public:
     void finish_init();
 
     // AddPartHP (10010f30): clamp to [0, max], update the total; at 0 the part is destroyed, and part 0
-    // (`root`) or a vital (flag 1) part kills the object: clan 0xfffe, removal at now + body[18] (not for the
-    // player), part 0 emptied and its stage updated (the death explosion).
+    // (`root`) or a vital (flag 1) part kills the object: clan 0xfffe; then, except for the player (class 3:
+    // nothing more), removal at now + body[18], part 0 emptied and its stage updated (the death explosion).
     void add_part_hp(std::size_t part, float delta, float now_ms);
     // ApplyDamageTotal (10010ba0): damage spread over the parts by their HP (healing by their missing
     // HP); `sequential` takes damage from the last part backwards and heals from the first.

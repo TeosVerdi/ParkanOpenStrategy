@@ -20,6 +20,31 @@ std::string record_field(std::span<const std::uint8_t> rec, std::size_t off) {
     return std::string(p, ::strnlen(p, 32));
 }
 
+// The turret (the first component whose CTLD has a turret device) with its marker points, and the gun
+// components under it whose joints follow its pitch (flag 8).
+void find_turret(AssetLibrary& lib, LiveUnit& u) {
+    for (std::size_t i = 1; i < u.model.parts.size() && !u.rig; ++i) {
+        const UnitPart& p = u.model.parts[i];
+        if (const NResEntry* te = lib.find(p.archive, p.ctl_entry)) {
+            u.rig = TurretRig::from_ctld(decode_ctld(te->data));
+            u.turret_part = i;
+            if (const NResEntry* pe = lib.find(p.archive, p.cpt_entry)) u.turret_points = decode_ctpt(pe->data);
+        }
+    }
+    if (!u.rig) return;
+    for (std::size_t i = 1; i < u.model.parts.size(); ++i) {
+        if (i == u.turret_part) continue;
+        bool under = false;
+        for (int q = u.model.parts[i].parent; q >= 0 && !under; q = u.model.parts[std::size_t(q)].parent) under = std::size_t(q) == u.turret_part;
+        const UnitPart& p = u.model.parts[i];
+        const NResEntry* ge = under ? lib.find(p.archive, p.ctl_entry) : nullptr;
+        if (!ge || ge->type != fourcc("CTLD")) continue;
+        auto joints = decode_joints(decode_ctld(ge->data));
+        if (std::any_of(joints.begin(), joints.end(), [](const CtldJoint& j) { return (j.flags & 8) != 0; }))
+            u.gun_joints.push_back({i, std::move(joints)});
+    }
+}
+
 } // namespace
 
 std::unique_ptr<LiveUnit> LiveUnit::load_building(AssetLibrary& lib, const mission::TmaObject& o, const mission::Scheme* given) {
@@ -56,6 +81,7 @@ std::unique_ptr<LiveUnit> LiveUnit::load_building(AssetLibrary& lib, const missi
     const Vec3 ext = base.bounds_max - base.bounds_min;
     u->sphere_radius = std::max(0.25f, 0.5f * std::sqrt(dot(ext, ext)));
     u->frame.matrix = tma_placement(o); // buildings keep their TMA pose (PlaceBuilding fits the ground to them)
+    find_turret(lib, *u);                // bunker / tower turrets (e_bnt_*), aimed by their fire control
     u->pose_parts();
     return u;
 }
@@ -81,27 +107,7 @@ std::unique_ptr<LiveUnit> LiveUnit::load(AssetLibrary& lib, const mission::TmaOb
     const Vec3 ext = chassis.bounds_max - chassis.bounds_min;
     u->sphere_radius = std::max(0.25f, 0.5f * std::max(ext.x, ext.y));
 
-    for (std::size_t i = 1; i < u->model.parts.size() && !u->rig; ++i) {
-        const UnitPart& p = u->model.parts[i];
-        if (const NResEntry* te = lib.find(p.archive, p.ctl_entry)) {
-            u->rig = TurretRig::from_ctld(decode_ctld(te->data));
-            u->turret_part = i;
-            if (const NResEntry* pe = lib.find(p.archive, p.cpt_entry)) u->turret_points = decode_ctpt(pe->data);
-        }
-    }
-
-    if (u->rig)
-        for (std::size_t i = 1; i < u->model.parts.size(); ++i) {
-            if (i == u->turret_part) continue;
-            bool under = false;
-            for (int q = u->model.parts[i].parent; q >= 0 && !under; q = u->model.parts[std::size_t(q)].parent) under = std::size_t(q) == u->turret_part;
-            const UnitPart& p = u->model.parts[i];
-            const NResEntry* ge = under ? lib.find(p.archive, p.ctl_entry) : nullptr;
-            if (!ge || ge->type != fourcc("CTLD")) continue;
-            auto joints = decode_joints(decode_ctld(ge->data));
-            if (std::any_of(joints.begin(), joints.end(), [](const CtldJoint& j) { return (j.flags & 8) != 0; }))
-                u->gun_joints.push_back({i, std::move(joints)});
-        }
+    find_turret(lib, *u);
 
     u->motion->start(start_ms, tma_placement(o));
     u->drop_to_ground(start_ms, ground);
@@ -271,7 +277,7 @@ std::optional<std::pair<std::string, std::string>> LiveUnit::touchdown_effect(st
 void LiveUnit::pose_parts() {
     if (rig) {
         rig->node_frames(aim_x, aim_y, frame.attitude_offset.z, model.parts[turret_part].node_frames);
-        for (const auto& [part, joints] : gun_joints) rig->gun_frames(joints, aim_y, model.parts[part].node_frames);
+        for (const auto& [part, joints] : gun_joints) rig->gun_frames(joints, aim_y + gun_aim_y, model.parts[part].node_frames);
     }
     for (const auto* list : {&joint_frames, &device_frames})
         for (const auto& j : *list) {

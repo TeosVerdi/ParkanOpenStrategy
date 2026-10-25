@@ -64,4 +64,26 @@ void AiUnit::update(float now_ms) {
     motion_->update(now_ms);
 }
 
+BuildingAi::BuildingAi(const LandMap& map, const ArealGraph& graph, RandomSource rand, std::function<Mat4()> placement)
+    : rand_(share(std::move(rand))), walker_(map, graph, rand_), brain_(walker_, rand_), placement_(std::move(placement)) {
+    walker_.unit_state = [this] {
+        const Mat4 m = placement_();
+        UnitState s;
+        s.pos = {m.at(0, 3), m.at(1, 3), m.at(2, 3)};
+        s.dir = normalize(Vec3{m.at(0, 1), m.at(1, 1), m.at(2, 1)});
+        s.time = now_;
+        return s;
+    };
+}
+
+void BuildingAi::set_perception(const Perception* world, const SelfInfo& self) {
+    brain_.world = world;
+    brain_.self = self;
+}
+
+void BuildingAi::update(float now_ms) {
+    now_ = std::uint32_t(std::lround(now_ms));
+    brain_.takt(now_, wizard_);
+}
+
 } // namespace parkan::ai

@@ -74,4 +74,29 @@ private:
     std::uint32_t now_ = 0;
 };
 
+// A building with weapons (bunker, tower): MBehaviour without movement — the observer, its own tick (class
+// slot 57: the task stack, whose Stop asks for fire at will) and the fire control — over a fixed body whose
+// placement `placement` gives (the state's position and forward). The owner aims the turret and pulls the
+// triggers from fire(), as for units.
+class BuildingAi {
+public:
+    BuildingAi(const LandMap& map, const ArealGraph& graph, RandomSource rand, std::function<Mat4()> placement);
+    BuildingAi(const BuildingAi&) = delete;
+    BuildingAi& operator=(const BuildingAi&) = delete;
+
+    void set_perception(const Perception* world, const SelfInfo& self);
+    void update(float now_ms); // OnTakt
+    const FireRequest& fire() const { return brain_.fire.request(); }
+    FireControl& fire_control() { return brain_.fire; }
+    Behaviour& brain() { return brain_; }
+
+private:
+    RandomSource rand_;
+    Walker walker_;
+    Behaviour brain_;
+    Wizard wizard_; // OnTakt's signature; a building's tick does not use it
+    std::function<Mat4()> placement_;
+    std::uint32_t now_ = 0;
+};
+
 } // namespace parkan::ai
