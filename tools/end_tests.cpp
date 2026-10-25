@@ -1,6 +1,7 @@
 // End-of-mission tests (notes/mission-end.md): the end message's layout for each game state, the
 // controller's transitions and keys, and campaign progression (dispatcher.ini, next mission) — on
 // synthetic data and on a game folder. Linked into parkan-tests.
+#include "audio/voice_queue.hpp"
 #include "combat/combat_world.hpp"
 #include "core/bytes.hpp"
 #include "game/mission_runtime.hpp"
@@ -16,6 +17,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <map>
 
 using namespace parkan;
 using namespace parkan::ui;
@@ -90,6 +92,45 @@ void test_layout() {
           out.quads[5].texture == 0);
     CHECK(out.quads.size() == 15 && near(out.quads[1].x0, 308) && near(out.quads[1].y0, 50) && out.quads[1].rgba[1] == 0xff &&
           out.quads[1].rgba[0] == 0x64);
+}
+
+// CSoundServer's voice FIFO (QueueSound 10011ab0 / UpdateQueue 100119e0 / ClearQueue 10011980): the hero's
+// death queues VOICE_UNIT_LOST then VOICE_MISSION_FAIL; the second starts only when the first has ended.
+void test_voice_queue() {
+    std::printf("voices: the QueueSound FIFO\n");
+    audio::VoiceQueue q;
+    std::vector<std::string> started;
+    std::map<audio::Handle, int> left; // frames each voice still plays
+    audio::Handle next = 1;
+    q.exists = [](const audio::Sound& s) { return s.entry != "missing.wav"; };
+    q.start = [&](const audio::Sound& s) {
+        started.push_back(s.entry);
+        left[next] = 3;
+        return next++;
+    };
+    q.playing = [&](audio::Handle h) { return left.count(h) && left[h] > 0; };
+    auto frame = [&] {
+        for (auto& [h, n] : left) n = std::max(0, n - 1);
+        q.update();
+    };
+    q.queue({"voices.lib", "vc_unit_lost.wav"});
+    q.queue({"voices.lib", "missing.wav"}); // GetSound fails: never queued
+    q.queue({"voices.lib", "vc_mis_fail.wav"});
+    CHECK(started == std::vector<std::string>{"vc_unit_lost.wav"} && q.size() == 2);
+    frame(), frame();
+    CHECK(started.size() == 1); // still speaking
+    frame();                    // the first has ended: the next starts
+    CHECK((started == std::vector<std::string>{"vc_unit_lost.wav", "vc_mis_fail.wav"}) && q.size() == 1);
+    frame(), frame(), frame();
+    CHECK(q.empty());
+    q.queue({"voices.lib", "a.wav"}); // an empty queue starts at once
+    q.queue({"voices.lib", "b.wav"});
+    q.clear();                        // forgets both; "a" keeps playing, the next starts over it
+    q.queue({"voices.lib", "c.wav"});
+    CHECK(started.back() == "c.wav" && q.size() == 1);
+    q.enabled = false; // Disable: nothing is queued
+    q.queue({"voices.lib", "d.wav"});
+    CHECK(q.size() == 1 && started.back() == "c.wav");
 }
 
 void test_controller() {
@@ -380,6 +421,7 @@ int end_unit_tests() {
     g_fail = 0;
     test_layout();
     test_controller();
+    test_voice_queue();
     test_campaign();
     return g_fail;
 }

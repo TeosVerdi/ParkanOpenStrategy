@@ -735,7 +735,8 @@ void Behaviour::takt(std::uint32_t t, Wizard& wz) {
 
 void Behaviour::building_takt(std::uint32_t t) {
     // Class slot 57 (100054a0): the task stack on the +0x930 timer; the decision layer's 10017c70 before it
-    // only feeds the alert state; the type-0x80000004 default order (slot 59) is not modelled.
+    // only feeds the alert state; a mine's default order (slot 59, GiveDefaultOrder 100088f0: ORDER_MINE when
+    // its current task is none or Stop) is given by the app (play.cpp), the economy running mines.
     now = t;
     if (building_timer.check_and_rearm(now, rand)) progress_ = task_takt(walker.unit_state());
 }

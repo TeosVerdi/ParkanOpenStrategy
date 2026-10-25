@@ -2,6 +2,7 @@
 
 #include "app/scene_viewer.hpp"
 #include "audio/audio_engine.hpp"
+#include "audio/voice_queue.hpp"
 #include "combat/combat_world.hpp"
 #include "res/fx.hpp"
 #include "control/turret.hpp"
@@ -428,6 +429,17 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         if (sound && !briefing) sound->play_random_music(false);
         else if (sound && briefing_setup.cd_track) sound->play_music(*briefing_setup.cd_track, true);
     }
+    // QueueUnitVoice → CSoundServer::QueueSound: the voices play one after another (audio/voice_queue.hpp),
+    // advanced every frame (MainLoop's UpdateQueue).
+    audio::VoiceQueue voices;
+    if (sound) {
+        voices.exists = [&](const audio::Sound& s) { return sound->load(s.lib, s.entry) != nullptr; };
+        voices.start = [&](const audio::Sound& s) { return sound->play(s); };
+        voices.playing = [&](audio::Handle h) { return sound->is_playing(h); };
+    }
+    auto queue_voice = [&](const std::string& entry) {
+        if (sound) voices.queue({"voices.lib", entry});
+    };
     std::size_t footsteps = 0;
     std::map<std::string, std::vector<FxSound>> fx_sounds; // effect → its sound commands
     auto play_effect_sounds = [&](const ResName& fx, Vec3 pos) {
@@ -711,7 +723,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     auto play_end_voice = [&](const char* key) {
         if (!key) return;
         SDL_Log("play: mission %s", end_ctl.state() == ui::GameState::Complete ? "complete" : "failed");
-        if (auto v = voice_table.find(key); sound && v != voice_table.end()) sound->play({"voices.lib", v->second});
+        if (auto v = voice_table.find(key); v != voice_table.end()) queue_voice(v->second);
     };
     std::size_t leaving_frames = 0;
     bool quit = false;
@@ -736,9 +748,9 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 m.more_footer = with_key(ui_text(6208), help_key);
                 if (messages_seen.insert(e.id).second) {
                     m.body = it != msgs.end() ? utf8_to_cp1251(texts.get(std::string_view(it->second.text_resource))) : std::string();
-                    if (sound && it != msgs.end())
-                        if (auto v = voice_entries.find(it->second.voice_resource); v != voice_entries.end())
-                            sound->play({"voices.lib", v->second});
+                    // PostScriptMessageToPager (10095600): its voice through QueueUnitVoice.
+                    if (it != msgs.end())
+                        if (auto v = voice_entries.find(it->second.voice_resource); v != voice_entries.end()) queue_voice(v->second);
                 } else {
                     m.body = ui_text(6170) + "\n" + with_key(ui_text(6223), help_key);
                 }
@@ -827,31 +839,129 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (const game::WorldObject* w = runtime->world().find(placement_of(ci).identity)) return w->clan;
         return combat.unit(ci).damage.clan;
     };
+    // CTargeting's detected list (10091de0 over the sensor's objects): port, the living units and buildings
+    // within the radar range; the local hero, bridges and ruins are left out.
     auto detected = [&]() {
         std::vector<std::int32_t> out;
         for (std::size_t i = 0; i < combat.size(); ++i) {
             const combat::Combatant& c = combat.unit(i);
             if (i == hero_slot || c.removed || !c.alive()) continue;
+            const std::uint32_t type = tma_types[placement_of(i).identity];
+            if (type == game::kTypeBridge || type == game::kTypeRuins) continue;
             const Vec3 d = c.unit->position() - hero.position();
             if (d.x * d.x + d.y * d.y <= kRadarRange * kRadarRange) out.push_back(std::int32_t(i));
         }
         return out;
     };
+    // The interface sounds (ui/game_resources.cfg `object sounds`), CSoundServer::PlaySound: at once.
+    std::map<std::string, std::string> game_sounds;
+    if (auto p = resolve_path(lib.game_dir(), "UI/game_resources.cfg")) {
+        const Bytes b = read_file(*p);
+        for (const auto& o : game::parse_cfg({reinterpret_cast<const char*>(b.data()), b.size()}))
+            if (o.name == "sounds")
+                for (const auto& [k, v] : o.entries) game_sounds[k] = v;
+    }
+    auto play_sound = [&](const char* key) {
+        if (auto v = game_sounds.find(key); sound && v != game_sounds.end()) sound->play({"sounds.lib", v->second});
+    };
+    // Views 1/3/6 with the hero controlled (mission+0x710, +0xaec): set once the view states exist (below).
+    std::function<bool()> piloting = [] { return true; };
+    // CTargeting::SetTarget (10090cc0): a change plays TARGET_SELECTED while piloting.
     auto set_hud_target = [&](std::int32_t t) {
-        if (t != hud_target) hud_target_since_ms = sim_ms;
+        if (t != hud_target) {
+            hud_target_since_ms = sim_ms;
+            if (piloting()) play_sound("TARGET_SELECTED");
+        }
         hud_target = t;
     };
-    // CTargeting::SelectNearestEnemy / SelectNearestFriend over the detected objects.
+    // The hero's enemies and friends in the list: units only (the registry's, FUN_100778a0) of a live clan;
+    // an enemy is of another clan, not an animal clan (record +0xc, the data.tma mode, 0) and hostile;
+    // a friend is of the hero's clan.
+    auto is_enemy = [&](std::int32_t i) {
+        const std::uint32_t c = clan_of(std::size_t(i));
+        return !combat.unit(std::size_t(i)).building() && c != combat::kKilledClan && c != hero_clan && c < tma.clans.size() &&
+               tma.clans[c].mode != 0 && perception.hostile(hero_clan, c);
+    };
+    auto is_friend = [&](std::int32_t i) { return !combat.unit(std::size_t(i)).building() && clan_of(std::size_t(i)) == hero_clan; };
+    // CTargeting::SelectNearestEnemy / SelectNearestFriend (10091080 / 100912c0): when the target already is
+    // one, the next one after it in the list (wrapping); otherwise the nearest (2-D).
     auto select_nearest = [&](bool enemy) {
+        const auto list = detected();
+        const auto pick = [&](std::int32_t i) { return enemy ? is_enemy(i) : is_friend(i); };
+        if (hud_target >= 0 && pick(hud_target)) {
+            const auto it = std::find(list.begin(), list.end(), hud_target);
+            const std::size_t at = it == list.end() ? 0 : std::size_t(it - list.begin());
+            for (std::size_t n = 1; n <= list.size(); ++n)
+                if (const std::int32_t i = list[(at + n) % list.size()]; pick(i)) {
+                    set_hud_target(i);
+                    return;
+                }
+            return;
+        }
         std::int32_t best = -1;
         float best_d = FLT_MAX;
-        for (std::int32_t i : detected()) {
-            const bool hostile = perception.hostile(hero_clan, clan_of(std::size_t(i)));
-            if (hostile != enemy) continue;
+        for (std::int32_t i : list) {
+            if (!pick(i)) continue;
             const Vec3 d = combat.unit(std::size_t(i)).unit->position() - hero.position();
-            if (dot(d, d) < best_d) best_d = dot(d, d), best = i;
+            const float d2 = d.x * d.x + d.y * d.y;
+            if (d2 < best_d) best_d = d2, best = i;
         }
         if (best >= 0) set_hud_target(best);
+    };
+    // CTargeting::Update (10090e00, from CUnit_Update every frame) for the hero, and the neutral units'
+    // discovery (CUnit_Update 10075ad0).
+    bool enemy_seen = false;             // CTargeting +0x20
+    std::set<std::uint32_t> discovered;  // CUnit +0x134
+    std::function<void(const std::string&)> say_voice; // play_voice, set below
+    std::function<void(std::uint32_t)> computer_pager; // PostComputerPagerText(text id), set below
+    auto update_targeting = [&] {
+        const auto list = detected();
+        // 10091de0: the list holds an enemy unit → VOICE_ENEMY_DETECTED when it did not before (while piloting).
+        bool enemy = false;
+        for (std::int32_t i : list) enemy = enemy || is_enemy(i);
+        if (enemy && !enemy_seen && piloting() && say_voice) say_voice("VOICE_ENEMY_DETECTED");
+        enemy_seen = enemy;
+        if (piloting()) {
+            // A target that is gone, dead or beyond the radar range (property 0x50) is dropped; with anything
+            // detected and no target: the nearest enemy, else the nearest friend, else the nearest unit.
+            if (hud_target >= 0) {
+                const combat::Combatant& t = combat.unit(std::size_t(hud_target));
+                const Vec3 d = t.unit->position() - hero.position();
+                if (t.removed || !t.alive() || d.x * d.x + d.y * d.y > kRadarRange * kRadarRange) set_hud_target(-1);
+            }
+            if (list.empty()) {
+                set_hud_target(-1);
+            } else if (hud_target < 0) {
+                select_nearest(true);
+                if (hud_target < 0) select_nearest(false);
+                if (hud_target < 0) {
+                    std::int32_t best = -1;
+                    float best_d = FLT_MAX;
+                    for (std::int32_t i : list) {
+                        if (combat.unit(std::size_t(i)).building()) continue;
+                        const Vec3 d = combat.unit(std::size_t(i)).unit->position() - hero.position();
+                        if (d.x * d.x + d.y * d.y < best_d) best_d = d.x * d.x + d.y * d.y, best = i;
+                    }
+                    if (best >= 0) set_hud_target(best);
+                }
+            }
+        }
+        // CUnit_Update: a unit of a neutral clan (record +0xc = 3) coming within the hero's radar range the first
+        // time (not in the briefing view): the hero's target, the computer's pager 3040, VOICE_UNIT_DETECTED.
+        if (briefing) return;
+        for (std::size_t i = 0; i < combat.size(); ++i) {
+            const combat::Combatant& c = combat.unit(i);
+            const std::uint32_t clan = clan_of(i);
+            if (i == hero_slot || c.removed || !c.alive() || c.building() || clan >= tma.clans.size() || tma.clans[clan].mode != 3 ||
+                discovered.count(c.logic_id))
+                continue;
+            const Vec3 d = c.unit->position() - hero.position();
+            if (d.x * d.x + d.y * d.y >= kRadarRange * kRadarRange) continue;
+            set_hud_target(std::int32_t(i));
+            discovered.insert(c.logic_id);
+            if (computer_pager) computer_pager(3040);
+            if (say_voice) say_voice("VOICE_UNIT_DETECTED");
+        }
     };
 
     // The interface voices (ui/game_resources.cfg `object voices`: VOICE_* → voices.lib entry).
@@ -864,10 +974,13 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     }
     auto play_voice = [&](const std::string& key) {
         SDL_Log("play: voice %s", key.c_str());
-        if (auto v = game_voices.find(key); sound && v != game_voices.end()) sound->play({"voices.lib", v->second});
+        if (auto v = game_voices.find(key); v != game_voices.end()) queue_voice(v->second); // QueueUnitVoice(key, 0)
     };
+    say_voice = play_voice;
+    computer_pager = [&](std::uint32_t id) { pager = ui::PagerMessage{ui_text(1541), ui_text(id), {}, sim_ms}; }; // PostComputerPagerText
     // The HQ interface and the view-state stack (notes/hq-ui.md; created once the HUD strings exist, below).
     std::unique_ptr<ui::HqController> hq;
+    piloting = [&] { return !briefing && !spectator && (!hq || hq->view_mode() != 2); }; // view 1 / 3 / 6, not 2 / 4 / 5
     std::function<void()> hq_frame; // its per-frame part (HqUi_Update and the rest), set below
     std::function<ui::HqPick(float, float)> hq_pick; // what lies under a virtual-screen point, set below
     float hq_aspect = 4.f / 3.f; // drawable width / height of the last frame
@@ -1356,6 +1469,18 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             bld_brains[k]->update(float(sim_ms));
             apply_fire(ci, buildings[k]->body(), bld_brains[k]->fire_control(), bld_brains[k]->fire(), bld_weapon_guns[k]);
         }
+        // BuildingTakt (100054a0), every tick: a mine (type 0x80000004) whose current task is none or Stop gets
+        // GiveDefaultOrder (slot 59, 100088f0): ORDER_MINE {0xa, ore, 0x204}, mode 3 (the economy runs it).
+        if (eco && runtime && !briefing)
+            for (std::size_t k = 0; k < buildings.size(); ++k) {
+                const combat::Combatant& c = combat.unit(bld_ci[k]);
+                const std::uint32_t lid = placement_of(bld_ci[k]).identity;
+                const game::WorldObject* w = runtime->world().find(lid);
+                if (!c.alive() || c.removed || !w || w->type != game::kTypeMine || eco->current_order(lid) != 0) continue;
+                game::UnitOrder m;
+                m.type = economy::kOrderMine, m.param = economy::kResourceOre, m.target_kind = economy::kTargetNone;
+                eco->give_order(lid, m, 3);
+            }
         live_ptrs.clear();
         for (std::size_t i = 0; i < live.size(); ++i) {
             if (combat.unit(live_ci[i]).removed) continue;
@@ -1422,10 +1547,9 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             }
         } else {
             // The guns' target is the selected HUD target only (CTargeting 10091cd0 pushes it to the selected
-            // weapons on LockTarget, the select commands and the target's death); nothing selected → no
+            // weapons); CTargeting::Update keeps one whenever something is detected. Nothing detected → no
             // target, so guided guns (plasma, missiles) hold fire (CGunDevice::Update 10029f4b).
-            if (hud_target >= 0 && (combat.unit(std::size_t(hud_target)).removed || !combat.unit(std::size_t(hud_target)).alive()))
-                hud_target = -1;
+            update_targeting();
             hero_combat.target = hud_target;
         }
         combat.update(float(sim_ms));
@@ -1456,16 +1580,26 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 const auto& v = combat.unit(std::size_t(e.unit));
                 SDL_Log("play: %.2f s %s %08x (%s) killed", sim_ms / 1000,
                         std::size_t(e.unit) == hero_slot ? "HERO" : v.building() ? "building" : "unit", v.logic_id, name(e.unit));
+                // iron3d's CUnit keeps its owner (+0x24) from before.
+                const std::uint32_t owner = clan_of(std::size_t(e.unit));
                 // GetObjectClan returns 0xfffe from now on; the AI stops (MBehaviour OnTakt "No clan").
                 if (runtime) runtime->world().set_clan(v.logic_id, combat::kKilledClan);
+                // The unit registry (UnitRegistry_Update 1007daa0) drops a unit whose clan is 0xfffe in the same
+                // frame: OnUnitRemoved (100755f0), unless the game is leaving, queues VOICE_UNIT_LOST for one of
+                // the local player's units, VOICE_ENEMY_DESTROY for any other clan except an animal clan (record
+                // +0xc, the data.tma mode, 0). Buildings live in another list (+0x71c): no voice.
+                if (!v.building() && end_ctl.state() != ui::GameState::Leaving) {
+                    if (owner == hero_clan) play_voice("VOICE_UNIT_LOST");
+                    else if (owner != combat::kKilledClan && owner < tma.clans.size() && tma.clans[owner].mode != 0)
+                        play_voice("VOICE_ENEMY_DESTROY");
+                }
                 if (std::size_t(e.unit) == hero_slot) {
                     // The hero (class 3) stays in the world as it is: no removal, no debris (AddPartHP
                     // 10010f30, DetachPartDebris 100102a0). iron3d's unit registry (1007daa0, after
                     // stdCalculateGame in the same MainLoop frame) sees its clan 0xfffe and drops it (1007d8a0 →
                     // OnUnitRemoved 100755f0): the own unit's VOICE_UNIT_LOST, then CMission_EnterSpectatorAtUnit
                     // (100a4df0) and CGame_SetMissionFailed (VOICE_MISSION_FAIL): the world stops from this frame.
-                    play_voice("VOICE_UNIT_LOST"); // QueueUnitVoice: queued before the failure's (port: not serialised)
-                    play_end_voice(end_ctl.hero_killed());
+                    play_end_voice(end_ctl.hero_killed()); // queued after VOICE_UNIT_LOST (above)
                     // The spectator camera gets the hero's world matrix at z = ground height + 16; in single
                     // player its free flight is off (HqCam_Update skips HqCam_Integrate in view mode 4 unless
                     // mission+0xaf5), so it stays there. A World3D camera looks along its local +X (left +Y, up
@@ -1520,6 +1654,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
 
     vo.animate = [&](double seconds, std::vector<Mat4>& transforms) {
         const double now = seconds * 1000.0;
+        voices.update(); // CSoundServer::UpdateQueue, every MainLoop frame
         if (end_ctl.simulating()) {
             // One stdCalculateGame a frame: a mission end inside it stops the rest of the frame's steps.
             while (end_ctl.simulating() && sim_ms + 1e-6 < now) step(std::min(now, sim_ms + 33.0));
@@ -1784,6 +1919,46 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         }
         return s;
     };
+    // The cockpit pages' sounds and voices, drawn with them (CHud_Draw: not under the objectives screen nor in
+    // the HQ interface). Timers by the game clock (the original reads the system timer).
+    double radar_ping_ms = 0, lock_sound_ms = -1e9, life_voice_ms = -1e9, batt_voice_ms = -1e9;
+    std::vector<std::array<bool, 3>> gun_latches; // CWeaponRow +0x23 destroyed, +0x21 ammo out, +0x22 energy out
+    auto cockpit_sounds = [&](const ui::HudState& hs) {
+        if (!hs.cockpit) return;
+        // CRadarPage_Draw (1003ff00), with a radar (property 0xa9; port: always): RADAR every range·0.002 s.
+        if (sim_ms - radar_ping_ms > kRadarRange * 0.002 * 1000) radar_ping_ms = sim_ms, play_sound("RADAR");
+        // CTargeter_DrawGaugesAndLabels (10042210), own unit: below 20 % health VOICE_LIFE_LOW, below 0.2 battery
+        // VOICE_BATT_LOW, each at most every 20 s (100e4bc4).
+        if (int(hs.own.health) < 20 && sim_ms - life_voice_ms > 20000) life_voice_ms = sim_ms, play_voice("VOICE_LIFE_LOW");
+        if (hs.own.energy < 0.2f && sim_ms - batt_voice_ms > 20000) batt_voice_ms = sim_ms, play_voice("VOICE_BATT_LOW");
+        // CWeaponRow_DrawWeapon (1009ccd0), only while the satellite map is closed.
+        if (hs.map_visible) return;
+        gun_latches.resize(hero_combat.guns.size(), {false, false, false});
+        const bool target_unit = hero_combat.target >= 0 && !combat.unit(std::size_t(hero_combat.target)).building();
+        for (std::size_t g = 0; g < hero_combat.guns.size() && g < hs.weapons.size(); ++g) {
+            const combat::GunDevice& gun = hero_combat.guns[g];
+            const ui::HudWeapon& w = hs.weapons[g];
+            // The lock brackets (selected, state 0 / 1, a unit targeted, ammo left, lock k ≠ 0, on screen): TARGET_ZOOM
+            // every 0.35 s while locking, else TARGET_READY every 0.2 s; one timer for the page (+0x59c).
+            if (w.selected && (w.state == combat::kGunIdle || w.state == combat::kGunLocking) && target_unit && gun.ammo() != 0 &&
+                w.lock != 0 && hs.lock_point) {
+                const bool locking = w.state == combat::kGunLocking;
+                if (sim_ms - lock_sound_ms > (locking ? 350 : 200)) lock_sound_ms = sim_ms, play_sound(locking ? "TARGET_ZOOM" : "TARGET_READY");
+            }
+            // The latches: a voice when one turns on while piloting. Destroyed: state 5 with the device broken
+            // (property 0x300; port: state 5 with ammo left); ammo out: limited ammo at 0; energy out: property
+            // 0x62 outside [0, 1] or below 0.01.
+            const float energy = gun.param(1) > 0 ? gun.energy() / gun.param(1) : gun.energy_ratio();
+            const std::array<bool, 3> now{gun.state() == combat::kGunEmpty && gun.ammo() != 0, gun.ammo() == 0,
+                                          energy < 0 || energy > 1 || energy < 0.01f};
+            static constexpr const char* kVoice[3] = {"VOICE_WEAPON_DESTR", "VOICE_WEAP_AMMO_OUT", "VOICE_WEAP_ENERGY_OUT"};
+            for (int k = 0; k < 3; ++k) {
+                if (gun_latches[g][std::size_t(k)] == now[std::size_t(k)]) continue;
+                gun_latches[g][std::size_t(k)] = now[std::size_t(k)];
+                if (now[std::size_t(k)] && piloting()) play_voice(kVoice[k]);
+            }
+        }
+    };
 
     // HUD text. Positions are in the 640×480 virtual screen; the font set is chosen by the window's size
     // in points and its glyphs scaled by the pixel density (ui/hud_text.hpp).
@@ -1977,6 +2152,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         } else if (!objectives_visible) {
             const ui::HudState hs = build_hud(float(f.width) / float(std::max(1u, f.height)));
             ui::draw_hud(f, ui::HudContext{vs, game_font, hud_tex, hud_strings}, hs);
+            cockpit_sounds(hs);
             if (pager) ui::draw_pager(f, vs, game_font, *pager);
         }
         if (objectives_visible && runtime) {
