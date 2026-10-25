@@ -3,11 +3,12 @@
 // (1002d260). Spec: notes/weapons-damage.md §1.2, §2.1, §2.3, §2.4.
 //
 // Port choices (inferred where marked):
-// - energy: refilled at `recharge_per_s` (∞ by default = always full; the battery budget
-//   UpdateEnergyBudget is not ported — spec §7.3);
+// - energy: starts full (Load: dev+0x120 = GetParam(1)) and is refilled by the owner's energy budget
+//   (combat/energy.hpp, UpdateEnergyBudget 1002d340) through energy_deficit / add_energy;
 // - the barrel channels interpolate linearly from `from` to `to` over the device's [start, end]
 //   (CDevice::ApplyJoints not read; inferred);
-// - GetParam's 0x100 / 0x200 scaling (part health, energy ratio) is not applied;
+// - GetParam's 0x100 / 0x200 scaling (part health, energy ratio) is not applied: the gun code reads
+//   params 0..10 plain (the energy budget's own GetParam does the scaling);
 // - the readiness value (HUD, dev+0x17c) is not kept.
 #pragma once
 
@@ -74,13 +75,19 @@ public:
     GunState state() const { return state_; }
     std::int32_t ammo() const { return ammo_; }     // −1 = unlimited
     float energy() const { return energy_; }
+    float energy_ratio() const { return ratio_; } // dev+0x4c: energy / param1 (1 until the first change)
+    // The energy budget's device slots (combat/energy.hpp), dt in seconds; `broken` = CDevice slot 2.
+    // GetEnergyDeficit (10029a40): energy − param1, less power·dt while firing (dev+0x50 ≠ 0).
+    float energy_deficit(float dt_s, bool broken) const;
+    // AddEnergy (10029a90): energy += −deficit·ratio (− power·dt while firing) when param1 > 0, then
+    // dev+0x4c = energy / param1. Not clamped: an under-supplied firing gun can lose energy.
+    void add_energy(float dt_s, float ratio, bool broken);
     std::size_t barrel() const { return cur_; }
     std::size_t barrel_count() const { return channels_.size(); }
     std::uint32_t barrel_joint(std::size_t b) const { return channels_[b].joint; }
     std::uint32_t shots() const { return shots_; }   // bullets spawned (port statistics)
     float lock_timer() const { return lock_; }       // dev+0x170: seconds left to lock on (HUD brackets)
     bool enabled = true;                               // dev+0x118
-    float recharge_per_s = INFINITY;                   // port (see the file comment)
     float damage_mult = 1;                             // dev+0x180 → bullet property 0xb4
 
     // The keyframe time of barrel `b`'s joint at `now_ms` (recoil animation); nullopt when the joint
@@ -108,6 +115,7 @@ private:
     GunState state_ = kGunIdle;         // dev+0x11c
     std::uint32_t command_ = kCeaseFire; // dev+0x50
     float energy_ = 0;                  // dev+0x120
+    float ratio_ = 1;                   // dev+0x4c (CDevice ctor 100218b0: 1.0)
     std::int32_t ammo_ = -1;            // dev+0x124
     float lock_ = -1;                   // dev+0x170
     float start_ = 0, end_ = 0;         // dev+0xc / +0x10

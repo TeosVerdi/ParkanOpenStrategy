@@ -20,7 +20,7 @@ GunDevice::GunDevice(GunDeviceSpec spec, std::vector<CtldJoint> joints, const Bu
     }
     for (auto j : spec_.barrels) channels_.push_back({j});
     ammo_ = std::int32_t(std::lround(param_[0])); // Load: round(param0), −1 = unlimited
-    energy_ = param_[1];                          // starts full (port; spec §7.1)
+    energy_ = param_[1];                          // Load: dev+0x120 = GetParam(1)
     lock_ = param_[9];
 }
 
@@ -88,8 +88,6 @@ bool GunDevice::step_barrel(std::size_t b, GunHost& host) {
 }
 
 void GunDevice::tick(float dt, GunHost& host) {
-    if (std::isinf(recharge_per_s)) energy_ = param_[1];
-    else energy_ = std::min(param_[1], energy_ + recharge_per_s * dt * 0.001f);
     if (channels_.empty()) {
         state_ = kGunEmpty; // a module device without barrels cannot fire
         return;
@@ -158,10 +156,27 @@ void GunDevice::tick(float dt, GunHost& host) {
             if (!skip_joint(b)) done |= step_barrel(b, host);
         if (!done) return;
     }
-    if (param_[1] > 0 && param_[2] <= energy_) energy_ -= param_[2];
+    if (param_[1] > 0 && param_[2] <= energy_) {
+        energy_ -= param_[2];
+        ratio_ = energy_ / param_[1];
+    }
     state_ = kGunInterval;
     end_ = param_[3] + start_;
     if (command_ == kFireSingle) command_ = kCeaseFire;
+}
+
+float GunDevice::energy_deficit(float dt, bool broken) const {
+    const float d = energy_ - param_[1];
+    return command_ != kCeaseFire && !broken ? d - dt * spec_.power : d;
+}
+
+void GunDevice::add_energy(float dt, float ratio, bool broken) {
+    float g = -(energy_deficit(dt, broken) * ratio);
+    if (command_ != kCeaseFire && !broken) g -= dt * spec_.power;
+    if (param_[1] > 0) {
+        energy_ += g;
+        ratio_ = energy_ / param_[1];
+    }
 }
 
 void GunDevice::update(float now, GunHost& host) {

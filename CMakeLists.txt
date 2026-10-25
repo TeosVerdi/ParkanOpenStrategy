@@ -53,6 +53,7 @@ add_library(parkan_core STATIC
   src/world/building.cpp
   src/res/weapons.cpp
   src/combat/damage.cpp
+  src/combat/energy.cpp
   src/combat/gun.cpp
   src/combat/combat_world.cpp
   src/res/terrain.cpp

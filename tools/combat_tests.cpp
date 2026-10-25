@@ -145,7 +145,6 @@ void test_gun_device() {
     CtldJoint j;
     j.rate = 4; // 0.5 / 4 s per moving step
     GunDevice g(spec, {j}, &b);
-    g.recharge_per_s = 0;
     TestHost h;
     auto run = [&](float until) {
         for (; h.now < until;) {
@@ -191,6 +190,63 @@ void test_gun_device() {
     CHECK(gg.state() == kGunOutOfRange && h3.spawns.size() <= before + 1);
 }
 
+// UpdateEnergyBudget (1002d340) on hand-made devices: P from the battery, then engines, sensors, weapons in
+// that order; the battery gives up what was used.
+void test_energy_budget() {
+    std::printf("combat: energy budget\n");
+    BulletProto b;
+    GunDeviceSpec spec;
+    spec.param[0] = -1, spec.param[1] = 20, spec.param[2] = 10, spec.param[3] = 100;
+    spec.barrels = {0};
+    CtldJoint j;
+    j.rate = 4;
+    auto make = [&](float battery_power) {
+        EnergyBudget e;
+        PowerDevice bat;
+        bat.cls = bat.type = 0x13, bat.power = battery_power, bat.param[0] = 100, bat.state = PowerDevice::initial_state(0x13, -1);
+        PowerDevice eng;
+        eng.cls = eng.type = 5, eng.power = 4, eng.state = PowerDevice::initial_state(5, -1);
+        PowerDevice radar;
+        radar.cls = radar.type = 8, radar.power = 3, radar.state = PowerDevice::initial_state(8, -1);
+        PowerDevice gun;
+        gun.cls = gun.type = 2, gun.gun = 0;
+        PowerDevice repair; // off (state 0): no draw
+        repair.cls = repair.type = 0xf, repair.power = 50, repair.state = PowerDevice::initial_state(0xf, -1);
+        e.devices = {bat, eng, radar, gun, repair};
+        return e;
+    };
+    std::vector<GunDevice> guns{GunDevice(spec, {j}, &b)};
+    TestHost h;
+    guns[0].set_state(kFireSingle);
+    for (h.now = 0; h.now < 1500;) guns[0].update(h.now += 10, h);
+    CHECK(h.spawns.size() == 1 && near(guns[0].energy(), 10) && near(guns[0].energy_ratio(), 0.5f));
+    EnergyHost host;
+    host.engine_load = 1;
+    // Supply 10/s for 1 s: engine 4, radar 3, the gun's deficit 10 gets the remaining 3 (ratio 0.3).
+    EnergyBudget e = make(10);
+    e.update(1, guns, host);
+    CHECK(near(e.devices[1].ratio, 1) && near(e.devices[2].ratio, 1) && near(guns[0].energy(), 13) && near(guns[0].energy_ratio(), 0.65f));
+    CHECK(near(*e.battery_fraction(), 0.9f) && near(*e.battery_capacity(), 100));
+    CHECK(near(e.drain_a, 3) && near(e.drain_b, 7));
+    CHECK(near(e.devices[4].ratio, 1)); // the repair device is off
+    // Supply 2: the engine gets half, the radar and the gun nothing.
+    EnergyBudget lo = make(2);
+    lo.update(1, guns, host);
+    CHECK(near(lo.devices[1].ratio, 0.5f) && near(lo.devices[2].ratio, 0) && near(guns[0].energy(), 13) && near(*lo.battery_fraction(), 0.98f));
+    // The offer is power·charge·dt, at most the charge held; capacity −1 never drains (property 1 = 1).
+    EnergyBudget half = make(10);
+    half.set_battery_fraction(0.5f);
+    half.update(1, guns, host); // offers 5: engine 4, radar 1/3
+    CHECK(near(half.devices[2].ratio, 1.f / 3) && near(*half.battery_fraction(), 0.45f));
+    EnergyBudget endless = make(10);
+    endless.devices[0].param[0] = -1;
+    endless.update(1, guns, host);
+    CHECK(near(*endless.battery_fraction(), 1) && near(*endless.battery_capacity(), -1));
+    // Category table 1003ccc8.
+    CHECK(energy_category(5) == 3 && energy_category(0x13) == 1 && energy_category(2) == 4 && energy_category(0x1e) == 4 &&
+          energy_category(9) == 5 && energy_category(8) == 2 && energy_category(0xf) == 0 && energy_category(0x1a) == 3);
+}
+
 } // namespace
 
 int combat_unit_tests() {
@@ -198,6 +254,7 @@ int combat_unit_tests() {
     test_splash_and_armour();
     test_damage_state();
     test_gun_device();
+    test_energy_budget();
     return g_fail;
 }
 
@@ -375,6 +432,55 @@ int combat_corpus_tests(const std::filesystem::path& game) {
                     straight && straight->unit == std::int32_t(b) ? "hit" : "miss");
         CHECK(shots > 3 && hits_on_tent + 1 >= shots); // the last shot may still be in flight
         hero->aim_x = TurretRig::kManualX, hero->aim_y = TurretRig::kManualY;
+    }
+
+    // Energy budget (UpdateEnergyBudget 1002d340) on the hero (tut2_p: r_h_02 + e_tur_ht_02). Batteries: the
+    // i_pws_l_03 module (o_pws_l_03.ctl: capacity 4080, power 6.8/s) replaces r_h_02 device 0. Idle draws:
+    // shield o_fsh_l_02 2.0, o_dsh_l_03 0.11 (state 0x2000), radar o_rdr_l_df 0.08, o_def_l_02 0.2 per second;
+    // repair (off), armour and the guns draw nothing idle; the engine (r_h_02 device 5) nothing standing.
+    // The laser (o_tur_ht_02 device 6: buffer 200, 5.5 a shot) fired without pause outruns the supply and
+    // stops in state 6; then each 250 ms tick refills it by (6.8·charge − 2.39)·0.25 and the battery loses
+    // 6.8·charge·0.25 / 4080.
+    {
+        CombatWorld w(lib, ground, nullptr);
+        const std::size_t a = w.add_unit(*hero, hero->placement->identity, hero->placement->ai_index, true);
+        Combatant& c = w.unit(a);
+        CHECK(c.energy.battery_capacity() && near(*c.energy.battery_capacity(), 4080));
+        CHECK(near(c.battery_fraction(), 1));
+        c.select(1), c.select(3); // the laser only
+        c.aim_point = hero->position() + Vec3{0, 0, 200};
+        c.set_trigger(true);
+        const GunDevice& laser = c.guns[2];
+        float now = 0, empty_at = -1;
+        while (now < 120000 && empty_at < 0) {
+            hero->pose_parts();
+            w.update(now += 25);
+            w.take_events();
+            if (laser.state() == kGunNoEnergy) empty_at = now;
+        }
+        std::printf("  laser: no energy at %.2f s after %u shots (energy %.2f, battery %.4f)\n", empty_at / 1000, laser.shots(),
+                    laser.energy(), c.battery_fraction());
+        CHECK(empty_at > 0 && laser.energy() < 5.5f);
+        // 200 + the supply over the run (≈ 4.4/s) = the shots' 5.5 each.
+        const float supplied = laser.shots() * 5.5f + laser.energy() - 200;
+        CHECK(supplied > 0 && supplied < empty_at / 1000 * 4.42f + 1);
+        c.set_trigger(false);
+        float worst = 0;
+        for (int tick = 0; tick < 40; ++tick) {
+            const float e0 = laser.energy(), f0 = c.battery_fraction();
+            for (int f = 0; f < 10; ++f) {
+                hero->pose_parts();
+                w.update(now += 25);
+            }
+            w.take_events();
+            const float gain = (6.8f * f0 - 2.39f) * 0.25f;
+            const float de = laser.energy() - e0, df = f0 - c.battery_fraction();
+            worst = std::max({worst, std::abs(de - gain), std::abs(df * 4080 - 6.8f * f0 * 0.25f)});
+        }
+        std::printf("  laser recharge: %.3f / tick, energy %.2f, battery %.4f; drain %.3f / %.3f /s (worst error %.2g)\n",
+                    (6.8f * c.battery_fraction() - 2.39f) * 0.25f, laser.energy(), c.battery_fraction(), c.energy.drain_a, c.energy.drain_b, worst);
+        CHECK(worst < 2e-3f);
+        CHECK(near(c.energy.drain_a, 2.39f, 1e-3f) && near(c.energy.drain_b, (6.8f * c.battery_fraction() - 2.39f), 0.01f));
     }
 
     auto rt = game::MissionRuntime::load(game, mission);

@@ -1589,12 +1589,14 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         // Own unit (page 2) and the selected target (page 1, with its on-screen box).
         s.own.name = unit_name(hero_slot);
         s.own.health = hero_combat.damage.hp_ratio() * 100;
+        s.own.energy = hero_combat.battery_fraction(); // unit property 0x73: the batteries' charge
         const std::int32_t shown = hud_target >= 0 ? hud_target : opt.demo_aim ? hero_combat.target : -1;
         if (shown >= 0 && !combat.unit(std::size_t(shown)).removed) {
             const combat::Combatant& t = combat.unit(std::size_t(shown));
             ui::HudUnitPanel p;
             p.name = unit_name(std::size_t(shown));
             p.health = t.damage.hp_ratio() * 100;
+            p.energy = t.battery_fraction();
             const Vec3 d = t.unit->position() - hero_pos;
             p.distance = std::sqrt(dot(d, d));
             s.target = p;
@@ -1732,8 +1734,9 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     SDL_Log("play: hero ended at (%.2f, %.2f, %.2f) after %.0f ms, state %u; %zu collision pushes; %zu wall triangles; "
             "%zu footsteps",
             hero_pos.x, hero_pos.y, hero_pos.z, sim_ms, motion.current_state(), pushed_steps, statics.triangle_count(), footsteps);
-    SDL_Log("play: combat: %zu shots, %zu bullet hits, %zu kills; hero %.0f / %.0f HP", combat.shots, combat.hits, kills,
-            hero_combat.damage.total, hero_combat.damage.initial);
+    SDL_Log("play: combat: %zu shots, %zu bullet hits, %zu kills; hero %.0f / %.0f HP, battery %.4f of %.0f, drain %.2f / %.2f per s",
+            combat.shots, combat.hits, kills, hero_combat.damage.total, hero_combat.damage.initial, hero_combat.battery_fraction(),
+            hero_combat.energy.battery_capacity().value_or(0.f), hero_combat.energy.drain_a, hero_combat.energy.drain_b);
     for (std::size_t g = 0; g < hero_combat.guns.size(); ++g)
         SDL_Log("play: hero gun %zu %s: %u shots, ammo %d, energy %.1f, state %u", g + 1, hero_combat.guns[g].spec().bullet.second.c_str(),
                 hero_combat.guns[g].shots(), hero_combat.guns[g].ammo(), hero_combat.guns[g].energy(), unsigned(hero_combat.guns[g].state()));

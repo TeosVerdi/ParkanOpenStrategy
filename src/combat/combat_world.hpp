@@ -13,11 +13,16 @@
 // - shields (types 9/0x15) are absent; armour (type 0x1b) is the last one in the unit's scheme
 //   (CreateDevice overwrites ctl+0x5b4; inferred);
 // - the impact effect is EXPL fx[0] (the hit face's surface type is not decoded);
-// - the slow damage tick runs every 250 ms (the original's LFSR jitter is not reproduced);
+// - the slow tick (SlowTickDamage, then the energy budget, combat/energy.hpp) runs every 250 ms with the
+//   time elapsed since the last one (the original's LFSR jitter is not reproduced);
+// - the energy budget's devices are every part's CTLD devices with the scheme's INTO modules applied
+//   (module@N replaces device N of its owner's CTLD, FUN_1002d890), except the guns, which keep their own
+//   part's CTLD header (a clip module, e.g. i_c03_t under e_gun_tc_03, is not applied to the gun);
 // - mult (property 0xb4) is 1 and the scale is the TMA z scale (GetContactPoint scales per axis).
 #pragma once
 
 #include "combat/damage.hpp"
+#include "combat/energy.hpp"
 #include "combat/gun.hpp"
 #include "world/collision.hpp"
 #include "world/ground.hpp"
@@ -50,6 +55,10 @@ public:
     std::vector<GunDevice> guns;   // every weapon device of the unit's parts, in part then device order
     std::vector<GunMount> mounts;  // per gun
     std::vector<bool> selected;    // ManManager +0x5a per multigun component
+    EnergyBudget energy;           // every device of the control, the guns by index (combat/energy.hpp)
+    // Unit property 0x73 (GetPropertyImpl 1000e3d1 → 0x204 GetProperty(1)): the batteries' charge; 0 when the
+    // unit has none (the HUD energy gauge).
+    float battery_fraction() const { return energy.battery_fraction().value_or(0.f); }
 
     // Unit-level API (ManManager / CDeviceSet in the original):
     // MCMD_SELECT: index n ≥ 1 toggles the n-th gun (selecting resets it, deselecting ceases its fire);
@@ -81,6 +90,7 @@ private:
     Vec3 bound_centre_{}; // in the unit frame
     float bound_radius_ = 1;
     float next_slow_tick_ = 0;
+    std::optional<float> last_slow_tick_; // ctl+0xec
     // Buildings: the world-space triangles of each draw, rebuilt when its node matrix changes (doors),
     // with a bounding sphere per draw for the segment test (port: the meshes are large and static).
     struct DrawCache {
@@ -190,6 +200,7 @@ private:
     void apply_record(std::size_t victim, const DamageRecord& rec, float now);
     void drain_explosions(std::size_t unit);
     void note_death(std::size_t unit, bool was_killed, float now);
+    void update_energy(Combatant& c, float dt_s, float now);
     Vec3 part_centre(const Combatant& c, std::size_t part, float& radius) const;
 
     AssetLibrary& lib_;

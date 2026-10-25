@@ -263,39 +263,74 @@ std::size_t CombatWorld::add_unit(LiveUnit& u, std::uint32_t logic_id, std::uint
     d.finish_init();
 
     // Armour: the scheme's device 0x1b (base i_arm_* or an armour module); the last one created wins.
+    std::optional<mission::Scheme> scheme;
     if (u.placement) {
         if (auto path = resolve_path(lib_.game_dir(), u.placement->resource)) {
             try {
-                const mission::Scheme scheme = mission::decode_scheme(read_file(*path));
-                auto walk = [&](auto&& self, const mission::SchemeNode& n) -> void {
-                    if (const NResEntry* e = lib_.find("objects.rlb", n.entry); e && e->data.size() >= 0x140) {
-                        if (const NResEntry* ce = lib_.find(record_field(e->data, 0x100), record_field(e->data, 0x120));
-                            ce && ce->type == fourcc("CTLD")) {
-                            for (const auto& dev : decode_ctld(ce->data).devices)
-                                if (dev.type == 0x1b) {
-                                    float prm[3];
-                                    std::memcpy(prm, dev.header.data() + 0x2c, sizeof prm);
-                                    d.armour = Armour{prm[1], prm[2], prm[0]};
-                                }
-                        }
-                    }
-                    for (const auto& ch : n.children) self(self, ch);
-                };
-                walk(walk, scheme.root);
+                scheme = mission::decode_scheme(read_file(*path));
             } catch (const std::exception& ex) {
-                std::fprintf(stderr, "combat: armour of %s: %s\n", u.placement->resource.c_str(), ex.what());
+                std::fprintf(stderr, "combat: scheme of %s: %s\n", u.placement->resource.c_str(), ex.what());
             }
         }
     }
+    // The module CTLD of an objects.rlb INTO / EXTO record (+0x100 library, +0x120 entry).
+    auto module_ctld = [&](const std::string& entry) -> std::optional<Ctld> {
+        const NResEntry* e = lib_.find("objects.rlb", entry);
+        if (!e || e->data.size() < 0x140) return std::nullopt;
+        const NResEntry* ce = lib_.find(record_field(e->data, 0x100), record_field(e->data, 0x120));
+        if (!ce || ce->type != fourcc("CTLD")) return std::nullopt;
+        try {
+            return decode_ctld(ce->data);
+        } catch (const std::exception& ex) {
+            std::fprintf(stderr, "combat: %s: %s\n", entry.c_str(), ex.what());
+            return std::nullopt;
+        }
+    };
+    if (scheme) {
+        auto walk = [&](auto&& self, const mission::SchemeNode& n) -> void {
+            if (auto ctld = module_ctld(n.entry))
+                for (const auto& dev : ctld->devices)
+                    if (dev.type == 0x1b) {
+                        float prm[3];
+                        std::memcpy(prm, dev.header.data() + 0x2c, sizeof prm);
+                        d.armour = Armour{prm[1], prm[2], prm[0]};
+                    }
+            for (const auto& ch : n.children) self(self, ch);
+        };
+        walk(walk, scheme->root);
+    }
 
-    // Guns: every weapon device of every part's CTLD.
+    // Devices: every device of every part's CTLD (LoadControlData 10008b10 with device index −1), in part
+    // order; the guns among them also become GunDevices.
+    std::vector<std::size_t> part_first(model.parts.size(), 0), part_count(model.parts.size(), 0);
+    auto power_device = [&](const CtldDevice& dev, PowerDevice& pd) {
+        std::int32_t st = -1;
+        std::memcpy(&pd.type, dev.header.data(), 4);
+        std::memcpy(&st, dev.header.data() + 0x18, 4);
+        std::memcpy(&pd.power, dev.header.data() + 0x20, 4);
+        std::memcpy(pd.param.data(), dev.header.data() + 0x2c, sizeof pd.param);
+        pd.state = PowerDevice::initial_state(pd.cls, st);
+    };
     for (std::size_t pi = 0; pi < model.parts.size(); ++pi) {
         const UnitPart& part = model.parts[pi];
+        part_first[pi] = c->energy.devices.size();
         const std::string archive = pi == 0 && !model.ctl_archive.empty() ? model.ctl_archive : part.archive;
         const std::string entry = pi == 0 && !model.ctl_entry.empty() ? model.ctl_entry : part.ctl_entry;
         const NResEntry* ce = entry.empty() ? nullptr : lib_.find(archive, entry);
         if (!ce || ce->type != fourcc("CTLD")) continue;
         const Ctld ctld = decode_ctld(ce->data);
+        for (const auto& dev : ctld.devices) {
+            PowerDevice pd;
+            pd.cls = dev.type;
+            power_device(dev, pd);
+            // dev+4 (LoadControlData 10009064): a component's id 0 is its mount node, else part base + id;
+            // DamageState resolves the component's root node to the mount.
+            std::int32_t id = 0;
+            std::memcpy(&id, dev.header.data() + 4, 4);
+            pd.part = id < 0 ? -1 : std::int32_t(part.transform_base) + id;
+            c->energy.devices.push_back(pd);
+        }
+        part_count[pi] = ctld.devices.size();
         bool any = false;
         for (const auto& dev : ctld.devices) any |= is_weapon_device(dev);
         if (!any) continue;
@@ -315,13 +350,40 @@ std::size_t CombatWorld::add_unit(LiveUnit& u, std::uint32_t logic_id, std::uint
                 }
         }
         const auto joints = decode_joints(ctld);
-        for (const auto& dev : ctld.devices) {
+        for (std::size_t k = 0; k < ctld.devices.size(); ++k) {
+            const CtldDevice& dev = ctld.devices[k];
             if (!is_weapon_device(dev)) continue;
             GunDeviceSpec spec = decode_gun_device(dev);
             const BulletProto* b = spec.bullet.second.empty() ? nullptr : bullet(spec.bullet);
+            c->energy.devices[part_first[pi] + k].gun = std::int32_t(c->guns.size());
             c->guns.emplace_back(std::move(spec), joints, b);
             c->mounts.push_back(mount);
         }
+    }
+    // INTO modules (FUN_1002d890): module@N reloads device N of its owner's CTLD from the module's first
+    // device (CDevice::Load without dev+4). The owner is the part the scheme node became (load_unit_model's
+    // depth-first EXTO order) [inferred: N is relative to the owner's devices; the data's placeholder texts
+    // match, e.g. o_tur_ht_02 device 1 "i_rdr_l" ← i_rdr_l_df@1]. Nodes with count 0 are skipped as in the
+    // economy's battery sum [inferred].
+    if (scheme && !model.parts.empty()) {
+        std::size_t next = 1;
+        auto walk = [&](auto&& self, const mission::SchemeNode& n, std::size_t owner) -> void {
+            for (const auto& ch : n.children) {
+                const NResEntry* e = lib_.find("objects.rlb", ch.entry);
+                if (!e) continue;
+                if (e->type == fourcc("EXTO")) {
+                    if (next < model.parts.size() && model.parts[next].parent == int(owner) && model.parts[next].mount == ch.mount)
+                        self(self, ch, next++);
+                    continue;
+                }
+                if (e->type != fourcc("INTO") || ch.one == 0 || ch.mount < 0 || std::size_t(ch.mount) >= part_count[owner]) continue;
+                const auto ctld = module_ctld(ch.entry);
+                if (!ctld || ctld->devices.empty()) continue;
+                PowerDevice& pd = c->energy.devices[part_first[owner] + std::size_t(ch.mount)];
+                if (pd.gun < 0) power_device(ctld->devices[0], pd);
+            }
+        };
+        walk(walk, scheme->root, 0);
     }
     // SetComponentControl (World3D 1000ed00) selects each manual gun, except, for the hero, guns whose
     // device record lacks bit 4 (unresolved). Port: every AI gun selected; the hero starts with gun 1.
@@ -686,6 +748,26 @@ void CombatWorld::process_records(float now) {
     }
 }
 
+void CombatWorld::update_energy(Combatant& c, float dt_s, float now) {
+    EnergyHost host;
+    host.part_ratio = [&c](std::int32_t t) {
+        if (t < 0 || std::size_t(t) >= c.damage.parts.size()) return 1.f;
+        const DamagePart& p = c.damage.parts[c.damage.resolve(std::size_t(t))];
+        return p.present ? p.ratio : 1.f; // a node without an NDPR record never breaks (port)
+    };
+    if (const UnitMotion* m = c.unit->motion.get()) {
+        // 100265c0: max|ctl+0x1c8..0x1d0| / max|file body[6..8]| · ctl+0x154 (the live state's +0x54).
+        const Vec3 v = m->velocity();
+        const auto& b = c.unit->ctld.body;
+        const float top = std::max({std::abs(b[6]), std::abs(b[7]), std::abs(b[8])});
+        const float speed = std::max({std::abs(v.x), std::abs(v.y), std::abs(v.z)});
+        host.engine_load = top > 0 ? speed / top * m->live().energy : 0.f; // port guard: no top speed
+    }
+    host.damage = &c.damage;
+    host.now_ms = now;
+    c.energy.update(dt_s, c.guns, host);
+}
+
 void CombatWorld::update(float now) {
     const float dt = now - last_ms_;
     last_ms_ = now;
@@ -719,8 +801,13 @@ void CombatWorld::update(float now) {
         Combatant& c = *units_[u];
         if (c.removed) continue;
         if (now >= c.next_slow_tick_) {
+            // Update (1000c7d8): dt = (now − the last slow tick)·0.001 s for SlowTickDamage (10012a40) and
+            // UpdateEnergyBudget (1002d340). Port: the first tick measures from the unit's first update.
+            const float dt_s = (now - c.last_slow_tick_.value_or(now)) * 0.001f;
+            c.last_slow_tick_ = now;
             const bool was = c.damage.killed;
-            c.damage.slow_tick(kSlowTickMs * 0.001f, now);
+            c.damage.slow_tick(dt_s, now);
+            update_energy(c, dt_s, now);
             c.next_slow_tick_ = now + kSlowTickMs;
             note_death(u, was, now);
         }

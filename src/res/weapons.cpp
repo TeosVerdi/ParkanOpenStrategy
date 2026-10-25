@@ -49,7 +49,9 @@ GunDeviceSpec decode_gun_device(const CtldDevice& d) {
     g.id = at<std::int32_t>(h, 0x04);
     g.flags = at<std::uint32_t>(h, 0x08);
     g.event = at<std::int32_t>(h, 0x0c);
-    g.part = at<std::int32_t>(h, 0x18);
+    g.part = g.id;
+    g.state = at<std::int32_t>(h, 0x18);
+    g.power = at<float>(h, 0x20);
     for (std::size_t i = 0; i < 16; ++i) g.param[i] = at<float>(h, 0x2c + 4 * i);
     g.bullet = {fixed(h.subspan(0x6c, 32)), fixed(h.subspan(0x8c, 32))};
     g.barrels = d.joints;

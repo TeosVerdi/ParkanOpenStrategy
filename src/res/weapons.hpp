@@ -21,7 +21,12 @@ struct GunDeviceSpec {
     std::int32_t id = 0;       // +0x04
     std::uint32_t flags = 0;   // +0x08: 0x2000000 salvo (all barrels step together)
     std::int32_t event = -1;   // +0x0c: passed to FUN_100221e0 at the recoil step (sound/event, inferred)
-    std::int32_t part = -1;    // +0x18: mesh part whose destruction breaks the device (inferred)
+    // +0x04 again: CDevice::Load (10021d50) copies it to dev+4, the damage part whose ratio (part +0x14)
+    // CDevice slot 2 (10021820) tests (0 = broken) and GetParam 0x100 scales by; LoadControlData
+    // (10009064) offsets it for a component (0 = the mount node, else part base + id).
+    std::int32_t part = -1;
+    std::int32_t state = -1;   // +0x18: dev+0x50 at load when ≠ −1 (−1 in every gun)
+    float power = 0;           // +0x20: idle draw per second while firing (GetEnergyDeficit 10029a40; 0 in all data)
     std::array<float, 16> param{}; // +0x2c: 0 ammo (−1 ∞), 1 energy buffer, 2 energy/shot, 3 delay ms, 4 muzzle delay ms
     ResName bullet;            // +0x6c / +0x8c: objects.rlb BULL
     std::vector<std::uint32_t> barrels; // joint refs (channels)
