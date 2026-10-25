@@ -226,8 +226,9 @@ public:
     std::uint32_t state_object() const { return states_.back().object; }
     // CViewStateQueue::Push 10063060: refused when the table has no handler for top → s.
     bool push_state(int s, std::uint32_t object = game::kNoObject);
-    // IsHqCapable 100773a0 (property 0x75 == 1). [inferred] Read as the HQ warbot type 0x1010000.
-    bool hq_capable(std::uint32_t lid) const { return own_alive(lid) && type_of(lid) == game::kTypeHq; }
+    // IsHqCapable 100773a0: the unit's first turret device found, property 0x75 == 1 (its design's turret flag
+    // 0x08000000, UnitStats::hq_turret; notes/device-props.md).
+    bool hq_capable(std::uint32_t lid) const;
     // OnUnitRemoved 100755f0 (the registry drops a unit whose clan became 0xfffe): the HQ selection without it
     // (1007563b..10075686); the local hero → the HQ selection cleared (FUN_1007d630); the controlled unit (not the
     // hero) → one pop when the top state is 1, 2, 5 or 7 (jump table 10075a84 / 10075a8c; 3, 4, 6: nothing).

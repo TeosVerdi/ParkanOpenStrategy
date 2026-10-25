@@ -830,6 +830,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     // cockpit lamp 4).
     std::optional<std::size_t> inside;
     std::optional<std::size_t> manned; // the building index of a manned turret (view state 6)
+    std::function<bool(std::size_t)> turret_disabled_fn = [](std::size_t) { return false; }; // set with the HQ host
     std::set<std::uint32_t> infrared;  // units whose turret camera has flag 0x20 (Camera_IsInfrared 10035da0)
     bool exit_blocked = false;
     // FUN_100a5600 (mission+0xaec = unit) with the unit's CManManager enabled (CManManager_EnableInput 1000f0b0:
@@ -837,8 +838,10 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     // unit+0x9c of the controlled unit (the hero: 0). [port] Autogunner (1) is driven as manual: the turret/fire
     // AI without the brain's movement is not separated yet; autopilot (2) leaves the unit to its brain.
     std::function<int()> ctl_mode = [] { return 0; }; // set with the HQ below
-    // The selected target (CTargeting+4) of the controlled unit; −1 none. Each unit has its own CTargeting: a change
-    // of the controlled unit starts without one [inferred: the new unit's targeting is not read].
+    // The selected target (CTargeting+4) of the controlled unit; −1 none. Each unit has its own CTargeting
+    // (unit+0x38), updated every frame by CTargeting::Update 10090e00 whether piloted or not, and
+    // ViewTrans_HeroToWarbot 10063c60 does not touch it: the HUD shows the new unit's own. The port keeps one
+    // HUD target: a change of the controlled unit clears it and the same rule picks the new unit's next frame.
     std::int32_t hud_target = -1;
     auto set_control = [&](std::size_t li) {
         hud_target = -1;
@@ -1007,7 +1010,8 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (hud_target >= 0) {
                 const combat::Combatant& t = combat.unit(std::size_t(hud_target));
                 const Vec3 d = t.unit->position() - cu->position();
-                if (t.removed || !t.alive() || d.x * d.x + d.y * d.y > radar_range() * radar_range()) set_hud_target(-1);
+                if (std::size_t(hud_target) == ctl_ci || t.removed || !t.alive() || d.x * d.x + d.y * d.y > radar_range() * radar_range())
+                    set_hud_target(-1); // never the controlled unit itself (10091de0 leaves it out of the list)
             }
             if (list.empty()) {
                 set_hud_target(-1);
@@ -1540,6 +1544,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         using namespace input;
         // In the HQ states the controlled unit is not driven (ViewTrans_*: Unit_SetPlayerControl(unit, 0)).
         const bool hero_input = (!hq || hq->unit_controlled()) && ctl_mode() != 2;
+        const bool fire_input = hero_input && ctl_mode() == 0; // the multigun channel follows the turret's
         // ExecuteBinding (vehicle class 0): throttle.y from FORWARD/BACK/WALK_F/WALK_B, the angular
         // command from ROTATE_*; strafing (LEFT/RIGHT heading) is not modelled yet.
         float forward = commands.get(0, 0, kMcmdForward) + commands.get(0, 0, kMcmdBack) +
@@ -1586,7 +1591,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 else if (a.state == 0x4000 && !infrared.erase(cc->logic_id)) infrared.insert(cc->logic_id);
                 continue;
             }
-            if (a.cls != 2 || !hero_input) continue;
+            if (a.cls != 2 || !fire_input) continue;
             if (a.cmd == kMcmdSelect) cc->select(a.index);
             else if (a.cmd == kMcmdState && a.index == -1) cc->set_state_selected(std::uint32_t(a.state));
             else if (a.cmd == kMcmdState && a.index >= 1) cc->set_gun_state(std::size_t(a.index - 1), std::uint32_t(a.state));
@@ -1598,9 +1603,12 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             const combat::Combatant& c = combat.unit(live_ci[i]);
             if (c.removed) continue;
             // SetAllUnitsAIFrozen(1) during the briefing: every unit but the hero (property 0x20a).
-            // The controlled warbot's movement and turret channels are manual (Unit_SetPlayerControl, +0x9c = 0):
-            // its brain is off while the player drives it [port: autogunner / autopilot modes not ported].
-            const bool manual = i == ctl && ctl != hero_slot && ctl_mode() != 2;
+            // Unit_SetPlayerControl 10075440 by unit+0x9c: 0 manual — movement (wizard channel 1) and turret / fire
+            // (0x20) manual: the brain is off; 1 autogunner — movement manual, turret / fire AI: the brain runs with
+            // its wizard's movement output off (WZ+0x1f7); 2 autopilot — all AI.
+            const bool controlled = i == ctl && ctl != hero_slot;
+            const bool manual = controlled && ctl_mode() == 0;
+            if (brains[i]) brains[i]->wizard().ai_mode = !(controlled && ctl_mode() == 1);
             if (brains[i] && c.alive() && !(briefing && i != hero_slot) && !manual) brains[i]->update(float(sim_ms)); // brain tick + motion update (pilot inside)
             else live[i]->motion->update(float(sim_ms));
         }
@@ -1632,7 +1640,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         };
         for (std::size_t i = 0; i < live.size(); ++i) {
             const combat::Combatant& c = combat.unit(live_ci[i]);
-            if (!brains[i] || !c.alive() || c.removed || (i == ctl && ctl != hero_slot && ctl_mode() != 2)) continue;
+            if (!brains[i] || !c.alive() || c.removed || (i == ctl && ctl != hero_slot && ctl_mode() == 0)) continue;
             apply_fire(live_ci[i], *live[i], brains[i]->fire_control(), brains[i]->fire(), weapon_guns[i]);
         }
         // The buildings' brains (frozen with the units during the briefing); a capture changes their clan.
@@ -1664,8 +1672,9 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (combat.unit(live_ci[i]).alive()) live_ptrs.push_back(live[i].get()); // the dead have left collision
         }
         collide_units(live_ptrs, float(sim_ms));
-        // Turrets: the hero's from HERO.TBL (turret channels), the others hold their aim_x/aim_y.
-        cu->aim_x = commands.get(1, 1, input::kMcmdAngleX), cu->aim_y = commands.get(1, 1, input::kMcmdAngleY);
+        // Turrets: the controlled unit's from its table (turret channels) unless its turret is on AI (autogunner /
+        // autopilot), the others hold their aim_x/aim_y.
+        if (ctl_mode() == 0) cu->aim_x = commands.get(1, 1, input::kMcmdAngleX), cu->aim_y = commands.get(1, 1, input::kMcmdAngleY);
         for (std::size_t i = 0; i < live.size(); ++i)
             if (!combat.unit(live_ci[i]).removed) live[i]->pose_parts();
         // Buildings (CBuilding::SendMsg message 1, 100335d0): doors and the capture door, then the pose.
@@ -1726,7 +1735,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             // target, so guided guns (plasma, missiles) hold fire (CGunDevice::Update 10029f4b).
             update_targeting();
             system_voices();
-            cc->target = hud_target;
+            if (ctl_mode() == 0) cc->target = hud_target; // autogunner / autopilot: the fire AI keeps its own target
         }
         // MainLoop: the warbot carrying the hero is dead → PopToState(0) (the exit point falls back to its xy − 1).
         // The controlled unit is dead (MainLoop / OnUnitRemoved): one pop (state 2 → the HQ).
@@ -1735,7 +1744,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         else if (hq && hq->state() == ui::kStateHqUnit && !hq->hq_capable(hq->state_object())) hq->pop_state(); // the HQ unit died
         // MainLoop: the manned building is destroyed, its turret disabled or its owner changed → one pop.
         else if (hq && manned && hq->state() == ui::kStateTurret &&
-                 (cc->removed || !cc->alive() || cc->guns.empty() || clan_of(ctl_ci) != hero_clan))
+                 (turret_disabled_fn(*manned) || clan_of(ctl_ci) != hero_clan))
             hq->pop_state();
         combat.update(float(sim_ms));
         for (const auto& e : combat.take_events()) {
@@ -2329,8 +2338,23 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         host.sound = [&](const char* key) {
             if (auto v = ui_sounds.find(key); sound && v != ui_sounds.end()) sound->play({"sounds.lib", v->second});
         };
-        // The game side of the view-state handlers (view-states.md §3): the hero boards a warbot (0 → 1) and
-        // gets out again (1 → 0).
+        // IsTurretDisabled 10034000 (notes/device-props.md): dead (clan 0xfffe), no turret device (CTLD type 1; the
+        // first in device order, FindNextDeviceOfType(0, 1)), or device property 0x52 = the HP ratio of its damage
+        // part (header +4, rebased per component) ≤ 0.
+        turret_disabled_fn = [&](std::size_t k) {
+            const combat::Combatant& b = combat.unit(bld_ci[k]);
+            if (b.removed || !b.alive() || clan_of(bld_ci[k]) == combat::kKilledClan) return true;
+            for (const auto& d : b.energy.devices) {
+                if (d.cls != 1) continue;
+                std::int32_t part = d.part;
+                while (part >= 0 && std::size_t(part) < b.damage.parts.size() && b.damage.parts[std::size_t(part)].alias >= 0)
+                    part = b.damage.parts[std::size_t(part)].alias;
+                return part >= 0 && std::size_t(part) < b.damage.parts.size() && b.damage.parts[std::size_t(part)].ratio <= 0;
+            }
+            return true;
+        };
+        // The game side of the view-state handlers (view-states.md §3–§6): boarding and leaving a warbot,
+        // remote control, the HQ unit, a manned turret.
         host.transition = [&](int from, int to, std::uint32_t object) {
             if (from == ui::kStateHero && to == ui::kStatePilot) {
                 // ViewTrans_HeroToWarbot 10063c60: leave the outer view, the hero's body leaves the world, the
@@ -2391,7 +2415,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 for (std::size_t k = 0; k < buildings.size(); ++k) {
                     const combat::Combatant& b = combat.unit(bld_ci[k]);
                     if (b.logic_id != object) continue;
-                    if (b.removed || !b.alive() || b.guns.empty()) return false;
+                    if (turret_disabled_fn(k)) return false;
                     camera_mode = 0, exit_blocked = false;
                     set_control_building(k);
                     return true;

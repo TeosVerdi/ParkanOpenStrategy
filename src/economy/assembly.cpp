@@ -202,15 +202,21 @@ std::int32_t Assembly::count_devices(std::int32_t id) const {
 UnitStats Assembly::stats() const {
     UnitStats s;
     // The last device of a type wins (CreateDevice 1002d4b0 caches them).
-    const CtldDevice *armour = nullptr, *shield = nullptr, *deflector = nullptr, *radar = nullptr;
+    const CtldDevice *armour = nullptr, *shield = nullptr, *deflector = nullptr, *radar = nullptr, *turret = nullptr;
     for (const auto& d : devices_) {
         switch (d.dev.type) {
+        case 1: turret = &d.dev; break;
         case 0x1b: armour = &d.dev; break;
         case 9: shield = &d.dev; break;
         case 0x15: deflector = &d.dev; break;
         case 8: radar = &d.dev; break;
         default: break;
         }
+    }
+    if (turret) {
+        std::uint32_t flags = 0;
+        std::memcpy(&flags, turret->header.data() + 8, 4);
+        s.hq_turret = (flags & 0x08000000u) != 0;
     }
     // CControlBase_InitMassAndPayload 1000fac0 (unit-stats.md §3–§4).
     s.payload = body_[26];

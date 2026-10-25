@@ -189,6 +189,11 @@ void test_hq_unit_state() {
     b.world.attach(0x14, &b.controls[0x14]);
     HqHost h = b.host();
     h.radius = [](std::uint32_t) { return 2.f; };
+    h.unit_stats = [](std::uint32_t lid) {
+        economy::UnitStats st;
+        st.hq_turret = lid == 0x14; // device property 0x75
+        return std::optional<economy::UnitStats>(st);
+    };
     HqController hq(b.world, nullptr, 0, h);
     CHECK(!hq.push_state(kStateHqUnit, 0x12)); // not HQ-capable
     hq.hero_enters_building(0x10, 0x80000001);

@@ -40,6 +40,9 @@ struct UnitStats {
     std::optional<float> radar; // 0x50 (no radar device: the property fails)
     std::int32_t chassis_type = 0; // property 0x207 (BehChassis ChassisType)
     std::uint32_t size_class = 0;  // property 0x201
+    // Device property 0x75 (CDeviceSet::GetProperty(0xd) 1002b410, notes/device-props.md): the last created turret
+    // device's (CTLD type 1) header +8 has bit 0x08000000 — IsHqCapable 100773a0.
+    bool hq_turret = false;
     bool valid() const { return payload_free > 0; } // DrawUnitStats' return value
 };
 

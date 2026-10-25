@@ -322,6 +322,12 @@ void HqController::open_designer() {
     say("factory: the unit designer");
 }
 
+bool HqController::hq_capable(std::uint32_t lid) const {
+    if (!own_alive(lid) || !host_.unit_stats) return false;
+    const auto st = host_.unit_stats(lid);
+    return st && st->hq_turret;
+}
+
 HqController::MenuAction HqController::menu_click(float vx, float vy) {
     // CGameMenuMainPage buttons (210, 210 + 25k)-(430, 235 + 25k): Return, Save, Load, Exit.
     if (!menu_open() || !in(vx, vy, 210, 210, 430, 310)) return MenuAction::None;
