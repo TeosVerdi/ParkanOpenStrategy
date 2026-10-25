@@ -9,9 +9,9 @@
 // quads on the 640×480 virtual screen.
 //
 // Port decisions (marked [inferred] / [port] / [deferred] at their place):
-// - View states 1 (piloting a warbot), 2 (remote control), 3 (HQ through a mobile HQ unit) and 6 (tower turret)
-//   are refused and logged: their views need the app's controlled unit to move off the hero. State 7 (the in-game
-//   menu) is ported; the app pauses the game while it is open.
+// - View states 1 (piloting a warbot), 2 (remote control), 3 (HQ through a mobile HQ unit), 6 (a manned turret)
+//   and 7 (the in-game menu): the queue and the HQ side here; the game side (the controlled unit, the hero's body,
+//   the turret, the pause) through HqHost::transition in the app (view-states.md).
 // - Cursors: the system pointer, or with FORCE_SOFTWARE_CURSOR the ui/cursor.cfg sprites (draw_cursor).
 // - The 3D previews (factory 115×115, research 127×127, the designer's views) are overlay insets (draw_model_view).
 // - The unit designer (CConstructorShell / CConstructor) is ui::Designer (ui/designer.hpp); the factory works
@@ -35,12 +35,12 @@ namespace parkan::ui {
 // §0: the view states (CViewStateQueue, CGame+0x20).
 enum HqViewState : int {
     kStateHero = 0,       // hero on foot
-    kStatePilot = 1,      // hero pilots a warbot [view not ported]
-    kStateRemote = 2,     // remote control of a unit from the HQ [view not ported]
-    kStateHqUnit = 3,     // HQ through a mobile HQ unit [view not ported]
+    kStatePilot = 1,      // hero pilots a warbot
+    kStateRemote = 2,     // remote control of a unit from the HQ
+    kStateHqUnit = 3,     // HQ through a mobile HQ unit
     kStateHqBunker = 4,   // HQ through a bunker (view mode 2)
     kStateInBuilding = 5, // inside an own plant / laboratory: factory or research screen, no sidebar
-    kStateTurret = 6,     // manning a tower turret [view not ported]
+    kStateTurret = 6,     // manning a tower turret
     kStateMenu = 7,
 };
 // g_ViewStateTransitions 10103b18 [from · 8 + to]: the pushes the original has a handler for.
@@ -55,8 +55,13 @@ public:
     static constexpr float kGroundClearance = 36, kHeightBand = 200, kAnchorBox = 200; // HqCam_Integrate 10037720
     // HqCam_Init: roll 0, pitch 0, yaw π/2, tilt 1.0, FOV 1.04, distance 30; HqCam_SetPose(x, y, z, 0, 0, π/2).
     void set_pose(Vec3 pos, float yaw = 1.5707964f);
-    void anchor(Vec3 building) { anchor_ = building; } // HqCam_AnchorBuilding 10037f10
-    void detach() { anchor_.reset(); }                 // HqCam_Detach 10037f40
+    void anchor(Vec3 building);                        // HqCam_AnchorBuilding 10037f10
+    void detach() { anchor_.reset(), follow_pos.reset(); } // HqCam_Detach 10037f40
+    // HqCam_FollowUnit 10037ee0: follow a unit (state 3): latches and speeds cleared, distance 0. The controller
+    // feeds the unit's position and radius (+0x98) every frame through follow_pos / follow_radius.
+    void follow_unit(Vec3 p, float radius);
+    std::optional<Vec3> follow_pos;
+    float follow_radius = 1, follow_dist = 0; // unit+0x98, +0x38
     void toggle_zoom();                                // JAMES_ZOOM_MODE in view mode 2 (10072120)
     // Key latches (OnUICommandDown / Up for JAMES_HQ_MOVE_*): the ramp clock restarts on every change.
     enum Key { Left, Right, Forward, Back, Up, Down };
@@ -111,6 +116,7 @@ struct HqHost {
     // cameras): called for every push and pop before the queue changes, with the unit / building of the record
     // pushed or uncovered; false vetoes it (ComputeWarbotExitPlacement's "exit blocked").
     std::function<bool(int from, int to, std::uint32_t object)> transition;
+    std::function<float(std::uint32_t lid)> radius; // unit+0x98 (the HQ camera's follow distance limit)
     AssetLibrary* library = nullptr;  // the designer's assembly (objects.rlb records); no designer without it
     HqStatNormalize stat_norm;
     std::function<void(const std::string& key, std::uint32_t lid)> voice; // QueueUnitVoice (lid kNoObject: 2D)
@@ -220,13 +226,21 @@ public:
     std::uint32_t state_object() const { return states_.back().object; }
     // CViewStateQueue::Push 10063060: refused when the table has no handler for top → s.
     bool push_state(int s, std::uint32_t object = game::kNoObject);
+    // IsHqCapable 100773a0 (property 0x75 == 1). [inferred] Read as the HQ warbot type 0x1010000.
+    bool hq_capable(std::uint32_t lid) const { return own_alive(lid) && type_of(lid) == game::kTypeHq; }
+    // OnUnitRemoved 100755f0 (the registry drops a unit whose clan became 0xfffe): the HQ selection without it
+    // (1007563b..10075686); the local hero → the HQ selection cleared (FUN_1007d630); the controlled unit (not the
+    // hero) → one pop when the top state is 1, 2, 5 or 7 (jump table 10075a84 / 10075a8c; 3, 4, 6: nothing).
+    void on_unit_removed(std::uint32_t lid, bool local_hero, bool controlled);
     bool pop_state();   // the top state's handler back to the one below; false when vetoed (or nothing below)
     void pop_to_hero(); // PopToState 10063180 (sidebar hero button)
     int view_mode() const;                                                           // 1 cockpit, 2 HQ camera
     bool hero_controlled() const { return state() == kStateHero; }                   // FUN_10075440(hero, 1)
     // A unit takes the player's input in the view (Unit_SetPlayerControl(unit, 1)): the hero (0), a piloted
-    // warbot (1), a remote-controlled unit (2).
-    bool unit_controlled() const { return state() == kStateHero || state() == kStatePilot || state() == kStateRemote; }
+    // warbot (1), a remote-controlled unit (2), a manned building turret (6).
+    bool unit_controlled() const {
+        return state() == kStateHero || state() == kStatePilot || state() == kStateRemote || state() == kStateTurret;
+    }
     bool interface_up() const { return state() >= kStateHqUnit && state() <= kStateInBuilding; } // CHud_UpdateHq
     // CMission::OnUnitEntersOwnBuilding 10062ad0 for the hero: SelectBuilding, then plant / institute →
     // state 5 + its screen, bunker → 4, tower → 6 (unless IsTurretDisabled), generator / mine / storage /
@@ -339,6 +353,7 @@ public:
     std::string display_name(std::uint32_t lid) const;
     int hovered_button() const; // sidebar button under the pointer, −1
     bool hover_blink = false;   // the hovered button's 0.1 s blink phase
+    std::map<std::uint32_t, int> drive_mode; // unit+0x9c: 0 manual, 1 autogunner, 2 autopilot (absent: 0)
     std::set<std::uint32_t> self_destruct; // armed units (+0x135) [the explosion is not ported]
     HqCamera camera;
     // The 3D previews (CModelView): the plant panel's (115×115 at (236, 23)) and the research details' (127×127 at

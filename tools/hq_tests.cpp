@@ -166,6 +166,54 @@ void test_pilot_state() {
     CHECK(calls.size() == 4 && calls.back() == std::make_pair(int(kStatePilot), int(kStateHero)));
 }
 
+void test_remote_state() {
+    // View state 2 (view-states.md §4): from the bunker HQ; back to it with the camera where it was.
+    Base b;
+    HqController hq(b.world, nullptr, 0, b.host());
+    hq.hero_enters_building(0x10, 0x80000001);
+    hq.camera.pos.x = 640;
+    CHECK(hq.push_state(kStateRemote, 0x12) && hq.state() == kStateRemote && hq.view_mode() == 1 && hq.unit_controlled());
+    CHECK(!hq.interface_up() && hq.selected_units().size() == 1 && hq.selected_units()[0] == 0x12);
+    CHECK(hq.escape() && hq.state() == kStateHqBunker && near(hq.camera.pos.x, 640) && hq.selected_units().empty());
+    CHECK(!hq.push_state(kStateRemote, 0x12) || hq.state() == kStateRemote);
+}
+
+void test_hq_unit_state() {
+    // View state 3 (view-states.md §5): HQ through a mobile HQ unit; the HQ camera follows it (HqCam_FollowTarget /
+    // FollowStep: d walks to 8 × radius + 1, the camera flies behind the unit at 125 m/s, dead zone 3 m).
+    Base b;
+    game::WorldObject o;
+    o.logic_id = 0x14, o.clan = 0, o.type = game::kTypeHq, o.placed = {700, 500, 10}, o.size_class = 3;
+    b.world.add(o);
+    b.controls[0x14].pos = o.placed;
+    b.world.attach(0x14, &b.controls[0x14]);
+    HqHost h = b.host();
+    h.radius = [](std::uint32_t) { return 2.f; };
+    HqController hq(b.world, nullptr, 0, h);
+    CHECK(!hq.push_state(kStateHqUnit, 0x12)); // not HQ-capable
+    hq.hero_enters_building(0x10, 0x80000001);
+    CHECK(hq.push_state(kStateHqUnit, 0x14) && hq.state() == kStateHqUnit && hq.view_mode() == 2 && hq.interface_up());
+    CHECK(hq.camera.follow_pos && near(hq.camera.pos.x, 700) && hq.selected_units().size() == 1);
+    for (int i = 0; i < 300; ++i) hq.camera.update(i * 33.0, 0.033f, 320, 240, true, [](float, float) { return 0.f; }, 4000);
+    CHECK(near(hq.camera.follow_dist, 17, 1.01f));
+    const float dd = std::sin(hq.camera.tilt) * hq.camera.follow_dist;
+    CHECK(std::fabs(hq.camera.pos.x - (700 - std::cos(hq.camera.yaw) * dd)) <= 3.01f);
+    CHECK(!hq.push_state(kStateHqUnit, 0x14) && hq.state() == kStateHqUnit); // already the top: nothing
+    CHECK(hq.escape() && hq.state() == kStateHqBunker && !hq.camera.follow_pos);
+}
+
+void test_turret_state() {
+    // View state 6 (view-states.md §6): from the hero and from the bunker HQ; back to the HQ anchored, no new pose.
+    Base b;
+    HqController hq(b.world, nullptr, 0, b.host());
+    CHECK(hq.push_state(kStateTurret, 0x80000001) && hq.view_mode() == 6 && hq.unit_controlled() && !hq.interface_up());
+    CHECK(hq.escape() && hq.state() == kStateHero);
+    hq.hero_enters_building(0x10, 0x80000001);
+    hq.camera.pos.x = 610;
+    CHECK(hq.push_state(kStateTurret, 0x80000001) && hq.state() == kStateTurret);
+    CHECK(hq.escape() && hq.state() == kStateHqBunker && near(hq.camera.pos.x, 610));
+}
+
 void test_states_and_selection() {
     Base b;
     HqController hq(b.world, nullptr, 0, b.host());
@@ -242,8 +290,8 @@ void test_plant_state() {
     // The close box leaves the building.
     hq.lbutton_down(350, 10, {});
     CHECK(hq.state() == kStateHero && hq.screen() == kScreenNone);
-    // Towers and the other states are not ported: refused, the hero keeps control.
-    CHECK(!hq.push_state(kStateTurret, 0x80000001) && hq.state() == kStateHero);
+    // 0 → 6 has a handler (the game side may veto it through HqHost::transition).
+    CHECK(hq.push_state(kStateTurret, 0x80000001) && hq.state() == kStateTurret);
 }
 
 void test_placement() {
@@ -482,6 +530,9 @@ int hq_unit_tests() {
     test_designer_helpers();
     test_game_menu();
     test_pilot_state();
+    test_remote_state();
+    test_hq_unit_state();
+    test_turret_state();
     return g_fail;
 }
 

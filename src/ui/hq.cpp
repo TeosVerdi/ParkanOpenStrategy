@@ -190,6 +190,26 @@ void HqCamera::update(double now, float dt, float mx, float my, bool edges, cons
     // Zoom (view mode 2): FOV steps 0.1 per frame toward 0.2 or back to the normal FOV.
     if (zoomed && fov_ > kZoomFov) fov_ -= 0.1f;
     else if (!zoomed && fov_ < kNormalFov) fov_ += 0.1f;
+    // HqCam_FollowTarget 10037f70: the goal behind the unit at follow_dist along the yaw and tilt; the move latches
+    // drive toward it (dead zone 3 m in x / y, 2 m in z: snap there, speed 0).
+    if (follow_pos) {
+        const float dd = std::sin(tilt) * follow_dist;
+        const Vec3 goal{follow_pos->x - std::cos(yaw) * dd, follow_pos->y - std::sin(yaw) * dd, follow_pos->z + std::cos(tilt) * follow_dist};
+        auto steer = [&](Key neg, Key pos_key, float& cur, float g, float dead, float& speed) {
+            auto set = [&](Key k, bool on) {
+                if (keys_[k].on != on) keys_[k].on = on, keys_[k].since = now;
+            };
+            if (std::abs(cur - g) <= dead) {
+                cur = g, speed = 0;
+                set(pos_key, false), set(neg, false);
+            } else {
+                set(pos_key, cur < g), set(neg, !(cur < g));
+            }
+        };
+        steer(Left, Right, pos.x, goal.x, 3, strafe_);
+        steer(Back, Forward, pos.y, goal.y, 3, fwd_);
+        steer(Down, Up, pos.z, goal.z, 2, vert_);
+    }
     // HqCam_UpdateMoveSpeeds 100372a0.
     const float S = kSpeed;
     auto move = [&](const Latch& l, float sign) { const float t = ramp(l); return sign * (t <= kRamp ? 2 * t * S : S); };
@@ -211,7 +231,21 @@ void HqCamera::update(double now, float dt, float mx, float my, bool edges, cons
     // HqCam_Integrate 10037720: each new coordinate is taken only inside (tan(FOV/2)·z, MapSize).
     const float sy = std::sin(yaw), cy = std::cos(yaw);
     const float lo = std::tan(fov_ * 0.5f) * pos.z;
-    if (strafe_ != 0) {
+    if (follow_pos) {
+        // HqCam_FollowStep 10038250: the speeds in world axes (x, y, z) and the yaw; z ≥ ground + 2.5; the
+        // distance walks +1 per frame below 200 and −1 above 8 × the unit's radius. HqCam_Integrate then only
+        // adds the tilt and its clamps (its other clocks were just restarted).
+        if (strafe_ != 0)
+            if (const float x = pos.x + strafe_ * dt; strafe_ > 0 ? x < map_size - lo : lo < x) pos.x = x;
+        if (fwd_ != 0)
+            if (const float y = pos.y + fwd_ * dt; fwd_ > 0 ? y < map_size - lo : lo < y) pos.y = y;
+        pos.z += vert_ * dt;
+        yaw += yaw_rate_ * dt;
+        const float g = (ground ? ground(pos.x, pos.y) : 0.f) + 2.5f;
+        if (pos.z < g) pos.z = g;
+        if (follow_radius * 8 < follow_dist) follow_dist -= 1;
+        if (follow_dist < 200) follow_dist += 1;
+    } else if (strafe_ != 0) {
         const float d = strafe_ * dt;
         const float x = d * sy + pos.x;
         if (lo < x && x < map_size) pos.x = x;
@@ -225,8 +259,8 @@ void HqCamera::update(double now, float dt, float mx, float my, bool edges, cons
         const float x = d * cy + pos.x;
         if (lo < x && x < map_size) pos.x = x;
     }
-    if (vert_ != 0) pos.z += vert_ * dt;
-    if (yaw_rate_ != 0) yaw += yaw_rate_ * dt;
+    if (!follow_pos && vert_ != 0) pos.z += vert_ * dt;
+    if (!follow_pos && yaw_rate_ != 0) yaw += yaw_rate_ * dt;
     if (tilt_rate_ != 0) {
         const float t = tilt_rate_ * dt + tilt;
         if (0 < t && t < kPi / 2) tilt = t;
@@ -238,6 +272,21 @@ void HqCamera::update(double now, float dt, float mx, float my, bool edges, cons
         if (std::abs(std::round(pos.x - anchor_->x)) > kAnchorBox) pos.x = pos.x <= anchor_->x ? anchor_->x - kAnchorBox : anchor_->x + kAnchorBox;
         if (std::abs(std::round(pos.y - anchor_->y)) > kAnchorBox) pos.y = pos.y <= anchor_->y ? anchor_->y - kAnchorBox : anchor_->y + kAnchorBox;
     }
+}
+
+void HqCamera::anchor(Vec3 building) {
+    // +0x44 (follow) cleared, the vertical latches and the three speeds zeroed, distance 0.
+    keys_[Up].on = keys_[Down].on = false;
+    strafe_ = fwd_ = vert_ = 0;
+    follow_dist = 0, follow_pos.reset();
+    anchor_ = building;
+}
+
+void HqCamera::follow_unit(Vec3 p, float radius) {
+    keys_[Up].on = keys_[Down].on = false; // +0x90 / +0x91
+    strafe_ = fwd_ = vert_ = 0;
+    follow_dist = 0, follow_pos = p, follow_radius = radius;
+    anchor_.reset(); // +0x48 = 0
 }
 
 Vec3 hq_pointer_ray(const HqCamera& cam, float vx, float vy, float aspect) {
@@ -283,6 +332,21 @@ HqController::MenuAction HqController::menu_click(float vx, float vy) {
     case 1: return menu_save_enabled ? MenuAction::Save : MenuAction::None;
     case 2: return menu_load_enabled ? MenuAction::Load : MenuAction::None;
     default: return MenuAction::Exit;
+    }
+}
+
+void HqController::on_unit_removed(std::uint32_t lid, bool local_hero, bool controlled) {
+    if (cstate_ == 1) {
+        std::erase(units_, lid);
+        if (units_.empty()) cstate_ = 0;
+    }
+    if (local_hero) {
+        clear_units();
+        return;
+    }
+    if (controlled) {
+        const int s = state();
+        if (s == kStatePilot || s == kStateRemote || s == kStateInBuilding || s == kStateMenu) pop_state();
     }
 }
 
@@ -379,6 +443,55 @@ bool HqController::push_state(int s, std::uint32_t object) {
     } else if (s == kStateMenu) {
         // ViewTrans_HeroToMenu 10064a80 / HqToMenu 10064af0 / BuildingScreenToMenu 10064c40: the controlled unit's
         // input off, CGameMenu_Show(1) (page 0; the host pauses).
+    } else if (s == kStateHqUnit) {
+        // CViewStateQueue::Push: state 3 only for an HQ-capable unit; a state-3 record of that unit below the top
+        // is popped back to instead (CheckPushDuplicate 10062ee0); at the top: nothing.
+        if (!hq_capable(object)) return false;
+        for (std::size_t i = states_.size(); i-- > 0;)
+            if (states_[i].state == kStateHqUnit && states_[i].object == object) {
+                while (states_.size() > i + 1 && pop_state()) {
+                }
+                return false;
+            }
+        if (host_.transition && !host_.transition(from, s, object)) return false;
+        // ViewTrans_WarbotToHqUnit 10063ec0 / RemoteToHqUnit 10064090 / HqUnitToHqUnit 10064da0 /
+        // HqBunkerToHqUnit 10064c80: the HQ camera posed at the unit (yaw π/2) and following it, view mode 2; the
+        // unit back to its AI (the host). From 3 / 4 the unit becomes the selection; from 1 the screen closes.
+        if (from == kStateHqUnit || from == kStateHqBunker) clear_units(), select_unit(object, true);
+        if (from == kStatePilot) set_screen(kScreenNone);
+        if (const game::WorldObject* u = world_.live(object)) {
+            camera.set_pose(u->position());
+            camera.follow_unit(u->position(), host_.radius ? host_.radius(object) : 1.f);
+        }
+        if (from == kStateHqBunker) clear_building();
+        states_.push_back({s, object});
+        say("view: push 3");
+        return true;
+    } else if (s == kStateTurret) {
+        // ViewTrans_HeroToTurret 10064470 / RemoteToTurret 100647b0 / HqUnitToTurret 100646b0 /
+        // HqBunkerToTurret 100645a0: the selection cleared (from 0 / 2), the building's turret on (the host),
+        // view mode 6; from 4 the HQ camera detaches (from 3 it stays attached).
+        if (host_.transition && !host_.transition(from, s, object)) {
+            say("view: push 6 refused by the game");
+            return false;
+        }
+        if (from == kStateHero || from == kStateRemote) clear_units();
+        if (from == kStateHqBunker) camera.detach();
+        states_.push_back({s, object});
+        say("view: push 6");
+        return true;
+    } else if (s == kStateRemote) {
+        // ViewTrans_HqUnitToRemote 10063fe0 / HqBunkerToRemote 10064330: the selection = the unit; the host hands
+        // it to the player (Unit_SetPlayerControl) and leaves the HQ camera (view mode 1). The HQ screen stays.
+        if (host_.transition && !host_.transition(from, s, object)) {
+            say("view: push 2 refused by the game");
+            return false;
+        }
+        clear_units();
+        select_unit(object, true);
+        states_.push_back({s, object});
+        say("view: push 2");
+        return true;
     } else if (s == kStatePilot) {
         // ViewTrans_HeroToWarbot 10063c60: the host hides the hero and hands the warbot to the player; the warbot
         // becomes the selection (SelectUnit, exclusive).
@@ -426,15 +539,35 @@ bool HqController::pop_state() {
     const int from = state();
     const int to = states_[states_.size() - 2].state;
     // ViewTrans_WarbotToHero 10063d60 can veto (no exit point: lamp 4, pager 6211); the warbot is deselected.
-    if (from == kStatePilot && to != kStateMenu) {
+    if ((from == kStatePilot || from == kStateRemote) && to != kStateMenu) {
         if (host_.transition && !host_.transition(from, to, states_[states_.size() - 2].object)) return false;
         clear_units();
+    }
+    if (from == kStateTurret && to != kStateMenu) {
+        // ViewTrans_TurretTo* (10064510 / 10064850 / 10064720 / 10064620): the turret off (the host); to 3 the HQ
+        // camera follows the unit again (no new pose), to 4 it is anchored at the bunker (no new pose); the HQ
+        // screen re-opens (it was never closed here).
+        if (host_.transition && !host_.transition(from, to, states_[states_.size() - 2].object)) return false;
+        const std::uint32_t below = states_[states_.size() - 2].object;
+        if (const game::WorldObject* o = world_.find(below)) {
+            if (to == kStateHqUnit) camera.follow_unit(o->position(), host_.radius ? host_.radius(below) : 1.f);
+            if (to == kStateHqBunker) camera.anchor(o->position());
+        }
+    }
+    if (from == kStateHqUnit && (to == kStatePilot || to == kStateRemote)) {
+        // ViewTrans_HqUnitToWarbot 10063f70 (unit+0x9c = 0) / HqUnitToRemote: back into the unit, HqCam_Detach.
+        const std::uint32_t u = states_[states_.size() - 2].object;
+        if (host_.transition && !host_.transition(from, to, u)) return false;
+        if (to == kStatePilot) drive_mode[u] = 0;
+        clear_units(), select_unit(u, true);
+        camera.detach();
     }
     if (to == kStateHero && (from == kStateHqBunker || from == kStateInBuilding)) leave_to_hero();
     if (from == kStateInBuilding && screen_ != kScreenNone) set_screen(kScreenNone);
     states_.pop_back();
     // ViewTrans_MenuTo* (10064b50 / 10064bd0 / 10064c60): Show(0), the view below continues as it was.
-    if (state() == kStateHqBunker && from != kStateMenu) enter_hq(state_object());
+    // ViewTrans_RemoteToHqBunker 100643d0: HqCam_AnchorBuilding without a new pose; the screen stays open.
+    if (state() == kStateHqBunker && from != kStateMenu && from != kStateRemote && from != kStateTurret) enter_hq(state_object());
     say("view: pop to " + std::to_string(state()));
     return true;
 }
@@ -1099,13 +1232,15 @@ bool HqController::click_interface(float vx, float vy) {
             const bool b1 = in(vx, vy, x + 10, y + 69, x + 29, y + 88), b2 = in(vx, vy, x + 34, y + 69, x + 53, y + 88),
                        b3 = in(vx, vy, x + 58, y + 69, x + 77, y + 88);
             if (b1 || b2 || b3) {
-                if (world_.live(u) && world_.live(u)->current_order() != kUpgrade)
-                    say("remote control of " + std::to_string(u) + " mode " + std::to_string(b1 ? 0 : b2 ? 1 : 2) +
-                        ": Push(2) (not ported)");
+                // +0x9c = 0 manual / 1 autogunner / 2 autopilot, then Push(2, 0, unit) (not while upgrading).
+                if (world_.live(u) && world_.live(u)->current_order() != kUpgrade) {
+                    drive_mode[u] = b1 ? 0 : b2 ? 1 : 2;
+                    push_state(kStateRemote, u);
+                }
                 return true;
             }
             if (type_of(u) == game::kTypeHq && in(vx, vy, x + 88, y + 69, x + 107, y + 88)) {
-                say("strategic control through " + std::to_string(u) + ": Push(3) (not ported)");
+                push_state(kStateHqUnit, u); // "Стратегическое управление": Push(3, 0, unit)
                 return true;
             }
             if (in(vx, vy, x + 275, y + 70, x + 303, y + 87)) {
@@ -1458,6 +1593,9 @@ void HqController::click_factory(float vx, float vy) {
 void HqController::update(double now_ms, const HqPick& pick) {
     now_ = now_ms;
     designer_->update(now_ms);
+    // HqCam_FollowTarget reads the followed unit's placement every frame (state 3).
+    if (camera.follow_pos && state() == kStateHqUnit)
+        if (const game::WorldObject* u = world_.live(state_object())) camera.follow_pos = u->position();
     rebuild_plants();
     number_new_units();
     // Selections drop dead objects (1007de10 on unit removal).
