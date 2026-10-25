@@ -402,26 +402,77 @@ void draw_sight(OverlayFrame& out, const HudContext& c, const HudState& s) {
     }
 }
 
+int building_map_icon(std::uint32_t type) {
+    switch (type) {
+    case 0x80000002u: return 0;
+    case 0x80000004u: return 1;
+    case 0x80000008u: return 2;
+    case 0x80000010u: return 3;
+    case 0x80010000u: case 0x80020000u: case 0x80040000u: return 4;
+    case 0x80000040u: return 5;
+    case 0x80000400u: return 7;
+    case 0x80100000u: case 0x80200000u: return 8;
+    case 0x80000200u: return 9;
+    default: return -1;
+    }
+}
+
 void draw_satellite_map(OverlayFrame& out, const HudContext& c, const HudState& s) {
     if (!s.map_visible) return;
-    // CSatelliteMap_DrawPanel, piloting views: the panel (374,0)-(640,266), the map 5 px inside.
-    constexpr float x0 = 374, y0 = 0, x1 = 640, y1 = 266, ix0 = x0 + 5, iy0 = y0 + 5, ix1 = x1 - 5, iy1 = y1 - 5;
-    framed_panel(out, c, x0, y0, x1, y1);
+    // CSatelliteMap_DrawPanel: piloting views the panel (374,0)-(640,266); the HQ layout (10073c80) (374,63)-(640,329)
+    // inside its outer (374,43)-(640,350) [inferred: the outer rect is the frame]; the map 5 px inside.
+    const float x0 = 374, y0 = s.map_hq ? 63.f : 0.f, x1 = 640, y1 = s.map_hq ? 329.f : 266.f;
+    const float ix0 = x0 + 5, iy0 = y0 + 5, ix1 = x1 - 5, iy1 = y1 - 5;
+    framed_panel(out, c, x0, s.map_hq ? 43.f : y0, x1, s.map_hq ? 350.f : y1);
     const auto alpha = std::uint32_t(std::clamp(s.map_alpha, kMapAlphaMin, kMapAlphaMax));
     draw_sprite(out, c.vs, c.tex, {HudPage::Minimap, 0, 0, 256, 256}, ix0, iy0, ix1, iy1, alpha << 24 | 0x37ff37u);
-    for (const HudMapDot& d : s.map_dots) { // port: the object icons are not decoded; 3×3 dots
-        const float x = std::round(ix0 + d.x), y = std::round(iy1 - d.y);
-        if (x < ix0 || x > ix1 || y < iy0 || y > iy1) continue;
-        fill(out, c.vs, x - 1, y - 1, x + 2, y + 2, d.argb);
+    // CSatelliteMap_DrawObjects 10074670 (hud-leftovers.md §3): buildings first, as 20×20 icons centred on the point
+    // (CBuilding_DrawMapIcon 100349b0; the `icons` texture, LoadMapIconSprites 10065370), then the units
+    // (CUnit_DrawMapIcon 10077ae0): a flyer is a 4×4 "+", the others a 3×3 square; the selected one (white) and
+    // the hero (green) get a box. [port] Sizes in virtual pixels like the rest; the heading line and the selected
+    // unit's route are not drawn.
+    static constexpr float kIconUv[11][2] = {{0, 24},  {24, 24},  {48, 0},   {72, 24},  {96, 24}, {120, 24},
+                                             {144, 24}, {48, 24}, {168, 24}, {216, 24}, {216, 24}};
+    for (int pass = 0; pass < 2; ++pass)
+        for (const HudMapDot& d : s.map_dots) {
+            if (d.building != (pass == 0)) continue;
+            const float x = std::round(ix0 + d.x), y = std::round(iy1 - d.y);
+            if (x < ix0 || x > ix1 || y < iy0 || y > iy1) continue;
+            if (d.building) {
+                if (d.icon >= 0 && d.icon < 11)
+                    draw_sprite(out, c.vs, c.tex, {HudPage::Icons, kIconUv[d.icon][0], kIconUv[d.icon][1], 24, 24}, x - 10, y - 10, x + 10, y + 10,
+                                d.argb);
+                continue;
+            }
+            if (d.flyer) {
+                draw_line(out, c.vs, x - 2, y, x + 2, y, d.argb);
+                draw_line(out, c.vs, x, y - 2, x, y + 2, d.argb);
+                if (d.selected) draw_rect_outline(out, c.vs, x - 4, y - 4, x + 4, y + 4, 0xffffffffu);
+                continue;
+            }
+            const float bx0 = x - 1, by0 = y - 1, bx1 = bx0 + 3, by1 = by0 + 3; // w = h = 3, from (x − w/2, y − h/2)
+            fill(out, c.vs, bx0, by0, bx1, by1, d.argb);
+            if (d.selected || d.hero) draw_rect_outline(out, c.vs, bx0 - 2, by0 - 2, bx1 + 1, by1 + 1, d.selected ? 0xffffffffu : 0xff00ff00u);
+        }
+    // The camera marker (views 2 / 4): a 4×4 box with an X and a direction stub 2..7 px, yellow.
+    if (s.map_camera) {
+        const auto& m = *s.map_camera;
+        const float x = ix0 + std::round(m[0]), y = iy1 - std::round(m[1]), dx = m[2], dy = -m[3];
+        draw_rect_outline(out, c.vs, x - 2, y - 2, x + 2, y + 2, 0xffffff00u);
+        draw_line(out, c.vs, x - 2, y - 2, x + 2, y + 2, 0xffffff00u);
+        draw_line(out, c.vs, x - 2, y + 2, x + 2, y - 2, 0xffffff00u);
+        draw_line(out, c.vs, x + 2 * dx, y + 2 * dy, x + 7 * dx, y + 7 * dy, 0xffffff00u);
     }
     draw_sprite(out, c.vs, c.tex, {HudPage::Page6, 132, 106, 21, 42}, ix1 - 21 - 1, iy1 - 42 - 1, ix1 - 1, iy1 - 1);
-    // CSatelliteMap_DrawAlphaLabel: "NN%" (rounded down to 5) for 1 s after a change; position inferred.
+    // CSatelliteMap_DrawAlphaLabel 10074a90: "NN%" (rounded down to 5) for 1 s after a change, at X = x0 + 6,
+    // ty = Y − (fontH + 1) with Y = y1 − 6, on a 0xff007300 box.
     if (s.map_alpha_label) {
         const int pct = int(alpha) * 100 / 255;
         const std::string t = std::to_string(pct - pct % 5) + "%";
         const float w = text_w(c, t), h = text_h(c);
-        fill(out, c.vs, ix0 + 2, iy1 - h - 6, ix0 + w + 8, iy1 - 2, 0xff007300u);
-        text(out, c, ix0 + 5, iy1 - h - 4, t, 0xff37ff37u);
+        const float X = x0 + 6, ty = std::round(y1 - 6 - h);
+        fill(out, c.vs, X - 3, ty - 3, std::round(X + 2 + w), std::round(ty + 4 + h - 1), 0xff007300u);
+        text(out, c, X, ty, t, 0xff37ff37u);
     }
 }
 

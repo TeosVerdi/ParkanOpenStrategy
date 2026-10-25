@@ -89,7 +89,14 @@ struct HudTargetMarker {
 struct HudMapDot {
     float x = 0, y = 0; // map pixels: 0..256 from the bottom-left corner of the map
     std::uint32_t argb = 0xffffffffu;
+    int icon = -1;          // a building: GetBuildingMapIconIndex 1009f460 (−1: a unit, or no icon)
+    bool building = false;
+    bool flyer = false;     // behaviour attribute 0x207 == 1: a "+"
+    bool selected = false;  // unit+0x80: the white box
+    bool hero = false;      // type 0x1020000: the green box when not selected
 };
+// GetBuildingMapIconIndex 1009f460: a building type's map icon (−1: none).
+int building_map_icon(std::uint32_t type);
 
 struct HudState {
     bool cockpit = true; // JAMES_COCKPIT_OFF
@@ -117,6 +124,10 @@ struct HudState {
     int map_alpha = 0x80;
     bool map_alpha_label = false;
     std::vector<HudMapDot> map_dots;
+    // The HQ layout (CSatelliteMap +0x260; views 2/4/5) and, in views 2 / 4, the camera marker: its map position
+    // and its X axis (the view direction) in map pixels, y up.
+    bool map_hq = false;
+    std::optional<std::array<float, 4>> map_camera; // x, y, dx, dy
 };
 
 // iron3d strings the HUD prints (cp1251).

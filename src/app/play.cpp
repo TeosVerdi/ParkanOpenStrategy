@@ -830,13 +830,18 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     // cockpit lamp 4).
     std::optional<std::size_t> inside;
     std::optional<std::size_t> manned; // the building index of a manned turret (view state 6)
+    std::set<std::uint32_t> infrared;  // units whose turret camera has flag 0x20 (Camera_IsInfrared 10035da0)
     bool exit_blocked = false;
     // FUN_100a5600 (mission+0xaec = unit) with the unit's CManManager enabled (CManManager_EnableInput 1000f0b0:
     // throttle and latches cleared, its table claimed).
     // unit+0x9c of the controlled unit (the hero: 0). [port] Autogunner (1) is driven as manual: the turret/fire
     // AI without the brain's movement is not separated yet; autopilot (2) leaves the unit to its brain.
     std::function<int()> ctl_mode = [] { return 0; }; // set with the HQ below
+    // The selected target (CTargeting+4) of the controlled unit; −1 none. Each unit has its own CTargeting: a change
+    // of the controlled unit starts without one [inferred: the new unit's targeting is not read].
+    std::int32_t hud_target = -1;
     auto set_control = [&](std::size_t li) {
+        hud_target = -1;
         ctl = li, ctl_ci = live_ci[li], cu = live[li].get(), cc = &combat.unit(ctl_ci);
         man.set_table(li == hero_slot ? hero_table : unit_table);
         // CManManager::SetComponentControl 1000ed20: the turret goes manual at angles (0.5, 0.5) (turret-camera.md
@@ -849,6 +854,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     // takes the input through the building's CManManager [inferred: M1.TBL]; the building's fire AI stops.
     auto set_control_building = [&](std::size_t k) {
         manned = k, ctl = SIZE_MAX, ctl_ci = bld_ci[k], cu = &buildings[k]->body(), cc = &combat.unit(ctl_ci);
+        hud_target = -1;
         man.set_table(unit_table);
         commands = {};
         last_angle_z = 0.5f;
@@ -869,10 +875,16 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     // HUD state (notes/hud.md §10): cockpit pages on/off, the satellite map and its alpha, the sight zoom,
     // the selected target (CTargeting+4; −1 none) and the last rendered camera (projections, the radar).
     bool cockpit_on = true, map_visible = false, zoomed = false;
-    int map_alpha = 0x80;          // CSatelliteMap +0x90 (iron_3d.ini MAP_ALPHA is not read)
+    int map_alpha = 0x80;          // CSatelliteMap +0x90
+    // CSatelliteMap ctor (100736d0): iron_3d.ini [CS] MAP_ALPHA, atoi, clamped to 30..255.
+    if (auto p = resolve_path(lib.game_dir(), "Iron_3D.ini")) {
+        const Bytes b = read_file(*p);
+        const std::string_view ini(reinterpret_cast<const char*>(b.data()), b.size());
+        if (shell::ini_get(ini, "CS", "MAP_ALPHA"))
+            map_alpha = std::clamp(shell::ini_get_int(ini, "CS", "MAP_ALPHA", 0x80), ui::kMapAlphaMin, ui::kMapAlphaMax);
+    }
     double map_alpha_changed_ms = -1e9;
     float zoom_fov = -1;           // the turret camera's current FOV (CUnit +0x14); < 0 = not started
-    std::int32_t hud_target = -1;
     double hud_target_since_ms = -1e9;
     std::optional<ViewerOptions::Camera> hud_cam;
     float max_speed_seen = 10.f;   // port: the speed arc's full scale (property 0x90 is not read)
@@ -970,15 +982,17 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     std::function<void(std::uint32_t)> computer_pager; // PostComputerPagerText(text id), set below
     // FUN_100a52b0 (MainLoop, every frame) while piloting: the controlled unit's repair system (the first type-0xf
     // device in state 0x20) and chameleon (type 0xa in state 0x1000) switching on / off → VOICE_REPAIR_SYS_ON / _OFF,
-    // VOICE_CHAMELEON_SYS_ON / _OFF (latches CUnit +0xa0 / +0xa1). The turret camera's infrared flag (VOICE_INFRA_SYS_*)
-    // is not modelled.
-    bool repair_on = false, chameleon_on = false;
+    // VOICE_CHAMELEON_SYS_ON / _OFF (latches CUnit +0xa0 / +0xa1), and the turret camera's infrared flag
+    // (VOICE_INFRA_SYS_ON / _OFF).
+    bool repair_on = false, chameleon_on = false, infra_on = false;
     auto system_voices = [&] {
         if (!piloting()) return;
         const bool r = cc->device_state(0xf) == 0x20u, c = cc->device_state(0xa) == 0x1000u;
         if (r != repair_on && say_voice) say_voice(r ? "VOICE_REPAIR_SYS_ON" : "VOICE_REPAIR_SYS_OFF");
         if (c != chameleon_on && say_voice) say_voice(c ? "VOICE_CHAMELEON_SYS_ON" : "VOICE_CHAMELEON_SYS_OFF");
-        repair_on = r, chameleon_on = c;
+        const bool ir = infrared.count(cc->logic_id) != 0;
+        if (ir != infra_on && say_voice) say_voice(ir ? "VOICE_INFRA_SYS_ON" : "VOICE_INFRA_SYS_OFF");
+        repair_on = r, chameleon_on = c, infra_on = ir;
     };
     auto update_targeting = [&] {
         const auto list = detected();
@@ -1564,6 +1578,14 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         // The multigun bindings (ExecuteBinding SELECT / STATE): 1–8 toggle a gun, 0 selects all, LMB
         // sets CIS_CONTINUEFIGHT on the selected guns and its release CIS_SWITCHOFF.
         for (const auto& a : commands.take_actions()) {
+            // CICLS_CAMERA STATE (CCameraDevice::SetState): INFRARED_ON 0x1000 / OFF 0x2000 / INV 0x4000 set the
+            // turret camera's flag 0x20 (Camera_SetInfraredOn 10035dc0; status lamp 1). [port] No render effect.
+            if (a.cls == 4 && a.cmd == kMcmdState && hero_input) {
+                if (a.state == 0x1000) infrared.insert(cc->logic_id);
+                else if (a.state == 0x2000) infrared.erase(cc->logic_id);
+                else if (a.state == 0x4000 && !infrared.erase(cc->logic_id)) infrared.insert(cc->logic_id);
+                continue;
+            }
             if (a.cls != 2 || !hero_input) continue;
             if (a.cmd == kMcmdSelect) cc->select(a.index);
             else if (a.cmd == kMcmdState && a.index == -1) cc->set_state_selected(std::uint32_t(a.state));
@@ -2024,7 +2046,8 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         // The sweep's period: property 0xa9 (the radar's GetParam(4), 750 in every shipped radar) · 0.002 s.
         const double period_ms = cc->radar_param(4).value_or(0.f) * 0.002 * 1000;
         // t / T since the last RADAR ping (the same timer, +0x35c; cockpit_sounds restarts it).
-        s.sweep = period_ms > 0 ? std::clamp(float((sim_ms - radar_ping_ms) / period_ms), 0.f, 1.f) : 0.f;
+        // No radar device (no property 0xa9): no sweep ring.
+        if (period_ms > 0) s.sweep = std::clamp(float((sim_ms - radar_ping_ms) / period_ms), 0.f, 1.f);
         for (std::int32_t i : detected()) {
             const Vec3 d = combat.unit(std::size_t(i)).unit->position() - hero_pos;
             ui::HudBlip b;
@@ -2043,6 +2066,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         // CStatusPage_Draw (1003f4b0): lamp 0 lit with the first type-0xf device (repair) in state 0x20, lamp 2 with
         // the first type-0xa one (detection shield / chameleon) in state 0x1000 (FUN_10077260 / 10077290).
         s.lamps[0] = cc->device_state(0xf) == 0x20u ? 1 : 0;
+        s.lamps[1] = infrared.count(cc->logic_id) ? 1 : 0;
         s.lamps[2] = cc->device_state(0xa) == 0x1000u ? 1 : 0;
         s.lamps[3] = !hq || hq->state() == ui::kStateHero || hq->state() == ui::kStatePilot ? 1 : 0; // piloted directly
         s.lamps[4] = exit_blocked ? 2 : 0; // CViewStateQueue+0x31: the warbot exit is blocked (red)
@@ -2137,14 +2161,32 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 s.marker = m;
             }
         }
-        // The satellite map: units as dots (x·256/S, S = the map's width).
+        // The satellite map's objects (CSatelliteMap_WorldToMap: x·256/S, S = the map's width): buildings by type
+        // icon, white when selected and own; units in the relation colour, flyers as "+", the selected one and the
+        // hero boxed (hud-leftovers.md §3). [port] The visibility rule (FUN_1007ea80) is not applied.
         s.map_visible = map_visible, s.map_alpha = map_alpha, s.map_alpha_label = sim_ms - map_alpha_changed_ms < 1000;
         const float S = std::max(1.f, ground.bounds_max().x);
         for (std::size_t i = 0; i < combat.size(); ++i) {
             const combat::Combatant& c = combat.unit(i);
             if (c.removed || !c.alive()) continue;
             const Vec3 p = c.unit->position();
-            s.map_dots.push_back({p.x * 256 / S, p.y * 256 / S, i == ctl_ci ? 0xffffffffu : unit_colour(i)});
+            const std::uint32_t lid = placement_of(i).identity, clan = clan_of(i);
+            const auto ti = tma_types.find(lid);
+            const std::uint32_t type = ti != tma_types.end() ? ti->second : 0;
+            ui::HudMapDot d{p.x * 256 / S, p.y * 256 / S, unit_colour(i)};
+            if (c.building()) {
+                d.building = true, d.icon = ui::building_map_icon(type);
+                if (hq && hq->selected_building() == lid && clan == hero_clan) d.argb = 0xffffffffu;
+            } else {
+                const std::int32_t li = ci_live[i];
+                d.flyer = li >= 0 && contains_ci(live[std::size_t(li)]->model.chassis_sheet, "chas_fly");
+                d.hero = type == game::kTypeHero;
+                if (hq) {
+                    const auto& sel = hq->selected_units();
+                    d.selected = std::find(sel.begin(), sel.end(), lid) != sel.end();
+                }
+            }
+            s.map_dots.push_back(d);
         }
         return s;
     };
@@ -2652,7 +2694,12 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             ui::draw_hq(f, hc, hq_sprites, *hq, objectives_visible);
             if (!objectives_visible && hq->map_open) {
                 ui::HudState hs = build_hud(hq_aspect);
-                hs.cockpit = false, hs.map_visible = true;
+                hs.cockpit = false, hs.map_visible = true, hs.map_hq = true;
+                if (hq->view_mode() == 2) {
+                    const float S = std::max(1.f, ground.bounds_max().x);
+                    const Vec3 f = hq->camera.forward(); // M[0], M[4]: the placement's X column
+                    hs.map_camera = std::array<float, 4>{hq->camera.pos.x * 256 / S, hq->camera.pos.y * 256 / S, f.x, f.y};
+                }
                 ui::draw_hud(f, hc, hs);
             }
             if (pager && !objectives_visible) ui::draw_pager(f, vs, game_font, *pager, true);
@@ -2672,7 +2719,53 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                     }
         } else if (!objectives_visible) {
             const ui::HudState hs = build_hud(float(f.width) / float(std::max(1u, f.height)));
+            const std::size_t hud_quads = f.quads.size();
             ui::draw_hud(f, ui::HudContext{vs, game_font, hud_tex, hud_strings}, hs);
+            // The targeters' 3D views (CTargeter_Draw 100412a0, hud-leftovers.md §1): the shown object seen from the
+            // own unit's direction (the target, page 1) or from behind along its forward axis (the own unit, page 2),
+            // from 2r off its bounding-sphere centre with fov 2·(π/6)·1.25, near 0.5, far 300 (CameraCtl_Init).
+            // [port] Units with a design only (the assembled design's bind pose at the unit's placement); drawn after
+            // the whole cockpit.
+            auto targeter_view = [&](std::size_t ci, float x0, float y0, float x1, float y1) {
+                if (!hq || !eco || !runtime || !hq->host().design_mesh) return;
+                const std::int32_t li = ci_live[ci];
+                const game::WorldObject* w = runtime->world().find(combat.unit(ci).logic_id);
+                const mission::Scheme* sc = w ? eco->schemes().get(w->resource) : nullptr;
+                if (li < 0 || !sc) return;
+                const auto mesh = hq->host().design_mesh(*sc);
+                if (!mesh) return;
+                const Mat4& M = live[std::size_t(li)]->frame.matrix;
+                const Vec3 C = M.transform_point((mesh->bounds_min + mesh->bounds_max) * 0.5f), ext = mesh->bounds_max - mesh->bounds_min;
+                const float r = std::max(0.01f, 0.5f * std::sqrt(dot(ext, ext)));
+                Vec3 dir;
+                if (ci == ctl_ci) {
+                    dir = Vec3{M.at(0, 1), M.at(1, 1), M.at(2, 1)};
+                } else {
+                    dir = C - cu->position();
+                    if (combat.unit(ci).building() && dir.z > 0) dir.z = 0;
+                }
+                if (dot(dir, dir) < 1e-8f) return;
+                dir = normalize(dir);
+                constexpr float kNear = 0.5f, kFar = 300.f, kHalf = 0.5235988f, k = 2.f;
+                if (2 * r > kFar - kNear) return;
+                float d = k * r, fov = 2 * kHalf * 1.25f;
+                if (!((k - 1) * r >= kNear && (k + 1) * r <= kFar)) {
+                    d = (k - 1) * r < kNear ? kNear + r : kFar - r;
+                    fov = std::acos(1 - 2 * (r / d) * (r / d)) * 1.25f;
+                }
+                OverlayInset in;
+                in.mesh = mesh;
+                for (const Mat4& t : mesh->transforms) in.transforms.push_back(M * t);
+                in.eye = C - dir * d, in.forward = dir, in.up = Vec3{0, 0, 1};
+                in.fov_x = fov, in.znear = kNear, in.zfar = kFar;
+                in.x0 = x0 * vs.sx(), in.y0 = y0 * vs.sy(), in.x1 = x1 * vs.sx(), in.y1 = y1 * vs.sy();
+                in.after_quads = f.quads.size();
+                f.insets.push_back(std::move(in));
+            };
+            if (hs.cockpit && f.quads.size() > hud_quads) {
+                if (hs.target && hud_target >= 0) targeter_view(std::size_t(hud_target), 9, 315, 137, 443);
+                targeter_view(ctl_ci, 503, 315, 631, 443);
+            }
             cockpit_sounds(hs);
             if (pager) ui::draw_pager(f, vs, game_font, *pager);
         }
