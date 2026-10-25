@@ -68,6 +68,22 @@ std::optional<GroundHit> TerrainGround::probe(Vec3 p, float max_rise) const {
     return best;
 }
 
+std::optional<GroundHit> TerrainGround::probe_vertical(Vec3 p, bool above) const {
+    if (tris_.empty() || p.x < min_.x || p.y < min_.y || p.x > max_.x || p.y > max_.y) return std::nullopt;
+    const int cx = std::clamp(int((p.x - min_.x) / cell_), 0, nx_ - 1), cy = std::clamp(int((p.y - min_.y) / cell_), 0, ny_ - 1);
+    std::optional<GroundHit> best;
+    for (std::uint32_t i : cells_[std::size_t(cx) * std::size_t(ny_) + std::size_t(cy)]) {
+        const Tri& t = tris_[i];
+        auto edge = [&](Vec3 a, Vec3 b) { return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x); };
+        const float e0 = edge(t.a, t.b), e1 = edge(t.b, t.c), e2 = edge(t.c, t.a);
+        if (!((e0 >= 0 && e1 >= 0 && e2 >= 0) || (e0 <= 0 && e1 <= 0 && e2 <= 0))) continue;
+        const float z = t.a.z - (t.n.x * (p.x - t.a.x) + t.n.y * (p.y - t.a.y)) / t.n.z;
+        if (above ? z < p.z : z > p.z) continue;
+        if (!best || std::abs(z - p.z) < std::abs(best->z - p.z)) best = GroundHit{z, t.n, t.face, t.flags};
+    }
+    return best;
+}
+
 std::optional<TraceHit> TerrainGround::trace(Vec3 a, Vec3 b) const {
     if (cells_.empty()) return std::nullopt;
     std::optional<TraceHit> best;
@@ -76,7 +92,7 @@ std::optional<TraceHit> TerrainGround::trace(Vec3 a, Vec3 b) const {
             const Tri& t = tris_[i];
             const auto hit = segment_triangle(a, b, t.a, t.b, t.c);
             if (!hit || (best && *hit >= best->t)) continue;
-            best = TraceHit{*hit, a + (b - a) * *hit, t.n, t.face, 0};
+            best = TraceHit{*hit, a + (b - a) * *hit, t.n, t.face, 0, t.n};
         }
         return !(best && best->t <= exit);
     });

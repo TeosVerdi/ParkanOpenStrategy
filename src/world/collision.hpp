@@ -37,8 +37,9 @@ Vec3 horizontal_push(Vec3 p);
 // face normal (unit, facing the segment's start), the triangle and its source transform.
 struct TraceHit {
     float t = 1;
-    Vec3 point{}, normal{0, 0, 1};
+    Vec3 point{}, normal{0, 0, 1}; // normal: facing the segment's start
     std::uint32_t triangle = 0, transform = 0;
+    Vec3 face_normal{0, 0, 1};     // the triangle's own normal (winding order), not flipped
 };
 
 // Möller–Trumbore, two-sided: t in [0, 1] of the segment a → b, or nullopt.

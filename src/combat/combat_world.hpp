@@ -135,6 +135,7 @@ struct WorldHit {
     float t = 1;
     Vec3 point{}, normal{0, 0, 1};
     std::int32_t unit = -1, part = -1; // unit index and resolved damage part
+    Vec3 face_normal{0, 0, 1};         // the face's own normal (winding order), not flipped toward a
 };
 
 class CombatWorld {

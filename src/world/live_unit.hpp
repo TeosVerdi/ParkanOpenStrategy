@@ -62,11 +62,13 @@ public:
     // lib/entry). nullopt when the lists do not say. The surface choice itself is not decoded.
     std::optional<std::pair<std::string, std::string>> touchdown_effect(std::int32_t event_list) const;
 
-    // Floors above the landscape (object floors, bridges, building roofs): the highest surface on the
-    // segment top → bottom, if any. The original's FollowGround probes the whole world (IWorld faces).
-    using FloorProbe = std::function<std::optional<float>(Vec3 top, Vec3 bottom)>;
-    // DropToGround: the current state's contact points onto the ground (mean height); `floor` adds the
-    // object faces (load() has none yet).
+    // Object faces (floors, bridges, roofs) beside the landscape: the original probes the whole world
+    // (IWorld::FindNearestFace10 over the landscape and every object).
+    // The first object face along the segment from → to: its height and its own (winding) normal.
+    using FloorProbe = std::function<std::optional<GroundHit>(Vec3 from, Vec3 to)>;
+    // DropToGround: the current state's contact points onto their faces (ProbeGroundFace: the nearest
+    // face above within the sphere radius, else the nearest below); `floor` adds the object faces
+    // (load() has none yet).
     void drop_to_ground(float now_ms, const TerrainGround& ground, const FloorProbe& floor = {});
     // Back to the TMA placement, then DropToGround with the object faces (play, once they exist).
     void place(float now_ms, const TerrainGround& ground, const FloorProbe& floor);

@@ -134,9 +134,9 @@ std::optional<TraceHit> TraceMesh::trace(Vec3 a, Vec3 b) const {
             const Tri& t = tris_[i];
             const auto hit = segment_triangle(a, b, t.a, t.b, t.c);
             if (!hit || (best && *hit >= best->t)) continue;
-            Vec3 n = normalize(cross(t.b - t.a, t.c - t.a));
-            if (dot(n, b - a) > 0) n = n * -1.f;
-            best = TraceHit{*hit, a + (b - a) * *hit, n, i, t.transform};
+            const Vec3 face = normalize(cross(t.b - t.a, t.c - t.a));
+            const Vec3 n = dot(face, b - a) > 0 ? face * -1.f : face;
+            best = TraceHit{*hit, a + (b - a) * *hit, n, i, t.transform, face};
         }
         return !(best && best->t <= exit); // a hit inside this cell is the nearest
     });

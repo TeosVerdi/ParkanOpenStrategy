@@ -109,40 +109,61 @@ std::unique_ptr<LiveUnit> LiveUnit::load(AssetLibrary& lib, const mission::TmaOb
     return u;
 }
 
+namespace {
+
+// FindNearestFace10 along Z over the landscape and the objects (Terrain 10017ae0 → each object's
+// GetWalkFace, CLandscape 10014b20): of the faces at or above (mode bit 4) or at or below (bit 8) p, the
+// nearest in height.
+std::optional<GroundHit> nearest_face(const TerrainGround& ground, const LiveUnit::FloorProbe& floor, Vec3 p, bool above) {
+    std::optional<GroundHit> best = ground.probe_vertical(p, above);
+    if (floor)
+        if (auto f = floor(p, p + Vec3{0, 0, above ? 1000.f : -1000.f}); f && (!best || std::abs(f->z - p.z) < std::abs(best->z - p.z)))
+            best = f;
+    return best;
+}
+
+constexpr float kMinGroundNz = 0.173648f; // 1003c040: faces steeper than 80° are not ground
+constexpr float kStepLimit = 7.5f;        // FollowGround's rise limit (1001a4a5)
+
+// FollowGround's ground probe (1001a6c7..1001a7ef; the FindWorldFace walk from the cached face that
+// precedes it is not ported): the nearest face above, if not too steep and less than the step limit
+// higher; else the nearest face below, if not too steep; else the face above whatever it is.
+std::optional<GroundHit> follow_probe(const TerrainGround& ground, const LiveUnit::FloorProbe& floor, Vec3 p) {
+    const auto up = nearest_face(ground, floor, p, true);
+    if (up && up->normal.z > kMinGroundNz && up->z - p.z < kStepLimit) return up;
+    if (auto down = nearest_face(ground, floor, p, false); down && down->normal.z > kMinGroundNz) return down;
+    return up;
+}
+
+} // namespace
+
 void LiveUnit::drop_to_ground(float now_ms, const TerrainGround& ground, const FloorProbe& floor) {
     // CControlBase::DropToGround (10018800): the contact points of the current state (state 0 at load)
-    // are probed (ProbeGroundFace: landscape and object faces) and the body shifts by the summed height
-    // to the faces divided by the number of contacts (flags 0x30 / 0xc0 tilt and upright are not
-    // ported). Without contact points the body origin is probed. Port: a point's face is the highest
-    // landscape or object face at most the step limit above it, as FollowGround accepts them
-    // [inferred for DropToGround]; when no point finds one, the highest landscape face within 50 m above
-    // (port fallback for placements below the landscape, e.g. before the object faces exist).
+    // are probed and the body shifts by the summed height to their faces divided by the number of
+    // contacts; a point without a face adds nothing (flags 0x30 / 0xc0 tilt and upright are not ported).
+    // Without contact points the body origin is probed.
+    // ProbeGroundFace (100195a0) over the landscape and the objects (FindNearestFace10 → each object's
+    // GetWalkFace along Z, the nearest kept): the nearest face at or above the point (mode 6) when it is
+    // less than the unit's sphere radius above it (ctl+0x24 slot 0x24: port, the collision sphere),
+    // else the nearest face at or below it (mode 0xa).
     MotionFrame f = motion->interpolate(now_ms);
     ModelAsset& chassis = model.parts.front().model;
     pose_model_blend(chassis, f.frame_a, f.frame_b, f.weight_b);
-    constexpr float kStep = 7.5f;
-    auto support = [&](Vec3 p) -> std::optional<float> {
-        std::optional<float> z;
-        if (auto g = ground.probe(p, kStep)) z = g->z;
-        if (floor)
-            if (auto fz = floor(p + Vec3{0, 0, kStep}, p - Vec3{0, 0, 1000.f}); fz && (!z || *fz > *z)) z = fz;
-        return z;
+    auto probe = [&](Vec3 p) -> std::optional<GroundHit> {
+        if (auto up = nearest_face(ground, floor, p, true); up && up->z - p.z < sphere_radius) return up;
+        return nearest_face(ground, floor, p, false);
     };
-    std::vector<Vec3> probes;
+    std::vector<Vec3> points_w;
     for (const auto& c : motion->contacts()) {
         const auto pi = c.point;
         if (pi >= points.size() || points[pi].part >= chassis.node_world.size()) continue;
-        probes.push_back((f.matrix * chassis.node_world[points[pi].part]).transform_point(points[pi].pos));
+        points_w.push_back((f.matrix * chassis.node_world[points[pi].part]).transform_point(points[pi].pos));
     }
-    if (probes.empty()) probes.push_back(translation(f.matrix));
+    if (points_w.empty()) points_w.push_back(translation(f.matrix));
     float sum = 0;
-    bool any = false;
-    for (const Vec3& p : probes)
-        if (auto z = support(p)) sum += *z - p.z, any = true;
-    if (!any) // port fallback (see above)
-        for (const Vec3& p : probes)
-            if (auto g = ground.probe(p + Vec3{0, 0, 50}, 100.f)) sum += g->z - p.z;
-    motion->apply_offset({0, 0, sum / float(probes.size())});
+    for (const Vec3& p : points_w)
+        if (auto g = probe(p)) sum += g->z - p.z;
+    motion->apply_offset({0, 0, sum / float(points_w.size())});
 }
 
 void LiveUnit::place(float now_ms, const TerrainGround& ground, const FloorProbe& floor) {
@@ -152,15 +173,9 @@ void LiveUnit::place(float now_ms, const TerrainGround& ground, const FloorProbe
 }
 
 Vec3 LiveUnit::settle(float now_ms, const TerrainGround& ground, const StaticColliders& statics, const FloorProbe& floor) {
-    // The landscape or an object face under p, whichever is higher; either may rise at most the step
-    // limit (7.5 m) above p (FollowGround's FindNearestFace10 acceptance).
-    constexpr float kFloorStep = 7.5f;
     auto support = [&](Vec3 p) -> std::optional<float> {
-        std::optional<float> z;
-        if (auto g = ground.probe(p)) z = g->z;
-        if (floor)
-            if (auto f = floor(p + Vec3{0, 0, kFloorStep}, p - Vec3{0, 0, 1000.f}); f && (!z || *f > *z)) z = f;
-        return z;
+        auto g = follow_probe(ground, floor, p);
+        return g ? std::optional<float>(g->z) : std::nullopt;
     };
     // FollowGround, reduced: the feet (the CTPT contact points of the motion graph) are probed and the
     // body is moved so the lowest support stands on the ground (dz = max(ground − foot)).
@@ -190,10 +205,8 @@ Vec3 LiveUnit::settle(float now_ms, const TerrainGround& ground, const StaticCol
         // Port: the sphere is LiveUnit's collision sphere [inferred: the same sphere].
         const Vec3 p = f.matrix.transform_point(sphere_centre);
         const float r = sphere_radius > 7.5f && sphere_radius < 20.f ? 7.5f : sphere_radius;
-        auto g = ground.probe(p + Vec3{0, 0, 1000}, 2000.f);
-        dz = g ? std::max(0.f, g->z + r - p.z) : 0.f;
-        if (floor)
-            if (auto fz = floor(p + Vec3{0, 0, kFloorStep}, p - Vec3{0, 0, 1000.f})) dz = std::max(dz, *fz + r - p.z);
+        auto g = support(p);
+        dz = g ? std::max(0.f, *g + r - p.z) : 0.f;
         clearance.clear();
     }
     motion->apply_offset({0, 0, dz});

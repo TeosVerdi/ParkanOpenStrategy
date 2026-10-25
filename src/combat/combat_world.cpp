@@ -425,10 +425,10 @@ std::optional<WorldHit> CombatWorld::trace(Vec3 a, Vec3 b, std::int32_t skip) co
 std::optional<WorldHit> CombatWorld::trace(Vec3 a, Vec3 b, std::int32_t skip, bool everything) const {
     std::optional<WorldHit> best;
     if (everything)
-        if (auto h = ground_.trace(a, b)) best = WorldHit{WorldHit::Kind::Terrain, h->t, h->point, h->normal};
+        if (auto h = ground_.trace(a, b)) best = WorldHit{WorldHit::Kind::Terrain, h->t, h->point, h->normal, -1, -1, h->face_normal};
     if (statics_)
         if (auto h = statics_->trace(a, b); h && (!best || h->t < best->t))
-            best = WorldHit{WorldHit::Kind::Static, h->t, h->point, h->normal};
+            best = WorldHit{WorldHit::Kind::Static, h->t, h->point, h->normal, -1, -1, h->face_normal};
     for (std::size_t i = 0; i < units_.size(); ++i) {
         const Combatant& c = *units_[i];
         if (std::int32_t(i) == skip || c.removed || !c.alive() || c.unit->posed.empty() || (!everything && !c.building())) continue;
@@ -463,9 +463,9 @@ std::optional<WorldHit> CombatWorld::trace(Vec3 a, Vec3 b, std::int32_t skip, bo
                     const Vec3* v = &dc.verts[k];
                     const auto t = segment_triangle(a, b, v[0], v[1], v[2]);
                     if (!t || (best && *t >= best->t)) continue;
-                    Vec3 n = normalize(cross(v[1] - v[0], v[2] - v[0]));
-                    if (dot(n, b - a) > 0) n = n * -1.f;
-                    best = WorldHit{WorldHit::Kind::Unit, *t, a + (b - a) * *t, n, std::int32_t(i), std::int32_t(part)};
+                    const Vec3 face = normalize(cross(v[1] - v[0], v[2] - v[0]));
+                    const Vec3 n = dot(face, b - a) > 0 ? face * -1.f : face;
+                    best = WorldHit{WorldHit::Kind::Unit, *t, a + (b - a) * *t, n, std::int32_t(i), std::int32_t(part), face};
                 }
                 continue;
             }
@@ -477,9 +477,9 @@ std::optional<WorldHit> CombatWorld::trace(Vec3 a, Vec3 b, std::int32_t skip, bo
                 }
                 const auto t = segment_triangle(a, b, v[0], v[1], v[2]);
                 if (!t || (best && *t >= best->t)) continue;
-                Vec3 n = normalize(cross(v[1] - v[0], v[2] - v[0]));
-                if (dot(n, b - a) > 0) n = n * -1.f;
-                best = WorldHit{WorldHit::Kind::Unit, *t, a + (b - a) * *t, n, std::int32_t(i), std::int32_t(part)};
+                const Vec3 face = normalize(cross(v[1] - v[0], v[2] - v[0]));
+                const Vec3 n = dot(face, b - a) > 0 ? face * -1.f : face;
+                best = WorldHit{WorldHit::Kind::Unit, *t, a + (b - a) * *t, n, std::int32_t(i), std::int32_t(part), face};
             }
         }
     }

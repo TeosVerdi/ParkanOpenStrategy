@@ -302,10 +302,9 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     }
     // Floors: object surfaces and building bodies (bridges, hangar floors), beside the landscape
     // (LiveUnit::settle / drop_to_ground).
-    const LiveUnit::FloorProbe floor_probe = [&](Vec3 top, Vec3 bottom) -> std::optional<float> {
-        // Faces steeper than 80° are not ground (FindNearestFace10: n.z > 0.1736).
-        const auto h = combat.trace_floor(top, bottom);
-        return h && std::abs(h->normal.z) > 0.1736f ? std::optional<float>(h->point.z) : std::nullopt;
+    const LiveUnit::FloorProbe floor_probe = [&](Vec3 from, Vec3 to) -> std::optional<GroundHit> {
+        const auto h = combat.trace_floor(from, to);
+        return h ? std::optional<GroundHit>(GroundHit{h->point.z, h->face_normal}) : std::nullopt;
     };
     // DropToGround again with the object faces, now that the buildings stand: units placed on a bridge
     // or a building's floor (heroes starting in their base) stay there.

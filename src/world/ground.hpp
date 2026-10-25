@@ -29,6 +29,9 @@ public:
     // `max_rise` above p.z wins (the original accepts a rise below the step limit, ≤ 7.5 m);
     // nullopt off the map or when every face there is higher.
     std::optional<GroundHit> probe(Vec3 p, float max_rise = 7.5f) const;
+    // CLandscape::GetWalkFace along Z (10014b20) with mode bit 4 (`above`: faces at or above p) or bit 8
+    // (faces at or below p): of the faces under (p.x, p.y), the one nearest to p.z on that side.
+    std::optional<GroundHit> probe_vertical(Vec3 p, bool above) const;
 
     // The first landscape face along the segment a → b (bullets: TraceBulletVsWorld 1001d9d0 on the
     // landscape); TraceHit::triangle is the terrain face index. Water surfaces are not hit (as in probe).
