@@ -23,6 +23,12 @@ std::int32_t slot(const HudTextures& t, HudPage p) {
     case HudPage::UiMenu: return t.ui_menu;
     case HudPage::UiMenu3: return t.ui_menu3;
     case HudPage::Minimap: return t.minimap;
+    case HudPage::NewUi1: return t.new_ui1;
+    case HudPage::Icons: return t.icons;
+    case HudPage::Page1: return t.page1;
+    case HudPage::Page3: return t.page3;
+    case HudPage::Page4: return t.page4;
+    case HudPage::Page5: return t.page5;
     }
     return -1;
 }

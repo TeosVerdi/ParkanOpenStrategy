@@ -28,6 +28,7 @@ add_library(parkan_core STATIC
   src/ui/campaign.cpp
   src/ui/hq.cpp
   src/ui/hq_draw.cpp
+  src/ui/designer.cpp
   src/shell/briefing.cpp
   src/shell/movie.cpp
   src/shell/shell_data.cpp
@@ -164,6 +165,7 @@ target_sources(parkan_core PRIVATE
   src/economy/research.cpp
   src/economy/distributor.cpp
   src/economy/economy.cpp
+  src/economy/assembly.cpp
 )
 target_sources(parkan_core PRIVATE src/game/design_planner.cpp)
 target_sources(parkan-tests PRIVATE tools/economy_tests.cpp)

@@ -2,6 +2,9 @@
 // from the draw functions named at each part; the compaund.cfg skin cells are the RowCell_* primitives
 // (notes/hud.md §1.3, GetSkinSpriteByStyle 100987f0).
 #include "ui/hq.hpp"
+#include "ui/designer.hpp"
+
+#include "game/mission_runtime.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -129,6 +132,53 @@ std::uint32_t unit_kind_tint(std::uint32_t kind) {
     default: return 0xffffffffu;
     }
 }
+// GetUnitIcons 10077570: the second icon by attribute 0x207 (chassis type 1..4 at u = 97/49/65/81, v = 94).
+std::optional<Sprite> unit_chassis_icon(std::int32_t chassis) {
+    static constexpr float kU[4] = {97, 49, 65, 81};
+    if (chassis < 1 || chassis > 4) return std::nullopt;
+    return Sprite{HudPage::UiMenu, kU[chassis - 1], 94, 15, 15};
+}
+
+// DrawUnitStats 10070090 at (x, y): the title (yellow, at y + 1), then weight, max speed, defence, combat and radar
+// lines from y + 1 + LH + 3, step LH = round((font height + 2) / ScaleY): the label green at x, the value at
+// x + 80 + round(52 − value width) (right-aligned; 100e6454 = 52.0, the width is the value string's, 1007035c) in 0xffb4b4ff (the weight red when the free payload is 0), the unit green at
+// x + 135. Defence and combat as % normalised with iron_3d.ini [TEMP] (NORMALIZE, DEFENCE_MIN/MAX,
+// OFFENCE_MIN/MAX; a value ≤ MIN prints the original's leftover register — the port prints 0).
+void draw_unit_stats(const Ui& ui, float x, float y, const economy::UnitStats& st, const std::string& title) {
+    const HqStatNormalize& nm = ui.hq.host().stat_norm;
+    const float lh = ui.c.font.font ? std::round(float(ui.c.font.font->height + 2) * ui.c.vs.glyph_scale / ui.c.vs.sy()) : 10.f;
+    if (!title.empty()) ui.text(x, y + 1, title, 0xffffff00u);
+    float yl = y + 1 + lh + 3;
+    auto line = [&](std::uint32_t label, const std::string& value, std::uint32_t value_ink, const std::string& unit) {
+        const std::string l = ui.str(label);
+        ui.text(x, yl, l, 0xff00ff00u);
+        ui.text(x + 80 + std::round(52 - ui.text_w(value)), yl, value, value_ink); // right-aligned at x + 132
+        ui.text(x + 135, yl, unit, 0xff00ff00u);
+        yl += lh;
+    };
+    auto fmt = [](const char* f, double a, double b = 0) {
+        char buf[64];
+        std::snprintf(buf, sizeof buf, f, a, b);
+        return std::string(buf);
+    };
+    auto pct = [&](float v, float lo, float hi) {
+        if (!nm.normalize) return fmt("%f", v);
+        if (v >= hi) return std::string("100");
+        if (v > lo) return std::to_string(int(std::lround(100.f / (hi - lo) * (v - lo))));
+        return std::string("0");
+    };
+    line(5069, fmt("%-.f / %-.f", st.mass * 0.001, st.payload_free * 0.001), st.payload_free > 0 ? 0xffb4b4ffu : 0xffff0000u, ui.str(6206));
+    line(5070, fmt("%-.f", st.speed * 3.6), 0xffb4b4ffu, ui.str(6176));
+    line(5071, pct(st.defence, nm.defence_min, nm.defence_max), 0xffb4b4ffu, "%");
+    line(5072, pct(st.offence, nm.offence_min, nm.offence_max), 0xffb4b4ffu, "%");
+    line(5073, fmt("%-.f", st.radar.value_or(0.f)), 0xffb4b4ffu, ui.str(6178));
+}
+
+// FUN_10076a30 / FUN_10070b90: a design's name "%s-%s %s" (debug code, "X", type name) in yellow.
+std::string design_title(const Ui& ui, const economy::UnitStats& st, std::uint32_t type) {
+    return economy::unit_debug_code(st.size_class, st.chassis_type, type) + "-X " + ui.str(economy::unit_type_name_id(type));
+}
+
 // FUN_100346a0: the building icon (ui_menu 15×15) by type, tinted by +0x30 (1 white, 2 red, 3 green, 4/5 blue).
 std::optional<Sprite> building_icon(std::uint32_t type) {
     switch (type) {
@@ -147,7 +197,7 @@ std::optional<Sprite> building_icon(std::uint32_t type) {
 std::string unit_label(const Ui& ui, std::uint32_t lid) {
     // name + " [" + GetOrderTypeName(first order) + "]" (DAT_101043cc / DAT_10102f5c).
     const game::WorldObject* o = ui.hq.world().find(lid);
-    const std::string name = ui.hq.host().name ? ui.hq.host().name(lid) : std::string();
+    const std::string name = ui.hq.display_name(lid);
     return name + " [" + ui.str(order_type_text(o ? o->current_order() : 0)) + "]";
 }
 
@@ -218,7 +268,9 @@ void draw_unit_row(const Ui& ui, std::uint32_t lid, float y) {
     r.lamp_ending(sel);
     const auto icon = unit_class_icon(o ? o->type : 0);
     r.icon_cell(icon ? &*icon : nullptr, unit_kind_tint(o ? o->size_class : 0));
-    r.icon_cell(nullptr, 0xffffffffu); // the second icon (attribute 0x207 1..4) [deferred: not modelled]
+    const auto st = ui.hq.host().unit_stats ? ui.hq.host().unit_stats(lid) : std::nullopt;
+    const auto chassis = unit_chassis_icon(st ? st->chassis_type : 0);
+    r.icon_cell(chassis ? &*chassis : nullptr, unit_kind_tint(o ? o->size_class : 0));
     r.separator();
     r.emitter(sel);
     r.bar(248, int(health(ui, lid)), unit_label(ui, lid), sel ? 0xffffffffu : 0xff808080u);
@@ -241,7 +293,7 @@ void draw_building_row(const Ui& ui, std::uint32_t lid, float y) {
     if (turret) r.button("short_button", sel, "buildscreen_hq_icon"); // greyed when IsTurretDisabled [port: never]
     const float w = 0x162 - r.x; // the bar runs to 354 from the emitter's start
     r.emitter(sel);
-    r.bar(w, int(health(ui, lid)), ui.hq.host().name ? ui.hq.host().name(lid) : std::string(), sel ? 0xffffffffu : 0xff808080u);
+    r.bar(w, int(health(ui, lid)), ui.hq.display_name(lid), sel ? 0xffffffffu : 0xff808080u);
     r.ray_end();
 }
 
@@ -252,9 +304,11 @@ void draw_unit_panel(const Ui& ui, std::uint32_t lid) {
     if (!o) return;
     const std::uint32_t tint = unit_kind_tint(o->size_class);
     if (const auto icon = unit_class_icon(o->type)) draw_sprite(ui.out, ui.c.vs, ui.c.tex, *icon, x + 9, y + 7, x + 24, y + 22, tint);
+    const auto st = ui.hq.host().unit_stats ? ui.hq.host().unit_stats(lid) : std::nullopt;
+    if (const auto ch = unit_chassis_icon(st ? st->chassis_type : 0)) draw_sprite(ui.out, ui.c.vs, ui.c.tex, *ch, x + 26, y + 7, x + 41, y + 22, tint);
     ui.text(x + 50, y + 10, unit_label(ui, lid), 0xffffff00u);
-    // The stats block (DrawUnitStats 10070090: weight, max speed, defence, combat, radar) [deferred: the control
-    // properties 0x91 / 0xb1 / 0xb2 / 0x50 and the weight are not modelled].
+    // DrawUnitStats(x + 71, y + 7, unit, "") (call at 1008633f).
+    if (st) draw_unit_stats(ui, x + 71, y + 7, *st, {});
     const bool usable = o->alive && o->current_order() != 0x18;
     const std::uint32_t ink = usable ? 0xffffffffu : 0xff808080u;
     auto button = [&](float bx, const char* icon, std::uint32_t argb) {
@@ -329,6 +383,11 @@ void draw_research(const Ui& ui) {
         for (std::size_t i = 0; i < unlocks.size() && i < 4; ++i)
             if (const mission::ResearchItem* u = res->item(std::int32_t(unlocks[i]))) ui.text(86, 60 + float(i) * h, u->name, 0xffffffffu);
         if (unlocks.size() > 4) ui.text(86, 60 + 4 * h, "...", 0xffffffffu);
+        // The item's display model in a 127×127 CModelView at (226, 18) (CResearchDetails 10088d90 [layout from
+        // hq-ui.md §8]).
+        if (const mission::ResearchTree& tree = res->tree(); hq.host().part_mesh && item->model_index() < tree.models.size())
+            hq.research_view.mesh = hq.host().part_mesh(tree.models[item->model_index()]);
+        draw_model_view(ui.out, ui.c.vs, hq.research_view, 226, 18, 127, 127, hq.now());
     }
     // The batch button (6243): white for one frame after a press, else 0xff80ff80.
     const std::uint32_t batch_ink = hq.research_batch_flash >= 0 && hq.now() - hq.research_batch_flash < 34 ? 0xffffffffu : 0xff80ff80u;
@@ -398,13 +457,15 @@ void draw_factory(const Ui& ui) {
     if (hq.projects().empty() && p->project < 0) {
         ui.text(x + 20, y + 10, ui.str(6240), 0xffffffffu);
         ui.text(x + 20, y + 10 + ui.text_h() + 1, ui.str(6241), 0xffffffffu);
-    } else {
-        std::string name;
-        if (p->project >= 0 && p->project < int(hq.projects().size())) name = hq.projects()[std::size_t(p->project)].file;
-        else if (info) name = info->scheme;
-        if (auto cut = name.find_last_of("\\/"); cut != std::string::npos) name = name.substr(cut + 1);
-        if (auto dot = name.rfind('.'); dot != std::string::npos) name.resize(dot); // [inferred] the design's name
-        ui.text(x + 10, y + 10, name, 0xffffffffu);
+    } else if (const mission::Scheme* sc = hq.preview_scheme()) {
+        // The preview object's name (FUN_10070b90) and DrawUnitStats(x + 10, y + 10, preview, "") (10097974).
+        if (const auto st = hq.host().design_stats ? hq.host().design_stats(*sc) : std::nullopt) {
+            ui.text(x + 10, y + 10, design_title(ui, *st, sc->flags), 0xffffff00u);
+            draw_unit_stats(ui, x + 10, y + 10, *st, {});
+        }
+        // CModelView at (x + 0xb9, y + 2), 0x73 × 0x73 (CPlantPanel_SelectProject 10098240), drawn last (10097430).
+        if (hq.host().design_mesh) hq.factory_view.mesh = hq.host().design_mesh(*sc);
+        draw_model_view(ui.out, ui.c.vs, hq.factory_view, x + 0xb9, y + 2, 0x73, 0x73, hq.now());
     }
     // The brain icon: 0xff80ff80 with a free brain, else 0xffc80000 blinking every 0.5 s; the free count beside.
     const bool blink_on = brain || std::fmod(hq.now(), 1000.0) < 500;
@@ -427,8 +488,99 @@ void draw_factory(const Ui& ui) {
 
 } // namespace
 
+std::map<std::string, CursorDef> parse_cursor_cfg(std::string_view text) {
+    std::map<std::string, CursorDef> out;
+    for (const auto& o : game::parse_cfg(text)) {
+        auto num = [&](const char* k, float fallback) {
+            const std::string* v = o.get(k);
+            return v ? float(std::atof(v->c_str())) : fallback;
+        };
+        const std::string* tex = o.get("texture");
+        if (!tex) continue;
+        std::string t = *tex, name = o.name;
+        std::erase(t, '"');
+        for (char& ch : t) ch = char(std::tolower((unsigned char)ch));
+        for (char& ch : name) ch = char(std::tolower((unsigned char)ch));
+        CursorDef d;
+        d.frame0 = {t == "new_ui1" ? HudPage::NewUi1 : HudPage::UiMenu, num("offset_x", 0), num("offset_y", 0), num("width", 16), num("height", 16)};
+        d.hot_x = num("extent_x", 0), d.hot_y = num("extent_y", 0);
+        d.phase_s = o.get("phase_delay") ? num("phase_delay", 250) * 0.001f : 0.25f;
+        out[name] = d;
+    }
+    return out;
+}
+
+const char* cursor_name(int mode) {
+    switch (mode) {
+    case kCurArrow: case kCurBox: return "arrow";
+    case kCurPick: return "pick";
+    case kCurPlace: return "place";
+    case kCurTarget: return "target";
+    case kCurGuard: return "guard";
+    case kCurCapture: return "capture";
+    case kCurWrong: return "wrong_place";
+    case kCurUpgrade: return "upgrade";
+    default: return nullptr; // 8: the placement ghost
+    }
+}
+
+void draw_cursor(OverlayFrame& out, const VirtualScreen& vs, const HudTextures& tex, const CursorDef& c, int frame, float vx, float vy) {
+    Sprite s = c.frame0;
+    s.u += s.w * float(frame & 3);
+    const float x = vx - c.hot_x, y = vy - c.hot_y;
+    draw_sprite(out, vs, tex, s, x, y, x + s.w, y + s.h);
+}
+
+void draw_tooltip(OverlayFrame& out, const VirtualScreen& vs, HudFont tool_font, TooltipState& st, const std::string& text, float px,
+                  float py, double now_ms, bool software_cursor) {
+    if (text.empty() || !tool_font.font) return;
+    if (std::abs(px - st.x) < 3 && std::abs(py - st.y) < 3) {
+        if (now_ms - st.since_ms <= 250) return;
+    } else {
+        st.since_ms = now_ms, st.x = px, st.y = py;
+        return;
+    }
+    // Screen pixels: box = text + 8 each way, text at +5, +4; below the pointer by 16 (12 hw) virtual px, flipped
+    // left / above at the right / bottom edge (no clamp at the left / top).
+    const float bw = text_width_px(vs, *tool_font.font, text) + 8, bh = float(tool_font.font->height) * vs.glyph_scale + 8;
+    const float dy = std::round(vs.sy() * (software_cursor ? 16.f : 12.f));
+    const float x0 = px + bw < vs.width ? px : px - bw - 1, y0 = py + dy + bh < vs.height ? py + dy : py - bh - 1;
+    const float sx = vs.sx(), sy = vs.sy();
+    fill_rect(out, vs, x0 / sx, y0 / sy, (x0 + bw) / sx, (y0 + bh) / sy, 0xfff5f596u);
+    draw_rect_outline(out, vs, x0 / sx, y0 / sy, (x0 + bw) / sx, (y0 + bh) / sy, 0xff000000u);
+    draw_text(out, vs, tool_font, (x0 + 5) / sx, (y0 + 4) / sy, text, 0xff000000u);
+}
+
+void draw_model_view(OverlayFrame& out, const VirtualScreen& vs, ModelView& mv, float x, float y, float w, float h, double now_ms) {
+    if (!mv.mesh) return;
+    if (mv.last_ms >= 0) mv.angle += float(now_ms - mv.last_ms) * 0.00075f;
+    mv.last_ms = now_ms;
+    const Vec3 c = (mv.mesh->bounds_min + mv.mesh->bounds_max) * 0.5f, ext = mv.mesh->bounds_max - mv.mesh->bounds_min;
+    const float r = std::max(0.1f, 0.5f * std::sqrt(dot(ext, ext)));
+    OverlayInset in;
+    in.mesh = mv.mesh;
+    // The object turns about +Z through its centre.
+    Mat4 rz = Mat4::identity();
+    rz.at(0, 0) = std::cos(mv.angle), rz.at(0, 1) = -std::sin(mv.angle), rz.at(1, 0) = std::sin(mv.angle), rz.at(1, 1) = std::cos(mv.angle);
+    const Mat4 spin = Mat4::translation(c) * rz * Mat4::translation(Vec3{} - c);
+    for (const Mat4& t : mv.mesh->transforms) in.transforms.push_back(spin * t);
+    const float pitch = -0.5f, dist = 2 * r;
+    in.forward = Vec3{0, std::cos(pitch), std::sin(pitch)}; // [inferred] looking along +Y, down 0.5 rad
+    in.eye = c - in.forward * dist;
+    in.up = Vec3{0, 0, 1};
+    in.fov_x = 1.0471976f;
+    in.znear = std::max(0.01f, dist - 2 * r), in.zfar = dist + 4 * r;
+    in.x0 = x * vs.sx(), in.y0 = y * vs.sy(), in.x1 = (x + w) * vs.sx(), in.y1 = (y + h) * vs.sy();
+    in.after_quads = out.quads.size();
+    out.insets.push_back(std::move(in));
+}
+
 void draw_hq(OverlayFrame& out, const HudContext& c, const HqSprites& sp, const HqController& hq, bool objectives) {
     if (!hq.interface_up()) return;
+    if (hq.designer_open()) { // CHud_Draw: the constructor shell instead of the HQ interface
+        hq.designer()->draw(out, c, sp, hq.now());
+        return;
+    }
     const Ui ui{out, c, sp, hq};
     draw_strip(ui);
     if (objectives) return;

@@ -16,12 +16,13 @@
 //   (UpdateHqCursor 10058be0) is kept for the tests.
 // - Tooltips (CHud's tooltip window) are not drawn.
 // - The 3D previews (factory 115×115 at (236, 23), research 127×127, the designer's model view) are not drawn.
-// - The unit designer (CConstructorShell / CConstructor) is not ported: its button logs; the factory works
+// - The unit designer (CConstructorShell / CConstructor) is ui::Designer (ui/designer.hpp); the factory works
 //   with the recent-project list the designer keeps (mission.cfg `object prebuild`, CConstructor_LoadPrebuildProjects
 //   1004e190).
 #pragma once
 
 #include "core/math.hpp"
+#include "economy/assembly.hpp"
 #include "economy/economy.hpp"
 #include "game/world.hpp"
 #include "ui/hud.hpp"
@@ -87,11 +88,29 @@ private:
     std::optional<Vec3> anchor_;
 };
 
+// iron_3d.ini [TEMP] (LoadStatNormalizeIni 1006fb60): the stats block's percentage scales; the shipped values.
+struct HqStatNormalize {
+    bool normalize = true;
+    float offence_min = 0, offence_max = 6550, defence_min = 0, defence_max = 24400;
+};
+
 // What the controller needs from the game.
 struct HqHost {
     std::function<std::string(std::uint32_t id)> text;        // iron3d string id → cp1251
     std::function<float(std::uint32_t lid)> health;           // GetHealthPercent 1007eda0: 0..100
-    std::function<std::string(std::uint32_t lid)> name;       // control slot 0xa4 display name (cp1251)
+    // The assembled design of a unit (economy::design_stats of its scheme; cached by the host): the stats block and
+    // the name's debug code (properties 0x201 / 0x207).
+    std::function<std::optional<economy::UnitStats>(std::uint32_t lid)> unit_stats;
+    std::function<std::optional<economy::UnitStats>(const mission::Scheme& s)> design_stats;
+    // Render meshes for the 3D previews: an assembled design, or an objects.rlb part / prototype (the research item's
+    // display model). nullptr when they do not load.
+    std::function<std::shared_ptr<const RenderMesh>(const mission::Scheme& s)> design_mesh;
+    std::function<std::shared_ptr<const RenderMesh>(const std::string& entry)> part_mesh;
+    // objects.dlb has a DSCR entry for this display model (the designer's list filter, §3.2).
+    std::function<bool(const std::string& model)> described;
+    bool full_research_tree = false; // FULL_RESEARCH_TREE (IsFullResearchTreeIni 1008b070): the designer lists all
+    AssetLibrary* library = nullptr;  // the designer's assembly (objects.rlb records); no designer without it
+    HqStatNormalize stat_norm;
     std::function<void(const std::string& key, std::uint32_t lid)> voice; // QueueUnitVoice (lid kNoObject: 2D)
     std::function<void(const std::string& header, const std::string& body)> pager; // PostComputerPagerText
     std::function<void(const char* sound)> sound;             // UI sounds (BUTTON_CLICK, BAR_OPEN)
@@ -179,9 +198,20 @@ inline constexpr std::uint32_t kScreenTitle[9] = {0x183d, 1600, 1601, 1602, 5080
 // GetOrderTypeName 100773e0: order type → string id.
 std::uint32_t order_type_text(std::uint32_t order_type);
 
+struct ModelView {
+    std::shared_ptr<const RenderMesh> mesh;
+    float angle = 0;
+    double last_ms = -1;
+};
+
+class Designer;
+
 class HqController {
 public:
     HqController(game::World& world, economy::Economy* eco, std::uint32_t clan, HqHost host);
+    ~HqController();
+    HqController(const HqController&) = delete;
+    HqController& operator=(const HqController&) = delete;
 
     // --- view states (§0) ---
     int state() const { return states_.back().state; }
@@ -258,6 +288,9 @@ public:
     std::vector<std::uint32_t> screen_units() const;     // rows of screens 1–3 (FUN_1007dbb0)
     std::vector<std::uint32_t> screen_buildings() const; // rows of screens 5–8 (HqUi_RebuildBuildingRows)
     bool over_interface(float vx, float vy) const;       // HqUi_HitTest 10084f60 (+ the strip)
+    // The tooltip text the widget under the pointer registers this frame (its hit test writing HqTooltip_GetHolder
+    // 1009bb60; the last writer wins), 0 = none. notes/cursors-tooltips.md §8–§9.
+    std::uint32_t tooltip_at(float vx, float vy) const;
     bool map_open = false;                               // the satellite map (sidebar button / JAMES_SATELLITE_MAP)
 
     // --- research screen (§8) ---
@@ -280,6 +313,9 @@ public:
     void issue_build(bool batch);           // PlantRec_IssueBuildOrder 100873b0 through 10098680
     void stop_build(bool batch);            // 100986c0
     std::string bld_path(std::uint32_t plant) const;
+    // The design the plant panel previews: the selected recent project, else the plant's current production
+    // (CPlantPanel_ShowCurrentProduction 10098590); nullptr when there is none.
+    const mission::Scheme* preview_scheme() const;
     std::uint32_t free_brains() const; // CountFreeBrains 100394a0
 
     // --- resource strip (§7) ---
@@ -293,10 +329,22 @@ public:
     const game::World& world() const { return world_; }
     const economy::Economy* economy() const { return eco_; }
     std::uint32_t clan() const { return clan_; }
+    // Control slot 0xa4: a unit's name from FUN_100761a0 ("%s-%d %s": debug code, the clan's running number, type
+    // name; the hero 6230, animals 6253), a building's from GetObjectTypeName 10033a90 (type and size). cp1251.
+    std::string display_name(std::uint32_t lid) const;
     int hovered_button() const; // sidebar button under the pointer, −1
     bool hover_blink = false;   // the hovered button's 0.1 s blink phase
     std::set<std::uint32_t> self_destruct; // armed units (+0x135) [the explosion is not ported]
     HqCamera camera;
+    // The 3D previews (CModelView): the plant panel's (115×115 at (236, 23)) and the research details' (127×127 at
+    // (226, 18)); their turntable angle survives a change of model.
+    mutable ModelView factory_view, research_view;
+    // The unit designer (CHud+8 CConstructorShell): open from the plant panel's constructor button; while open it
+    // takes the whole screen and every input.
+    Designer* designer() const { return designer_.get(); }
+    bool designer_open() const;
+    void open_designer();     // CConstructorShell_Open 10056090(1, "r", the plant's size class)
+    void key_char(char c);    // CConstructorShell_OnChar 100563d0 (the save dialog's name)
     std::vector<std::string> log; // what the controller did (tests, the app's log)
 
 private:
@@ -354,8 +402,13 @@ private:
     std::vector<HqPlant> plants_;
     std::uint32_t plant_ = game::kNoObject; // the factory screen's plant (+0x48)
     std::vector<HqProject> projects_;
-    std::map<std::uint32_t, std::vector<std::int32_t>> lab_orders_; // the research orders the screen gave, by lab
+    std::unique_ptr<Designer> designer_;
     bool no_cpu_played_ = false;
+    // The per-clan unit counters (player record +0x10, mission+0x734 + clan·0x68) and the numbers they gave, in
+    // creation order (placed units in world order, then the new ones as they appear) [inferred order].
+    std::map<std::uint32_t, std::int32_t> clan_unit_counter_;
+    std::map<std::uint32_t, std::int32_t> unit_number_;
+    void number_new_units();
     double plants_busy_ms_ = 0;
 };
 
@@ -368,6 +421,36 @@ struct HqSprites {
     }
 };
 HqSprites make_hq_sprites(const std::map<std::string, struct HudSprite>& cfg);
+
+// The software cursors (ui/cursor.cfg; CCursor_LoadFromCfg 10057d00): 4 frames of WIDTH×HEIGHT from
+// (OFFSET_X + i·WIDTH, OFFSET_Y) of TEXTURE, hotspot EXTENT, PHASE_DELAY ms per frame. notes/cursors-tooltips.md §2.
+struct CursorDef {
+    Sprite frame0;
+    float hot_x = 0, hot_y = 0;
+    float phase_s = 0.25f;
+};
+// By lower-case object name (arrow, pick, place, target, guard, capture, wrong_place, upgrade).
+std::map<std::string, CursorDef> parse_cursor_cfg(std::string_view text);
+// The cfg object of an HQ cursor mode (1..10; 7 = the arrow; 8 = the placement ghost: none).
+const char* cursor_name(int mode);
+// CCursor_DrawSprite 10057500: frame `k` at virtual (x − hot, y − hot), WIDTH×HEIGHT virtual px.
+void draw_cursor(OverlayFrame& out, const VirtualScreen& vs, const HudTextures& tex, const CursorDef& c, int frame, float vx, float vy);
+
+// HqTooltip_UpdateAndDraw 1009bbc0 / HqTooltip_DrawBox 1009b910: shows `text` after the pointer rested within ±2 px
+// for over 250 ms; a pale box below (or left / above at the edges of) the pointer in TOOL_FONT. Pointer in drawable
+// pixels; `software_cursor` picks the 16 (else 12) virtual px offset.
+struct TooltipState {
+    float x = -1e9f, y = -1e9f;
+    double since_ms = 0;
+};
+void draw_tooltip(OverlayFrame& out, const VirtualScreen& vs, HudFont tool_font, TooltipState& st, const std::string& text, float px,
+                  float py, double now_ms, bool software_cursor);
+
+// CModelView (1009df30, 200 bytes): a part or design shown on its own in a rect of the HQ screens — a turntable
+// about +Z at 0.75 rad/s (Δt_ms · 0.00075 per draw), the camera 2·r away (r = the bounding radius; 1/sin(π/6),
+// so a 60° view [inferred horizontal]) at pitch −0.5 rad (CModelView_FitCamera 1009e290).
+// The inset for this frame at virtual rect (x, y, w, h), drawn after the quads already in `out`.
+void draw_model_view(OverlayFrame& out, const VirtualScreen& vs, ModelView& mv, float x, float y, float w, float h, double now_ms);
 
 // The ray through a virtual-screen point of the HQ camera (the viewer's projection, horizontal fov).
 Vec3 hq_pointer_ray(const HqCamera& cam, float vx, float vy, float aspect);

@@ -46,7 +46,8 @@
 //   previous takt. The builder's tool device is taken as powered (10029420 / 10033250 not modelled).
 // - Bounding spheres for the placement test: Economy::radius (a per-type table unless the host sets
 //   radius_of). The test is against buildings (class 3) only.
-// - LogicIDs of new objects: one above the highest of the same kind (bit 31 for buildings).
+// - LogicIDs of new objects: the MLogicIDMap counters (ArealMap 1002b2f0 / 1002b4d0), seeded by registering the
+//   placed objects in world order; the original's registration order and the net bits (+0x3c) are inferred.
 // - The clans share one lode table (the system map's mineral records).
 #pragma once
 
@@ -207,6 +208,8 @@ public:
     // --- orders (IBehaviour::GiveOrder for the economy order types) ---
     bool give_order(std::uint32_t lid, const game::UnitOrder& order, int mode);
     void cancel(std::uint32_t lid); // drop every economy task of the object (control slot 0xa0(0))
+    // Drop the first queued economy order {type, param} of the object (control slot 0xa0(orderIndex)).
+    bool cancel_order(std::uint32_t lid, std::uint32_t type, std::uint32_t param);
     std::uint32_t current_order(std::uint32_t lid) const; // 0 = no economy task
     bool showing(std::uint32_t lid) const;                // property 0x20c: the current task is 0x12
 
@@ -281,7 +284,8 @@ private:
     std::unique_ptr<Task> make_task(std::uint32_t lid, const game::UnitOrder& order);
     void emit(EconomyEvent e);
     void run_tasks(Worker& w);
-    std::uint32_t new_logic_id(bool building) const;
+    std::uint32_t new_logic_id(bool building);    // M_ISystemArealMap slot 17 (1002b2f0)
+    void register_logic_id(std::uint32_t lid);   // 1002b4d0
     // CreateObjectFromScheme (ArealMap 1001d440) for the economy: the sphere test (buildings), the world
     // object, its state, its brain (units, flag 8). Returns the LogicID or kNoObject (refused).
     std::uint32_t create_object(std::string_view scheme_path, Vec3 pos, float angle, std::uint32_t clan, std::uint32_t source,
@@ -309,6 +313,9 @@ private:
     std::function<bool(std::uint32_t)> has_superai_;
     std::vector<EconomyEvent> log_;
     std::uint32_t now_ = 0, last_update_ = 0;
+    // The MLogicIDMap counters (+0x34 buildings, +0x38 units), seeded from the placed objects on first use.
+    std::uint32_t unit_lid_counter_ = 0, building_lid_counter_ = 0;
+    bool lid_counters_ready_ = false;
     bool started_ = false;
     ResourceLookup lookup_;
     std::shared_ptr<AssetLibrary> lib_; // the device lists of the designs (power_devices)

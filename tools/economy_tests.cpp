@@ -4,6 +4,7 @@
 // LogicID, and a headless corpus run in which the AI clans build, research and produce. Linked into
 // parkan-tests.
 #include "core/paths.hpp"
+#include "economy/assembly.hpp"
 #include "economy/economy.hpp"
 #include "game/mission_runtime.hpp"
 #include "res/library.hpp"
@@ -241,6 +242,10 @@ void test_research() {
     e.set_event_sink([&](const EconomyEvent& x) { ev.push_back(x); });
     CHECK(e.order_research(0, 1));
     CHECK(!e.order_research(0, 1)); // already queued
+    // cancel_order (control slot 0xa0(orderIndex)): a queued item leaves the lab, the other stays.
+    CHECK(e.order_research(0, 2));
+    CHECK(e.cancel_order(0x80000001, kOrderResearch, 2) && !e.cancel_order(0x80000001, kOrderResearch, 2));
+    CHECK((e.research_orders(0) == std::vector<std::int32_t>{1}));
     std::uint32_t done = 0;
     for (std::uint32_t t = 0; t < 200000 && !done; t += 33) {
         e.update(t);
@@ -366,7 +371,9 @@ void test_builder() {
         if (placed && !built && t - placed > 32000 && t - placed < 32040) CHECK(e.showing(plant) && e.footprint(plant) == 2);
     }
     std::printf("  placed at %.1f s, built %.1f s later (LogicID %08x)\n", placed / 1000.0, (built - placed) / 1000.0, plant);
-    CHECK(plant == 0x80000002 && w.live(plant) && w.live(plant)->type == game::kTypePlant);
+    // MLogicIDMap (ArealMap 1002b4d0 / 1002b2f0): registering 0x80000001 sets the building counter to 2, the
+    // allocation increments it first → 0x80000003.
+    CHECK(plant == 0x80000003 && w.live(plant) && w.live(plant)->type == game::kTypePlant);
     CHECK(built - placed > 40000 && built - placed < 43000); // the 41 s show
     CHECK(near(e.state(1)->ore, 0) && e.footprint(plant) == 1);
     // Upgrade: level 0 → 1 (BuildDat.lst), same LogicID, 50 s, the ore kept.
@@ -635,8 +642,42 @@ int economy_unit_tests() {
     return g_fail;
 }
 
+// The assembled design's mounts, slots and stats (notes/mounts-slots.md §5, notes/unit-stats.md §9).
+void test_assembly(const std::filesystem::path& game) {
+    std::printf("economy: assembly and stats of PREBLD scr_pre1\n");
+    AssetLibrary lib(game);
+    auto p = resolve_path(game, "UNITS/UNITS/PREBLD/scr_pre1.dat");
+    CHECK(p);
+    if (!p) return;
+    const mission::Scheme s = mission::decode_scheme(read_file(*p));
+    Assembly a(lib);
+    CHECK(assemble(a, s));
+    // Parts: chassis 0..11 (node 7 e_tur_lt), turret 12..19 (central_lc at 15, universal_lr at 18 and 19), gun 20..22.
+    CHECK(a.part_count() == 23);
+    CHECK(a.part_name(7) && *a.part_name(7) == "e_tur_lt");
+    CHECK(a.part_name(15) && *a.part_name(15) == "central_lc" && a.part_name(18) && *a.part_name(19) == "universal_lr");
+    CHECK(!a.part_name(0) && !a.part_name(20));
+    // Devices: chassis 0..15 (i_eng_l … i_arm_l at 5), turret 16..19 (i_rdr_l 17, i_def_l 19), gun 20 (clip slot i_c01_l).
+    CHECK(a.device_count() == 21);
+    CHECK(a.device_name(0) && *a.device_name(0) == "i_eng_l" && a.device_name(5) && *a.device_name(5) == "i_arm_l");
+    CHECK(a.device_name(17) && *a.device_name(17) == "i_rdr_l" && a.device_name(20) && *a.device_name(20) == "i_c01_l");
+    CHECK(a.find_part(0) == 0 && a.count_parts(0) == 12);
+    const auto st = design_stats(lib, s);
+    CHECK(st);
+    if (!st) return;
+    std::printf("  mass %.1f, free payload %.1f, speed %.2f m/s, defence %.1f, offence %.1f, radar %.0f, code %s\n", st->mass,
+                st->payload_free, st->speed, st->defence, st->offence, st->radar.value_or(-1),
+                unit_debug_code(st->size_class, st->chassis_type, s.flags).c_str());
+    CHECK(near(st->mass, 5556.4f, 0.5f) && near(st->payload_free, 2818.6f, 0.5f));
+    CHECK(near(st->speed_nominal, 33.33f, 0.01f) && near(st->speed, 16.73f, 0.02f));
+    CHECK(near(st->defence, 1483.1f, 0.5f) && near(st->offence, 600.f, 0.5f) && st->radar && near(*st->radar, 250.f));
+    CHECK(st->valid() && st->size_class == 2 && st->chassis_type == 3);
+    CHECK(unit_debug_code(st->size_class, st->chassis_type, s.flags) == "SWW");
+}
+
 int economy_corpus_tests(const std::filesystem::path& game) {
     g_fail = 0;
+    test_assembly(game);
     test_real_costs(game);
     test_corpus_ai(game);
     return g_fail;

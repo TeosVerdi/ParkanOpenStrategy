@@ -20,8 +20,10 @@ namespace parkan::ui {
 // Overlay texture slots of the HUD pages (ViewerOptions::overlay_textures); −1 = not loaded (skipped).
 struct HudTextures {
     std::int32_t page6 = -1, page7 = -1, page9 = -1, ui_menu = -1, ui_menu3 = -1, minimap = -1;
+    // The HQ's other pages: the software cursors (new_ui1, cursor.cfg) and the unit designer's (icons, page1/3/4/5).
+    std::int32_t new_ui1 = -1, icons = -1, page1 = -1, page3 = -1, page4 = -1, page5 = -1;
 };
-enum class HudPage { Page6, Page7, Page9, UiMenu, UiMenu3, Minimap };
+enum class HudPage { Page6, Page7, Page9, UiMenu, UiMenu3, Minimap, NewUi1, Icons, Page1, Page3, Page4, Page5 };
 
 // A source rectangle on a 256×256 page (CHudSprite_SetSource 1008fa80); rot = 90° clockwise steps.
 struct Sprite {

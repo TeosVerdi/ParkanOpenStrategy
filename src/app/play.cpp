@@ -31,7 +31,9 @@
 #include "ui/mission_end.hpp"
 #include "ui/campaign.hpp"
 #include "ui/hq.hpp"
+#include "ui/designer.hpp"
 #include "shell/briefing.hpp"
+#include "shell/ini.hpp"
 
 #include <fstream>
 #include <set>
@@ -654,20 +656,22 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     }
     if (auto p = resolve_path(lib.game_dir(), "iron3d.dll")) ui_strings = TextRes::from_pe(read_file(*p));
     auto ui_text = [&](std::uint32_t id) { return utf8_to_cp1251(ui_strings.get(id)); };
-    // Fonts: GAME_FONT (gf_*) for the pager, MENU_FONT (mf_*) for the objectives; one set per resolution.
+    // Fonts: GAME_FONT (gf_*) for the pager, MENU_FONT (mf_*) for the objectives, TOOL_FONT (tf_*) for the HQ
+    // tooltips; one set per resolution (textures 3k, 3k + 1, 3k + 2).
     struct FontSet {
         int size;
-        TftFont game, menu;
+        TftFont game, menu, tool;
     };
     std::vector<FontSet> font_sets;
     std::vector<ModelTexture> font_textures;
     for (int size : {640, 800, 1024}) {
         try {
             const auto& a = lib.archive("UI/font.lib");
-            const NResEntry *g = a.find_name("gf_" + std::to_string(size) + ".tft"), *m = a.find_name("mf_" + std::to_string(size) + ".tft");
-            if (!g || !m) continue;
-            font_sets.push_back({size, decode_tft(g->data), decode_tft(m->data)});
-            for (const TftFont* f : {&font_sets.back().game, &font_sets.back().menu})
+            const NResEntry *g = a.find_name("gf_" + std::to_string(size) + ".tft"), *m = a.find_name("mf_" + std::to_string(size) + ".tft"),
+                            *t = a.find_name("tf_" + std::to_string(size) + ".tft");
+            if (!g || !m || !t) continue;
+            font_sets.push_back({size, decode_tft(g->data), decode_tft(m->data), decode_tft(t->data)});
+            for (const TftFont* f : {&font_sets.back().game, &font_sets.back().menu, &font_sets.back().tool})
                 font_textures.push_back({"font", f->atlas_width, f->atlas_height, f->rgba});
         } catch (const std::exception& ex) {
             SDL_Log("play: fonts: %s", ex.what());
@@ -688,6 +692,8 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         hud_tex.page6 = page("page6"), hud_tex.page7 = page("page7"), hud_tex.page9 = page("page9");
         hud_tex.ui_menu = page("ui_menu"), hud_tex.ui_menu3 = page("ui_menu3");
         hud_tex.minimap = add(hr.minimap ? &*hr.minimap : nullptr, "minimap");
+        hud_tex.new_ui1 = page("new_ui1"), hud_tex.icons = page("icons"), hud_tex.page1 = page("page1");
+        hud_tex.page3 = page("page3"), hud_tex.page4 = page("page4"), hud_tex.page5 = page("page5");
         hq_sprites = ui::make_hq_sprites(hr.sprites);
     } catch (const std::exception& ex) {
         SDL_Log("play: HUD textures: %s", ex.what());
@@ -829,9 +835,12 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     double hud_target_since_ms = -1e9;
     std::optional<ViewerOptions::Camera> hud_cam;
     float max_speed_seen = 10.f;   // port: the speed arc's full scale (property 0x90 is not read)
-    // Port stand-in for the radar range (unit property 0x50): the detected objects are the living units
-    // within it.
-    constexpr float kRadarRange = 300.f;
+    // CTargeting_GetRadarRange (10091d80): unit property 0x50 = the radar's (class 8) GetParam(3); 1 when ≤ 0 or
+    // without a radar. The detected objects (port) are the living ones within it.
+    auto radar_range = [&] {
+        const auto r = hero_combat.radar_param(3);
+        return r && *r > 0 ? *r : 1.f;
+    };
     const std::uint32_t hero_clan = hero.placement->ai_index;
     // A combatant's clan now (GetObjectClan: captures and deaths change it).
     auto clan_of = [&](std::size_t ci) -> std::uint32_t {
@@ -839,8 +848,17 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (const game::WorldObject* w = runtime->world().find(placement_of(ci).identity)) return w->clan;
         return combat.unit(ci).damage.clan;
     };
-    // CTargeting's detected list (10091de0 over the sensor's objects): port, the living units and buildings
-    // within the radar range; the local hero, bridges and ruins are left out.
+    // The hero's enemies and friends in the list: units only (the registry's, FUN_100778a0) of a live clan;
+    // an enemy is of another clan, not an animal clan (record +0xc, the data.tma mode, 0) and hostile;
+    // a friend is of the hero's clan.
+    auto is_enemy = [&](std::int32_t i) {
+        const std::uint32_t c = clan_of(std::size_t(i));
+        return !combat.unit(std::size_t(i)).building() && c != combat::kKilledClan && c != hero_clan && c < tma.clans.size() &&
+               tma.clans[c].mode != 0 && perception.hostile(hero_clan, c);
+    };
+    auto is_friend = [&](std::int32_t i) { return !combat.unit(std::size_t(i)).building() && clan_of(std::size_t(i)) == hero_clan; };
+    // CTargeting's detected list (10091de0 over the sensor's objects; port: the living units and buildings
+    // within the radar range): the local hero, bridges and ruins are left out.
     auto detected = [&]() {
         std::vector<std::int32_t> out;
         for (std::size_t i = 0; i < combat.size(); ++i) {
@@ -848,8 +866,12 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (i == hero_slot || c.removed || !c.alive()) continue;
             const std::uint32_t type = tma_types[placement_of(i).identity];
             if (type == game::kTypeBridge || type == game::kTypeRuins) continue;
+            // An enemy unit that is shut down (its current order 0x13, FUN_10077860) is left out too.
+            if (const std::int32_t li = ci_live[i]; li >= 0 && brains[std::size_t(li)] &&
+                                                    brains[std::size_t(li)]->current_order() == 0x13 && is_enemy(std::int32_t(i)))
+                continue;
             const Vec3 d = c.unit->position() - hero.position();
-            if (d.x * d.x + d.y * d.y <= kRadarRange * kRadarRange) out.push_back(std::int32_t(i));
+            if (d.x * d.x + d.y * d.y <= radar_range() * radar_range()) out.push_back(std::int32_t(i));
         }
         return out;
     };
@@ -874,15 +896,6 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         }
         hud_target = t;
     };
-    // The hero's enemies and friends in the list: units only (the registry's, FUN_100778a0) of a live clan;
-    // an enemy is of another clan, not an animal clan (record +0xc, the data.tma mode, 0) and hostile;
-    // a friend is of the hero's clan.
-    auto is_enemy = [&](std::int32_t i) {
-        const std::uint32_t c = clan_of(std::size_t(i));
-        return !combat.unit(std::size_t(i)).building() && c != combat::kKilledClan && c != hero_clan && c < tma.clans.size() &&
-               tma.clans[c].mode != 0 && perception.hostile(hero_clan, c);
-    };
-    auto is_friend = [&](std::int32_t i) { return !combat.unit(std::size_t(i)).building() && clan_of(std::size_t(i)) == hero_clan; };
     // CTargeting::SelectNearestEnemy / SelectNearestFriend (10091080 / 100912c0): when the target already is
     // one, the next one after it in the list (wrapping); otherwise the nearest (2-D).
     auto select_nearest = [&](bool enemy) {
@@ -914,6 +927,18 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     std::set<std::uint32_t> discovered;  // CUnit +0x134
     std::function<void(const std::string&)> say_voice; // play_voice, set below
     std::function<void(std::uint32_t)> computer_pager; // PostComputerPagerText(text id), set below
+    // FUN_100a52b0 (MainLoop, every frame) while piloting: the controlled unit's repair system (the first type-0xf
+    // device in state 0x20) and chameleon (type 0xa in state 0x1000) switching on / off → VOICE_REPAIR_SYS_ON / _OFF,
+    // VOICE_CHAMELEON_SYS_ON / _OFF (latches CUnit +0xa0 / +0xa1). The turret camera's infrared flag (VOICE_INFRA_SYS_*)
+    // is not modelled.
+    bool repair_on = false, chameleon_on = false;
+    auto system_voices = [&] {
+        if (!piloting()) return;
+        const bool r = hero_combat.device_state(0xf) == 0x20u, c = hero_combat.device_state(0xa) == 0x1000u;
+        if (r != repair_on && say_voice) say_voice(r ? "VOICE_REPAIR_SYS_ON" : "VOICE_REPAIR_SYS_OFF");
+        if (c != chameleon_on && say_voice) say_voice(c ? "VOICE_CHAMELEON_SYS_ON" : "VOICE_CHAMELEON_SYS_OFF");
+        repair_on = r, chameleon_on = c;
+    };
     auto update_targeting = [&] {
         const auto list = detected();
         // 10091de0: the list holds an enemy unit → VOICE_ENEMY_DETECTED when it did not before (while piloting).
@@ -927,7 +952,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (hud_target >= 0) {
                 const combat::Combatant& t = combat.unit(std::size_t(hud_target));
                 const Vec3 d = t.unit->position() - hero.position();
-                if (t.removed || !t.alive() || d.x * d.x + d.y * d.y > kRadarRange * kRadarRange) set_hud_target(-1);
+                if (t.removed || !t.alive() || d.x * d.x + d.y * d.y > radar_range() * radar_range()) set_hud_target(-1);
             }
             if (list.empty()) {
                 set_hud_target(-1);
@@ -956,7 +981,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 discovered.count(c.logic_id))
                 continue;
             const Vec3 d = c.unit->position() - hero.position();
-            if (d.x * d.x + d.y * d.y >= kRadarRange * kRadarRange) continue;
+            if (d.x * d.x + d.y * d.y >= radar_range() * radar_range()) continue;
             set_hud_target(std::int32_t(i));
             discovered.insert(c.logic_id);
             if (computer_pager) computer_pager(3040);
@@ -975,6 +1000,17 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     auto play_voice = [&](const std::string& key) {
         SDL_Log("play: voice %s", key.c_str());
         if (auto v = game_voices.find(key); v != game_voices.end()) queue_voice(v->second); // QueueUnitVoice(key, 0)
+    };
+    // QueueUnitVoice(key, unit) (10061fb0): with a unit, "_B" for a building (unit+0x3c slot 0x2c == 3) or size
+    // class (unit+0x30 = attribute 0x201) 4 / 5, "_S" for size class 1 / 2, nothing for 3. A key the voice
+    // table lacks is dropped (QueueSound).
+    auto play_unit_voice = [&](const std::string& key, std::uint32_t lid) {
+        std::string k = key;
+        if (const game::WorldObject* w = runtime ? runtime->world().find(lid) : nullptr) {
+            if (w->building() || w->size_class == 4 || w->size_class == 5) k += "_B";
+            else if (w->size_class == 1 || w->size_class == 2) k += "_S";
+        }
+        play_voice(k);
     };
     say_voice = play_voice;
     computer_pager = [&](std::uint32_t id) { pager = ui::PagerMessage{ui_text(1541), ui_text(id), {}, sim_ms}; }; // PostComputerPagerText
@@ -1233,7 +1269,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             select_nearest(false);
         } else if (is("CMD_JAMES_AIM_TARGET")) {
             // LockTarget: the object under the screen centre within the radar range.
-            const std::int32_t t = combat.sight_target(hero_slot, kRadarRange);
+            const std::int32_t t = combat.sight_target(hero_slot, radar_range());
             if (t >= 0) set_hud_target(t);
         }
     };
@@ -1274,6 +1310,16 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 const bool down = ev.type == SDL_EVENT_KEY_DOWN;
                 const auto scan = input::scan_from_hid(int(ev.key.scancode));
                 if (scan && !down) events.push_back({false, scan});
+                // The designer takes every key (its save dialog's name; port: ASCII keycodes, no IME).
+                if (hq->designer_open()) {
+                    const SDL_Keycode k = ev.key.key;
+                    if (down && (k == SDLK_BACKSPACE || k == SDLK_RETURN || (k >= 0x20 && k < 0x7f))) {
+                        char ch = k == SDLK_BACKSPACE ? '\b' : k == SDLK_RETURN ? '\r' : char(k);
+                        if ((ev.key.mod & SDL_KMOD_SHIFT) && ch >= 'a' && ch <= 'z') ch = char(ch - 'a' + 'A');
+                        hq->key_char(ch);
+                    }
+                    return;
+                }
                 auto is = [&](std::string_view command) {
                     const auto k = input::ui_key(command, opt.layout);
                     return scan && k && k->key == scan;
@@ -1550,6 +1596,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             // weapons); CTargeting::Update keeps one whenever something is detected. Nothing detected → no
             // target, so guided guns (plasma, missiles) hold fire (CGunDevice::Update 10029f4b).
             update_targeting();
+            system_voices();
             hero_combat.target = hud_target;
         }
         combat.update(float(sim_ms));
@@ -1734,8 +1781,12 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             return true;
         }
         // The HQ states show the system pointer (cursors .ani not decoded) instead of the captured mouse.
-        if (const bool rel = !hq || hq->hero_controlled(); opt.shot_path.empty() && rel != relative_mouse_on)
+        if (const bool rel = !hq || hq->hero_controlled(); opt.shot_path.empty() && rel != relative_mouse_on) {
             SDL_SetWindowRelativeMouseMode(window, rel), relative_mouse_on = rel;
+            // The HQ shows the engine's software cursor (FORCE_SOFTWARE_CURSOR, the shipped default) or the system one.
+            if (!rel && opt.software_cursor) SDL_HideCursor();
+            else SDL_ShowCursor();
+        }
         if (hq && hq->view_mode() == 2) {
             // The HQ camera (view mode 2, CFreeCamera mission+0x100, updated in the simulation step); the
             // World3D camera far 700, near 3 (HqCam_Init 10036ed0).
@@ -1825,6 +1876,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             relation = int(runtime->world().clans[clan].relations[hero_clan]);
         return ui::relation_colour(clan == hero_clan, kind, relation);
     };
+    double radar_ping_ms = -1e9; // CRadarPage +0x35c: the last RADAR ping
     auto build_hud = [&](float aspect) {
         ui::HudState s;
         s.cockpit = cockpit_on;
@@ -1844,9 +1896,11 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         }
         // Radar: the detected units; the ping period range·0.002 s (property 0xa9 stand-in); altitude above
         // the map's lowest point (mission+0xad8 inferred); speed in km/h.
-        s.radar_range = kRadarRange;
-        const double period_ms = kRadarRange * 0.002 * 1000;
-        s.sweep = float(std::fmod(sim_ms, period_ms) / period_ms);
+        s.radar_range = radar_range();
+        // The sweep's period: property 0xa9 (the radar's GetParam(4), 750 in every shipped radar) · 0.002 s.
+        const double period_ms = hero_combat.radar_param(4).value_or(0.f) * 0.002 * 1000;
+        // t / T since the last RADAR ping (the same timer, +0x35c; cockpit_sounds restarts it).
+        s.sweep = period_ms > 0 ? std::clamp(float((sim_ms - radar_ping_ms) / period_ms), 0.f, 1.f) : 0.f;
         for (std::int32_t i : detected()) {
             const Vec3 d = combat.unit(std::size_t(i)).unit->position() - hero_pos;
             ui::HudBlip b;
@@ -1862,6 +1916,10 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         s.speed_kmh = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z) * 3.6f;
         max_speed_seen = std::max(max_speed_seen, s.speed_kmh);
         s.max_speed_kmh = max_speed_seen;
+        // CStatusPage_Draw (1003f4b0): lamp 0 lit with the first type-0xf device (repair) in state 0x20, lamp 2 with
+        // the first type-0xa one (detection shield / chameleon) in state 0x1000 (FUN_10077260 / 10077290).
+        s.lamps[0] = hero_combat.device_state(0xf) == 0x20u ? 1 : 0;
+        s.lamps[2] = hero_combat.device_state(0xa) == 0x1000u ? 1 : 0;
         s.lamps[3] = 1; // piloted directly (top view state 0)
         s.lamps[5] = 1; // behaviour mode 0 (unit+0x9c; port default)
         // Weapon rows: the hero's guns in HERO.TBL order, named by iron3d 3071..3074 (CHeroUnit_Ctor).
@@ -1893,6 +1951,35 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             p.health = t.damage.hp_ratio() * 100;
             p.energy = t.battery_fraction();
             p.shields = t.shield_charges();
+            // CTargeter_DrawGaugesAndLabels' info line (10042210), units other than a hero: one of the player's
+            // → "[" + GetOrderTypeName (100773e0) of its first order + "]"; any other "very dangerous" one
+            // (FUN_10076b40: a working weapon device whose bullet holds more than 10000 HP, device properties
+            // 0x400 / 6 = ReloadBulletInfo's bullet property 0x35) → 6255 in 0xffc80000.
+            if (std::size_t(shown) != hero_slot && !t.building()) {
+                if (clan_of(std::size_t(shown)) == hero_clan) {
+                    const std::uint32_t lid = t.logic_id;
+                    std::uint32_t order = eco ? eco->current_order(lid) : 0;
+                    if (const std::int32_t li = ci_live[std::size_t(shown)]; order == 0 && li >= 0 && brains[std::size_t(li)])
+                        order = brains[std::size_t(li)]->current_order();
+                    static const std::map<std::uint32_t, std::uint32_t> kOrderName{
+                        {0, 0x1824}, {1, 0x1825}, {2, 0x1828}, {3, 0x182c}, {4, 0x182d}, {5, 0x182e}, {6, 0x182f},
+                        {7, 0x1830}, {8, 0x1831}, {9, 0x1832}, {0x11, 0x1833}, {0x13, 0x1826}, {0x14, 0x1829},
+                        {0x15, 0x1827}, {0x16, 0x182a}, {0x17, 0x182b}, {0x18, 0x1834}};
+                    const auto n = kOrderName.find(order);
+                    p.info = "[" + ui_text(n != kOrderName.end() ? n->second : 0x1835) + "]";
+                } else {
+                    for (std::size_t g = 0; g < t.guns.size(); ++g) {
+                        const BulletProto* b = t.guns[g].bullet();
+                        float hp = 0;
+                        if (b)
+                            for (const auto& part : b->parts) hp += part.hit_points;
+                        if (hp > 10000 && !t.gun_broken(g)) {
+                            p.info = ui_text(6255), p.info_argb = 0xffc80000u;
+                            break;
+                        }
+                    }
+                }
+            }
             const Vec3 d = t.unit->position() - hero_pos;
             p.distance = std::sqrt(dot(d, d));
             s.target = p;
@@ -1921,12 +2008,13 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     };
     // The cockpit pages' sounds and voices, drawn with them (CHud_Draw: not under the objectives screen nor in
     // the HQ interface). Timers by the game clock (the original reads the system timer).
-    double radar_ping_ms = 0, lock_sound_ms = -1e9, life_voice_ms = -1e9, batt_voice_ms = -1e9;
+    double lock_sound_ms = -1e9, life_voice_ms = -1e9, batt_voice_ms = -1e9;
     std::vector<std::array<bool, 3>> gun_latches; // CWeaponRow +0x23 destroyed, +0x21 ammo out, +0x22 energy out
     auto cockpit_sounds = [&](const ui::HudState& hs) {
         if (!hs.cockpit) return;
-        // CRadarPage_Draw (1003ff00), with a radar (property 0xa9; port: always): RADAR every range·0.002 s.
-        if (sim_ms - radar_ping_ms > kRadarRange * 0.002 * 1000) radar_ping_ms = sim_ms, play_sound("RADAR");
+        // CRadarPage_Draw (1003ff00), with a radar (property 0xa9): RADAR every 0xa9·0.002 s (timer +0x35c).
+        if (const auto sweep = hero_combat.radar_param(4); sweep && sim_ms - radar_ping_ms > *sweep * 0.002 * 1000)
+            radar_ping_ms = sim_ms, play_sound("RADAR");
         // CTargeter_DrawGaugesAndLabels (10042210), own unit: below 20 % health VOICE_LIFE_LOW, below 0.2 battery
         // VOICE_BATT_LOW, each at most every 20 s (100e4bc4).
         if (int(hs.own.health) < 20 && sim_ms - life_voice_ms > 20000) life_voice_ms = sim_ms, play_voice("VOICE_LIFE_LOW");
@@ -1946,10 +2034,9 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 if (sim_ms - lock_sound_ms > (locking ? 350 : 200)) lock_sound_ms = sim_ms, play_sound(locking ? "TARGET_ZOOM" : "TARGET_READY");
             }
             // The latches: a voice when one turns on while piloting. Destroyed: state 5 with the device broken
-            // (property 0x300; port: state 5 with ammo left); ammo out: limited ammo at 0; energy out: property
-            // 0x62 outside [0, 1] or below 0.01.
+            // (property 0x300); ammo out: limited ammo at 0; energy out: property 0x62 outside [0, 1] or below 0.01.
             const float energy = gun.param(1) > 0 ? gun.energy() / gun.param(1) : gun.energy_ratio();
-            const std::array<bool, 3> now{gun.state() == combat::kGunEmpty && gun.ammo() != 0, gun.ammo() == 0,
+            const std::array<bool, 3> now{gun.state() == combat::kGunEmpty && hero_combat.gun_broken(g), gun.ammo() == 0,
                                           energy < 0 || energy > 1 || energy < 0.01f};
             static constexpr const char* kVoice[3] = {"VOICE_WEAPON_DESTR", "VOICE_WEAP_AMMO_OUT", "VOICE_WEAP_ENERGY_OUT"};
             for (int k = 0; k < 3; ++k) {
@@ -1972,6 +2059,15 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (o.name == "sounds")
                 for (const auto& [k, v] : o.entries) ui_sounds[k] = v;
     }
+    // The software cursors (ui/cursor.cfg) and the tooltip's rest timer.
+    std::map<std::string, ui::CursorDef> hq_cursors;
+    if (auto p = resolve_path(lib.game_dir(), "UI/cursor.cfg")) {
+        const Bytes b = read_file(*p);
+        hq_cursors = ui::parse_cursor_cfg({reinterpret_cast<const char*>(b.data()), b.size()});
+    }
+    ui::TooltipState hq_tooltip;
+    double hq_cursor_tick = 0;
+    int hq_cursor_frame = 0;
     if (runtime) {
         ui::HqHost host;
         host.text = ui_text;
@@ -1979,11 +2075,72 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             auto it = unit_of.find(lid);
             return it != unit_of.end() ? combat.unit(it->second).damage.hp_ratio() * 100.f : 100.f;
         };
-        host.name = [&](std::uint32_t lid) {
-            auto it = unit_of.find(lid);
-            return it != unit_of.end() ? unit_name(it->second) : std::string();
+        // The assembled designs' stats (economy::design_stats), cached by the scheme's bytes.
+        host.design_stats = [&, cache = std::make_shared<std::map<Bytes, std::optional<economy::UnitStats>>>()](
+                                const mission::Scheme& sc) -> std::optional<economy::UnitStats> {
+            Bytes key;
+            try {
+                key = mission::encode_scheme(sc);
+            } catch (const std::exception&) {
+                return std::nullopt;
+            }
+            auto [it, fresh] = cache->try_emplace(std::move(key));
+            if (fresh) it->second = economy::design_stats(lib, sc);
+            return it->second;
         };
-        host.voice = [&](const std::string& key, std::uint32_t) { play_voice(key); };
+        // The previews' render meshes (the assembled design / one objects.rlb record), cached.
+        host.design_mesh = [&, cache = std::make_shared<std::map<Bytes, std::shared_ptr<const RenderMesh>>>()](
+                               const mission::Scheme& sc) -> std::shared_ptr<const RenderMesh> {
+            Bytes key;
+            try {
+                key = mission::encode_scheme(sc);
+            } catch (const std::exception&) {
+                return nullptr;
+            }
+            auto [it, fresh] = cache->try_emplace(std::move(key));
+            if (fresh) try {
+                    if (auto m = load_unit_model(lib, sc)) it->second = std::make_shared<const RenderMesh>(std::move(m->mesh));
+                } catch (const std::exception& ex) {
+                    SDL_Log("play: preview: %s", ex.what());
+                }
+            return it->second;
+        };
+        host.part_mesh = [&, cache = std::make_shared<std::map<std::string, std::shared_ptr<const RenderMesh>>>()](
+                             const std::string& entry) -> std::shared_ptr<const RenderMesh> {
+            auto [it, fresh] = cache->try_emplace(entry);
+            if (fresh) {
+                mission::Scheme sc;
+                sc.root.lib = "objects.rlb", sc.root.entry = entry, sc.root.one = 1;
+                try {
+                    if (auto m = load_unit_model(lib, sc)) it->second = std::make_shared<const RenderMesh>(std::move(m->mesh));
+                } catch (const std::exception& ex) {
+                    SDL_Log("play: preview %s: %s", entry.c_str(), ex.what());
+                }
+            }
+            return it->second;
+        };
+        host.unit_stats = [&, design = host.design_stats](std::uint32_t lid) -> std::optional<economy::UnitStats> {
+            const game::WorldObject* w = runtime->world().find(lid);
+            const mission::Scheme* sc = w && eco ? eco->schemes().get(w->resource) : nullptr;
+            return sc ? design(*sc) : std::nullopt;
+        };
+        if (auto p = resolve_path(lib.game_dir(), "Iron_3D.ini")) { // LoadStatNormalizeIni 1006fb60: [TEMP]
+            const Bytes b = read_file(*p);
+            const std::string_view ini(reinterpret_cast<const char*>(b.data()), b.size());
+            auto f = [&](const char* key, float fallback) {
+                const auto v = shell::ini_get(ini, "TEMP", key);
+                return v ? float(std::atof(v->c_str())) : fallback;
+            };
+            host.stat_norm.normalize = shell::ini_get_int(ini, "TEMP", "NORMALIZE", 1) != 0;
+            host.stat_norm.offence_min = f("OFFENCE_MIN", 0), host.stat_norm.offence_max = f("OFFENCE_MAX", 6550);
+            host.stat_norm.defence_min = f("DEFENCE_MIN", 0), host.stat_norm.defence_max = f("DEFENCE_MAX", 24400);
+            // IsFullResearchTreeIni 1008b070: [CS] FULL_RESEARCH_TREE, atoi != 0.
+            host.full_research_tree = shell::ini_get_int(ini, "CS", "FULL_RESEARCH_TREE", 0) != 0;
+        }
+        // The unit designer: objects.rlb records for its assembly, objects.dlb descriptions for its part lists.
+        host.library = &lib;
+        host.described = [&](const std::string& model) { return lib.find("objects.dlb", model) != nullptr; };
+        host.voice = [&](const std::string& key, std::uint32_t lid) { play_unit_voice(key, lid); };
         host.pager = [&](const std::string& h, const std::string& b) { pager = ui::PagerMessage{h, b, {}, sim_ms}; };
         host.sound = [&](const char* key) {
             if (auto v = ui_sounds.find(key); sound && v != ui_sounds.end()) sound->play({"sounds.lib", v->second});
@@ -2006,6 +2163,51 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                             else SDL_Log("play: prebuild %s not readable", file.c_str());
                         }
             }
+        // The designer's Save / Load (CConstructor "units/<name>.dat"). Port: saved into the preferences folder's
+        // units/; Load lists those and the game's UNITS folder.
+        {
+            std::filesystem::path units_dir;
+            if (char* pref = SDL_GetPrefPath("", "Parkan")) units_dir = std::filesystem::path(pref) / "units", SDL_free(pref);
+            const std::optional<std::filesystem::path> game_units = resolve_path(lib.game_dir(), "UNITS");
+            auto find = [units_dir, game_units](const std::string& name) -> std::optional<std::filesystem::path> {
+                std::error_code ec;
+                for (const auto& d : {units_dir, game_units.value_or(std::filesystem::path())})
+                    if (!d.empty() && std::filesystem::exists(d / (name + ".dat"), ec)) return d / (name + ".dat");
+                return std::nullopt;
+            };
+            ui::Designer* d = hq->designer();
+            d->list_saved = [units_dir, game_units] {
+                std::vector<std::string> names;
+                std::error_code ec;
+                for (const auto& dir : {units_dir, game_units.value_or(std::filesystem::path())}) {
+                    if (dir.empty() || !std::filesystem::is_directory(dir, ec)) continue;
+                    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+                        std::string ext = e.path().extension().string();
+                        for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
+                        if (e.is_regular_file(ec) && ext == ".dat") names.push_back(e.path().stem().string());
+                    }
+                }
+                return names;
+            };
+            d->save_file = [units_dir](const std::string& name, const mission::Scheme& sc) {
+                std::error_code ec;
+                if (units_dir.empty() || name.empty() || (!std::filesystem::create_directories(units_dir, ec) && ec)) return false;
+                const Bytes b = mission::encode_scheme(sc);
+                std::ofstream f(units_dir / (name + ".dat"), std::ios::binary);
+                f.write(reinterpret_cast<const char*>(b.data()), std::streamsize(b.size()));
+                return bool(f);
+            };
+            d->load_file = [find](const std::string& name) -> std::optional<mission::Scheme> {
+                const auto p = find(name);
+                if (!p) return std::nullopt;
+                try {
+                    return mission::decode_scheme(read_file(*p));
+                } catch (const std::exception& e) {
+                    SDL_Log("play: designer: %s: %s", p->string().c_str(), e.what());
+                    return std::nullopt;
+                }
+            };
+        }
         hq->project = [&](Vec3 p) -> std::optional<ui::Vec2f> {
             if (!hud_cam) return std::nullopt;
             const float eye[3] = {hud_cam->eye.x, hud_cam->eye.y, hud_cam->eye.z};
@@ -2089,7 +2291,8 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         const int want = ui::nearest_font_set(float(f.width) / f.scale, float(f.height) / f.scale);
         std::size_t k = 0;
         while (k + 1 < font_sets.size() && font_sets[k].size != want) ++k;
-        const ui::HudFont game_font{&font_sets[k].game, std::int32_t(2 * k)}, menu_font{&font_sets[k].menu, std::int32_t(2 * k + 1)};
+        const ui::HudFont game_font{&font_sets[k].game, std::int32_t(3 * k)}, menu_font{&font_sets[k].menu, std::int32_t(3 * k + 1)},
+            tool_font{&font_sets[k].tool, std::int32_t(3 * k + 2)};
         // DrawGameStateMessage: once the mission is over the HUD goes and only the message is drawn.
         if (!end_ctl.hud_visible()) {
             ui::draw_end_screen(f, vs, game_font, menu_font, end_ctl.screen(), end_str);
@@ -2127,19 +2330,40 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             // map, the pager in its HQ place.
             hq_last_pick = hq_pick(hq->mouse_x, hq->mouse_y);
             const ui::HudContext hc{vs, game_font, hud_tex, hud_strings};
-            if (const auto& g = hq->ghost(); g && g->on_ground && eco) {
-                // [port] The placement ghost (the building's model tinted by validity, Placement_Update) is drawn as
-                // its bounding circle on the ground in the validity colour.
-                game::WorldObject probe;
-                probe.type = g->type;
-                const float r = eco->radius(probe);
+            if (const auto& g = hq->ghost(); g && g->on_ground && hud_cam) {
+                // Placement_Begin 100583a0 / Placement_Update 100584c0: the frame object GetBuildingFrameName(mask)
+                // (100339f0) at the terrain point, rotated by g_BuildPlacementAngle, tinted red / green / yellow by
+                // validity (FUN_100360d0); drawn in the world. [port] Falls back to the footprint circle without a model.
+                const char* frame = g->type == game::kTypeMine ? "fr_l_mine" : g->type == game::kTypeStorage ? "fr_l_store"
+                                    : g->type == game::kTypePlant ? "fr_l_plant" : g->type == game::kTypeHangar ? "fr_l_angar"
+                                    : g->type == game::kTypeInstitute ? "fr_l_inst" : g->type == game::kTypeTowerMedium ? "fr_l_towL"
+                                    : g->type == game::kTypeTowerLarge ? "fr_l_towH" : "";
                 const std::uint32_t argb = g->validity == 0 ? 0xffff0000u : g->validity == 1 ? 0xff00ff00u : 0xffffff00u;
-                std::optional<ui::Vec2f> prev;
-                for (int k = 0; k <= 32; ++k) {
-                    const float a = 6.2831853f * float(k) / 32;
-                    const auto p = hq->project({g->pos.x + r * std::cos(a), g->pos.y + r * std::sin(a), g->pos.z + 0.5f});
-                    if (p && prev) ui::draw_line(f, vs, prev->x, prev->y, p->x, p->y, argb);
-                    prev = p;
+                const auto mesh = *frame && hq->host().part_mesh ? hq->host().part_mesh(frame) : nullptr;
+                if (mesh) {
+                    OverlayInset in;
+                    in.mesh = mesh, in.world = true;
+                    Mat4 m = Mat4::identity();
+                    m.at(0, 0) = std::cos(g->angle), m.at(0, 1) = -std::sin(g->angle), m.at(1, 0) = std::sin(g->angle), m.at(1, 1) = std::cos(g->angle);
+                    m = Mat4::translation(g->pos) * m;
+                    for (const Mat4& t : mesh->transforms) in.transforms.push_back(m * t);
+                    in.eye = hud_cam->eye, in.forward = hud_cam->forward, in.up = hud_cam->up;
+                    in.fov_x = hud_cam->fov_x, in.znear = hud_cam->znear, in.zfar = hud_cam->zfar;
+                    in.x0 = 0, in.y0 = 0, in.x1 = float(f.width), in.y1 = float(f.height);
+                    in.tint[0] = std::uint8_t(argb >> 16), in.tint[1] = std::uint8_t(argb >> 8), in.tint[2] = std::uint8_t(argb), in.tint[3] = 255;
+                    in.after_quads = f.quads.size();
+                    f.insets.push_back(std::move(in));
+                } else if (eco) {
+                    game::WorldObject probe;
+                    probe.type = g->type;
+                    const float r = eco->radius(probe);
+                    std::optional<ui::Vec2f> prev;
+                    for (int k = 0; k <= 32; ++k) {
+                        const float a = 6.2831853f * float(k) / 32;
+                        const auto p = hq->project({g->pos.x + r * std::cos(a), g->pos.y + r * std::sin(a), g->pos.z + 0.5f});
+                        if (p && prev) ui::draw_line(f, vs, prev->x, prev->y, p->x, p->y, argb);
+                        prev = p;
+                    }
                 }
             }
             ui::draw_hq(f, hc, hq_sprites, *hq, objectives_visible);
@@ -2149,6 +2373,20 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 ui::draw_hud(f, hc, hs);
             }
             if (pager && !objectives_visible) ui::draw_pager(f, vs, game_font, *pager, true);
+            // The tooltip (HqTooltip_UpdateAndDraw, unless the objectives screen is up), then the software cursor
+            // (Cursor_UpdateAndDrawInGame 10058bb0; mode 8 is the placement ghost, no sprite).
+            const float px = hq->mouse_x * vs.sx(), py = hq->mouse_y * vs.sy();
+            if (!objectives_visible)
+                if (const std::uint32_t tip = hq->tooltip_at(hq->mouse_x, hq->mouse_y)) {
+                    if (!opt.shot_path.empty()) hq_tooltip = {px, py, -1e9}; // port debug aid: --shot renders one frame (rested)
+                    ui::draw_tooltip(f, vs, tool_font, hq_tooltip, ui_text(tip), px, py, sim_ms, opt.software_cursor);
+                }
+            if (opt.software_cursor)
+                if (const char* name = ui::cursor_name(hq->cursor()))
+                    if (auto c = hq_cursors.find(name); c != hq_cursors.end()) {
+                        if (sim_ms - hq_cursor_tick > c->second.phase_s * 1000) hq_cursor_tick = sim_ms, hq_cursor_frame = (hq_cursor_frame + 1) & 3;
+                        ui::draw_cursor(f, vs, hud_tex, c->second, hq_cursor_frame, hq->mouse_x, hq->mouse_y);
+                    }
         } else if (!objectives_visible) {
             const ui::HudState hs = build_hud(float(f.width) / float(std::max(1u, f.height)));
             ui::draw_hud(f, ui::HudContext{vs, game_font, hud_tex, hud_strings}, hs);

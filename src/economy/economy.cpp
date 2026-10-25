@@ -1005,6 +1005,7 @@ void Economy::start(const std::function<bool(std::uint32_t)>& has_superai) {
 void Economy::on_object_added(std::uint32_t lid) {
     WorldObject* o = world_.find(lid);
     if (!o) return;
+    if (lid_counters_ready_) register_logic_id(lid);
     Worker& w = worker(lid);
     if (w.initialized && w.alive) return; // already known (e.g. created by the economy itself)
     w.alive = true;
@@ -1061,13 +1062,28 @@ std::uint32_t Economy::free_brains(std::uint32_t clan) const {
     return b ? std::uint32_t(std::count(b->begin(), b->end(), kNoObject)) : 0;
 }
 
-std::uint32_t Economy::new_logic_id(bool building) const {
-    std::uint32_t best = building ? kBuildingBit : 0;
-    for (const auto& o : world_.objects()) {
-        if (o.logic_id == kNoObject || o.building() != building) continue;
-        best = std::max(best, o.logic_id);
+void Economy::register_logic_id(std::uint32_t lid) {
+    // MLogicIDMap registration of a known LogicID (ArealMap 1002b4d0): the kind's counter jumps to id + 1
+    // when it is below the id's low 24 bits (so a later allocation skips one number); 0xffffff wraps to 0.
+    if (lid == kNoObject) return;
+    std::uint32_t& counter = (lid & kBuildingBit) ? building_lid_counter_ : unit_lid_counter_;
+    if (counter < (lid & 0xffffff)) {
+        counter = (lid & 0xffffff) + 1;
+        if (counter > 0xfffffe) counter = 0;
     }
-    return best + 1;
+}
+
+std::uint32_t Economy::new_logic_id(bool building) {
+    // M_ISystemArealMap slot 17 (10020e60 → 1002b2f0): ++counter of the kind, low 24 bits, | the map's high
+    // bits (+0x3c; [inferred] 0 in single player), | bit 31 for a building. The placed objects are registered
+    // first, in world (data.tma) order [inferred: the order the original registers them].
+    if (!lid_counters_ready_) {
+        lid_counters_ready_ = true;
+        for (const auto& o : world_.objects()) register_logic_id(o.logic_id);
+    }
+    std::uint32_t& counter = building ? building_lid_counter_ : unit_lid_counter_;
+    if (++counter > 0xfffffe) counter = 0;
+    return (counter & 0xffffff) | (building ? kBuildingBit : 0u);
 }
 
 bool Economy::sphere_free(Vec3 c, float r, std::uint32_t type, std::uint32_t ignore) const {
@@ -1203,6 +1219,22 @@ void Economy::cancel(std::uint32_t lid) {
         w.tasks.pop_front();
         if (t->started) t->abort(*this, w);
     }
+}
+
+bool Economy::cancel_order(std::uint32_t lid, std::uint32_t type, std::uint32_t param) {
+    // Control slot 0xa0(orderIndex) for the first queued order {type, param} (the research screen's stop,
+    // hq-ui.md §8): a running task is aborted; the next one starts on the object's next takt.
+    auto it = workers_.find(lid);
+    if (it == workers_.end()) return false;
+    auto& tasks = it->second->tasks;
+    for (auto t = tasks.begin(); t != tasks.end(); ++t) {
+        if ((*t)->order.type != type || (*t)->order.param != param) continue;
+        auto task = std::move(*t);
+        tasks.erase(t);
+        if (task->started) task->abort(*this, *it->second);
+        return true;
+    }
+    return false;
 }
 
 std::uint32_t Economy::current_order(std::uint32_t lid) const {

@@ -53,6 +53,7 @@ struct PlayOptions {
     // iron_3d.ini [CS] SFX_VOLUME / CD_VOLUME (÷ 100) and PLAY_CD_MUSIC; negative = leave the mixer as it is.
     float sfx_volume = -1, music_volume = -1;
     bool music = true;
+    bool software_cursor = true; // iron_3d.ini [CS] FORCE_SOFTWARE_CURSOR (shipped 1); false: the system pointer in the HQ
     PlayOutcome* outcome = nullptr; // filled when the mission ends
     // Port debug aids for the HQ screens (notes/hq-ui.md): --enter <hex LogicID> puts the hero into that own
     // building at the start (as the capture lift's callback does), --hq-screen <n> opens screen n once the HQ

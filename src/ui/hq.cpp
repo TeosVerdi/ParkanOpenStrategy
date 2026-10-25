@@ -1,5 +1,7 @@
 #include "ui/hq.hpp"
 
+#include "ui/designer.hpp"
+
 #include "ui/hud_resources.hpp"
 
 #include <algorithm>
@@ -126,6 +128,12 @@ HqSprites make_hq_sprites(const std::map<std::string, HudSprite>& cfg) {
         else if (h.texture == "page6") page = HudPage::Page6;
         else if (h.texture == "page7") page = HudPage::Page7;
         else if (h.texture == "page9") page = HudPage::Page9;
+        else if (h.texture == "new_ui1") page = HudPage::NewUi1;
+        else if (h.texture == "icons") page = HudPage::Icons;
+        else if (h.texture == "page1") page = HudPage::Page1;
+        else if (h.texture == "page3") page = HudPage::Page3;
+        else if (h.texture == "page4") page = HudPage::Page4;
+        else if (h.texture == "page5") page = HudPage::Page5;
         else continue;
         s.by_name[name] = Sprite{page, float(h.x), float(h.y), float(h.w), float(h.h), h.rot};
     }
@@ -245,9 +253,72 @@ Vec3 hq_pointer_ray(const HqCamera& cam, float vx, float vy, float aspect) {
 // --- controller ---
 
 HqController::HqController(game::World& world, economy::Economy* eco, std::uint32_t clan, HqHost host)
-    : world_(world), eco_(eco), clan_(clan), host_(std::move(host)) {
+    : world_(world), eco_(eco), clan_(clan), host_(std::move(host)), designer_(std::make_unique<Designer>(*this)) {
     expand_now(); // LoadHqInterface 10082930 ends with HqUi_ExpandNow
     rebuild_plants();
+    number_new_units();
+}
+
+HqController::~HqController() = default;
+
+bool HqController::designer_open() const { return designer_->open(); }
+
+void HqController::open_designer() {
+    const HqPlant* p = current_plant();
+    if (!p || !host_.library) {
+        say("factory: the designer needs the plant and the asset library");
+        return;
+    }
+    designer_->open_for_plant(eco_ ? eco_->building_size(p->lid) : 0);
+    say("factory: the unit designer");
+}
+
+void HqController::key_char(char c) {
+    if (designer_->open()) designer_->key_char(c);
+}
+
+void HqController::number_new_units() {
+    // FUN_100761a0 runs at CUnit::BindInterfaces for every unit of every clan: `++player[clan]+0x10` names it.
+    for (const auto& o : world_.objects())
+        if (!o.building() && o.logic_id != kNoObject && !unit_number_.count(o.logic_id))
+            unit_number_[o.logic_id] = ++clan_unit_counter_[o.clan];
+}
+
+namespace {
+// GetObjectTypeName 10033a90: a building's name string by type and size class (property 0x201).
+std::uint32_t building_name_id(std::uint32_t type, std::uint32_t size) {
+    auto by = [&](std::uint32_t first, std::uint32_t lo, std::uint32_t hi) { return size >= lo && size <= hi ? first + (size - lo) : 0x183d; };
+    switch (type) {
+    case game::kTypeBridge: return by(0x17b2, 2, 5);
+    case game::kTypePlant: return by(0x17a3, 2, 4);
+    case game::kTypeGenerator: return 0x1799;
+    case game::kTypeMine: return by(0x178f, 2, 4);
+    case game::kTypeStorage: return by(0x1794, 2, 4);
+    case game::kTypeHangar: return 0x17a8;
+    case game::kTypeTeleport: return by(0x17b7, 2, 3);
+    case game::kTypeInstitute: return by(0x179e, 2, 5);
+    case game::kTypeRuins: return by(0x17ad, 2, 5);
+    case game::kTypeBunkerSmall: return 0x17c6;
+    case game::kTypeBunkerMedium: return 0x17cc;
+    case game::kTypeBunkerLarge: return 0x17d2;
+    case game::kTypeTowerMedium: return 0x17bd;
+    case game::kTypeTowerLarge: return 0x17c3;
+    default: return 0x183d;
+    }
+}
+} // namespace
+
+std::string HqController::display_name(std::uint32_t lid) const {
+    const game::WorldObject* o = world_.find(lid);
+    if (!o || !host_.text) return {};
+    if (o->building()) return host_.text(building_name_id(o->type, eco_ ? eco_->building_size(lid) : 0));
+    if (o->type == game::kTypeHero) return host_.text(0x1856);
+    if (o->type == game::kTypeAnimal) return host_.text(0x186d);
+    // [deferred] the 0x17bc case (a robot whose unit+0x64 device reports a positive value) is not identified.
+    const auto st = host_.unit_stats ? host_.unit_stats(lid) : std::nullopt;
+    const std::string code = economy::unit_debug_code(st ? st->size_class : o->size_class, st ? st->chassis_type : 0, o->type);
+    auto n = unit_number_.find(lid);
+    return code + "-" + std::to_string(n != unit_number_.end() ? n->second : 0) + " " + host_.text(economy::unit_type_name_id(o->type));
 }
 
 void HqController::say(std::string line) {
@@ -643,6 +714,10 @@ void HqController::mouse_move(float vx, float vy) {
 
 void HqController::lbutton_down(float vx, float vy, const HqPick& pick) {
     mouse_x = vx, mouse_y = vy;
+    if (designer_->open()) {
+        designer_->lbutton_down(vx, vy);
+        return;
+    }
     if (!interface_up()) return;
     // HqUi_OnLButtonDown 1008db10: outside the resource strip, the interface first, then the world.
     if (!in(vx, vy, 374, 0, 640, 42)) {
@@ -677,6 +752,7 @@ void HqController::lbutton_up(float vx, float vy, const HqPick&) {
 
 void HqController::rbutton_down() {
     // HqUi_OnRButtonDown 1008fd50.
+    if (designer_->open()) return;
     if (boxing_) {
         boxing_ = lbutton_ = false, cursor_ = kCurArrow;
         return;
@@ -712,7 +788,7 @@ void HqController::rbutton_down() {
 bool HqController::hotkey(char letter) {
     // HqInput_OnHotkey 10071bb0 (states 3/4): W warbots, C transports, B builders, R laboratory, P plants;
     // each expands the sidebar first.
-    if (state() != kStateHqBunker && state() != kStateHqUnit) return false;
+    if (designer_->open() || (state() != kStateHqBunker && state() != kStateHqUnit)) return false;
     int s = 0;
     switch (letter) {
     case 'W': s = kScreenWarbots; break;
@@ -734,6 +810,10 @@ bool HqController::escape() {
     // OnGameKeyDown 10071240: placement → cancel; view mode 2: the satellite map, else the open screen.
     // [inferred] With nothing open, ROLLBACK_STATE (the same key) pops the view state.
     if (state() == kStateHero) return false;
+    if (designer_->open()) {
+        designer_->key_escape();
+        return true;
+    }
     if (mode_ == kModePlaceBuilding || mode_ == kModePlaceMine) {
         rbutton_down();
         return true;
@@ -879,6 +959,68 @@ bool HqController::over_interface(float vx, float vy) const {
         return in(vx, vy, 51, 0, 369, 20 + 20.f * float(screen_buildings().size()));
     default: return false;
     }
+}
+
+std::uint32_t HqController::tooltip_at(float vx, float vy) const {
+    if (!interface_up()) return 0;
+    if (designer_->open()) return designer_->tooltip_at(vx, vy);
+    std::uint32_t tip = 0;
+    // Sidebar buttons (CSidebarButton_DrawAndHover 1009c320), drawn when not in state 5 and fully expanded.
+    if (state() != kStateInBuilding)
+        for (int k = 0; k < items_; ++k)
+            if (const int i = kSidebarItem[k]; i >= 0 && in(vx, vy, 0, kSidebar[i].y, 46, kSidebar[i].y + 29)) tip = kSidebar[i].tooltip;
+    if (state() != kStateInBuilding && !sidebar_expanded()) return tip;
+    if (screen_ != kScreenNone && in(vx, vy, 334, 0, 369, 20)) tip = 6169; // HqUi_DrawTitle's close box
+    switch (screen_) {
+    case kScreenWarbots: case kScreenTransports: case kScreenBuilders:
+        if (units_.size() == 1) { // HqUi_DrawUnitPanel 10085c70: the icon rects ±2
+            const float x = 51, y = 20;
+            if (in(vx, vy, x + 10, y + 69, x + 29, y + 88)) tip = 1502;
+            else if (in(vx, vy, x + 34, y + 69, x + 53, y + 88)) tip = 1519;
+            else if (in(vx, vy, x + 58, y + 69, x + 77, y + 88)) tip = 1518;
+            else if (in(vx, vy, x + 275, y + 70, x + 303, y + 87)) tip = 6244;
+            if (type_of(units_[0]) == game::kTypeHq && in(vx, vy, x + 88, y + 69, x + 107, y + 88)) tip = 1517;
+        }
+        break;
+    case kScreenResearch: {
+        if (!research_list().empty() && in(vx, vy, 170, 127, 202, 148)) tip = 6243; // FUN_10089090
+        const auto list = research_list();
+        for (int k = 0; k < 12 && research_scroll + k < int(list.size()); ++k) // FUN_10088a00: the toggle button
+            if (in(vx, vy, 56, 179 + 20.f * float(k), 91, 198 + 20.f * float(k)))
+                tip = researching(list[std::size_t(research_scroll + k)]) ? 6252 : 6251;
+        break;
+    }
+    case kScreenPlants:
+        if (const HqPlant* p = current_plant()) { // CPlantPanel_Draw 10097430 (ctor 100965f0 stores +0x8f0..+0x914)
+            const float x = 51, y = 21, x1 = x + 318, by = y + 129;
+            const bool start = can_start(*p);
+            if (in(vx, vy, x + 5, by, x + 55, by + 19)) tip = 1511;
+            else if (in(vx, vy, x + 262, by, x + 312, by + 19)) tip = start ? 1553 : 3070;
+            else if (in(vx, vy, x + 212, by, x + 262, by + 19)) tip = start ? 6238 : 6239;
+            if (in(vx, vy, x1 - 45, y + 106, x1 - 30, y + 121)) tip = 3067;
+            const auto info = eco_ ? eco_->plant(p->lid) : std::nullopt;
+            if (in(vx, vy, x + 0xe4, y + 0x6a, x + 0x102, y + 0x79)) tip = info && info->free_bots > 0 ? 6248 : 6249;
+            if (!start && in(vx, vy, x + 0x87, y + 0x68, x + 0xa3, y + 0x79)) tip = 3069;
+            for (int i = 0; i < int(projects_.size()); ++i)
+                if (const float sx = x + 8 + 23.f * float(i); in(vx, vy, sx + 2, y + 0x68, sx + 0x15, y + 0x79)) tip = 3068;
+        }
+        [[fallthrough]];
+    case kScreenTowers: case kScreenBunkers: case kScreenOther: {
+        if (screen_ == kScreenPlants && state() == kStateInBuilding) break;
+        const auto rows = screen_buildings(); // CBuildingRow_Draw 10096190: the two row buttons
+        const float y0 = screen_ == kScreenPlants ? 171.f : 20.f;
+        for (std::size_t r = 0; r < rows.size(); ++r) {
+            const float y = y0 + 20.f * float(r), bx = 51 + 10 + 19 + 5;
+            const std::uint32_t t = type_of(rows[r]);
+            if (is_bunker(t) && in(vx, vy, bx, y, bx + 35, y + 19)) tip = 1517;
+            else if ((is_bunker(t) || is_tower(t)) && in(vx, vy, bx + (is_bunker(t) ? 35.f : 0.f), y, bx + (is_bunker(t) ? 70.f : 35.f), y + 19))
+                tip = 1502;
+        }
+        break;
+    }
+    default: break;
+    }
+    return tip;
 }
 
 bool HqController::click_interface(float vx, float vy) {
@@ -1101,38 +1243,19 @@ bool HqController::researching(std::int32_t item) const {
 
 bool HqController::start_research(std::int32_t item) {
     // StartResearch 100884c0 through Economy::order_research (the lab with the fewest orders, insert mode 1).
-    if (!eco_ || researching(item)) return false;
-    std::map<std::uint32_t, std::size_t> before;
-    for (const auto& o : world_.objects())
-        if (o.alive && o.clan == clan_ && o.type == game::kTypeInstitute)
-            if (auto inf = eco_->institute(o.logic_id)) before[o.logic_id] = inf->queued + (inf->busy ? 1 : 0);
-    if (!eco_->order_research(clan_, item)) return false;
-    for (const auto& [lab, n] : before)
-        if (auto inf = eco_->institute(lab); inf && inf->queued + (inf->busy ? 1 : 0) > n) {
-            lab_orders_[lab].push_back(item);
-            break;
-        }
+    if (!eco_ || researching(item) || !eco_->order_research(clan_, item)) return false;
     say("research: start " + std::to_string(item));
     return true;
 }
 
 void HqController::stop_research(std::int32_t item) {
     // The row's stop: the lab's type-0xe order with that param goes (control slot 0xa0(orderIndex)).
-    // [port] Economy has no per-order removal: the lab's tasks are cancelled and the others given again.
     if (!eco_) return;
-    for (auto& [lab, items] : lab_orders_) {
-        auto it = std::find(items.begin(), items.end(), item);
-        if (it == items.end()) continue;
-        items.erase(it);
-        eco_->cancel(lab);
-        for (std::int32_t other : items) {
-            game::UnitOrder o = make_order(kResearch, std::uint32_t(other), 0x204);
-            o.target_id = 0;
-            eco_->give_order(lab, o, 1);
+    for (const auto& o : world_.objects())
+        if (o.alive && o.clan == clan_ && o.type == game::kTypeInstitute && eco_->cancel_order(o.logic_id, kResearch, std::uint32_t(item))) {
+            say("research: stop " + std::to_string(item));
+            return;
         }
-        say("research: stop " + std::to_string(item));
-        return;
-    }
 }
 
 void HqController::click_research(float vx, float vy) {
@@ -1140,8 +1263,8 @@ void HqController::click_research(float vx, float vy) {
     const auto list = research_list();
     const int count = int(list.size());
     if (count > 0 && in(vx, vy, 170, 127, 202, 148)) { // the batch button: stop everything, start every item
-        for (auto& [lab, items] : lab_orders_)
-            if (!items.empty()) eco_->cancel(lab), items.clear();
+        // 10088320: every type-0xe order leaves every lab.
+        for (std::int32_t queued : eco_->research_orders(clan_)) stop_research(queued);
         for (std::int32_t i : list) start_research(i);
         research_batch_flash = now_;
         return;
@@ -1205,6 +1328,17 @@ std::string HqController::bld_path(std::uint32_t plant) const {
     return "UNITS\\bld_unit_" + std::to_string(std::int32_t(plant)) + ".dat";
 }
 
+const mission::Scheme* HqController::preview_scheme() const {
+    const HqPlant* p = current_plant();
+    if (!p) return nullptr;
+    if (p->project >= 0 && p->project < int(projects_.size())) return &projects_[std::size_t(p->project)].scheme;
+    if (eco_ && !can_start(*p)) {
+        const auto info = eco_->plant(p->lid);
+        if (info && !info->scheme.empty()) return eco_->schemes().get(info->scheme);
+    }
+    return nullptr;
+}
+
 std::uint32_t HqController::free_brains() const { return eco_ ? eco_->free_brains(clan_) : 0; }
 
 bool HqController::select_project(int i) {
@@ -1251,7 +1385,7 @@ void HqController::click_factory(float vx, float vy) {
     const float x = 51, y = 21, by = y + 129;
     const bool start = can_start(*p);
     if (in(vx, vy, x + 5, by, x + 55, by + 19)) { // constructor (1511)
-        say("factory: the unit designer (CConstructorShell_Open 10056090) is not ported");
+        open_designer();
         return;
     }
     if (in(vx, vy, x + 262, by, x + 312, by + 19)) { // build / stop
@@ -1283,7 +1417,9 @@ void HqController::click_factory(float vx, float vy) {
 
 void HqController::update(double now_ms, const HqPick& pick) {
     now_ = now_ms;
+    designer_->update(now_ms);
     rebuild_plants();
+    number_new_units();
     // Selections drop dead objects (1007de10 on unit removal).
     std::erase_if(units_, [&](std::uint32_t u) { return !own_alive(u); });
     if (units_.empty() && cstate_ == 1) cstate_ = 0;
@@ -1409,11 +1545,6 @@ void HqController::update(double now_ms, const HqPick& pick) {
             if (host_.voice) host_.voice("VOICE_NO_CPU", kNoObject);
         }
     }
-    // ResearchUI_PollCompleted 10089e60: done items leave the screen's order lists (the pager and the voice are
-    // the app's ResearchDone handler).
-    for (auto& [lab, items] : lab_orders_)
-        std::erase_if(items, [&](std::int32_t i) { return !researching(i); });
-
     // CResourceStrip_UpdateValues 1006dd80: the shown values step ±1 toward the targets every 0.05 s; a zero
     // value blinks every 0.5 s.
     if (eco_ && now_ - strip_t_ >= 50) {

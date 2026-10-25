@@ -21,6 +21,9 @@ struct MeshSlot {
     std::uint16_t tri_start = 0, tri_count = 0, batch_start = 0, batch_count = 0;
     std::array<float, 3> aabb_min{}, aabb_max{}, sphere_center{};
     float sphere_radius = 0;
+    // +0x30 / +0x34: the part's surface area and volume (CAniMesh::GetPartProperty ids 0xf / 0x10, Control's mass
+    // and armour sums; notes/unit-stats.md §3).
+    float area = 0, volume = 0;
 };
 
 struct MeshBatch {

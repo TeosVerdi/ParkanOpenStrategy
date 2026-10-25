@@ -430,6 +430,7 @@ int run_shell_app(SDL_Window* window, AssetLibrary& lib, const ShellAppOptions& 
         po.sfx_volume = float(shell::ini_get_int(ini, "CS", "SFX_VOLUME", 25)) / 100.f;
         po.music_volume = float(shell::ini_get_int(ini, "CS", "CD_VOLUME", 25)) / 100.f;
         po.music = shell::ini_get_int(ini, "CS", "PLAY_CD_MUSIC", 1) != 0;
+        po.software_cursor = shell::ini_get_int(ini, "CS", "FORCE_SOFTWARE_CURSOR", 1) != 0;
         po.layout = opt.classic_keys ? input::KeyLayout::Classic : input::KeyLayout::Modern;
         PlayOutcome out;
         po.outcome = &out;

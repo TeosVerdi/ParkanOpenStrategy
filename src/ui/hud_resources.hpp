@@ -12,7 +12,8 @@
 namespace parkan::ui {
 
 // The texture pages the cockpit draws from (game_resources.cfg names).
-inline constexpr const char* kHudPages[] = {"page6", "page7", "page9", "ui_menu", "ui_menu3"};
+inline constexpr const char* kHudPages[] = {"page6", "page7", "page9", "ui_menu", "ui_menu3",
+                                            "new_ui1", "icons", "page1", "page3", "page4", "page5"};
 
 // A named sprite (CHudSprite_LoadFromCfg 1008f6a0): `texture` is a page name; rot = rotate / 90.
 struct HudSprite {

@@ -69,7 +69,8 @@ std::vector<MeshSlot> read_slots(const NResArchive& a) {
         s.batch_count = r.read<std::uint16_t>();
         for (auto* v : {&s.aabb_min, &s.aabb_max, &s.sphere_center}) *v = {r.f32(), r.f32(), r.f32()};
         s.sphere_radius = r.f32();
-        r.bytes(20);
+        s.area = r.f32(), s.volume = r.f32();
+        r.bytes(12);
     }
     return out;
 }
@@ -162,13 +163,17 @@ Mesh decode_mesh(std::span<const std::uint8_t> payload) {
         m.frame_count = e->attr2;
     }
     if (const NResEntry* e = a.find_type(kNames)) {
-        // NUL-separated node names, one per node (best effort; the stream is also used for other strings).
-        std::size_t i = 0, start = 0;
-        for (std::size_t p = 0; p < e->data.size() && i < m.nodes.size(); ++p)
-            if (e->data[p] == 0) {
-                m.nodes[i++].name.assign(reinterpret_cast<const char*>(e->data.data()) + start, p - start);
-                start = p + 1;
-            }
+        // Node names (MeshPart_GetNodeName, AniMesh 10012530): per node `u32 len`, then `len` chars + NUL when
+        // len != 0; len 0 = no name (not a hardpoint). notes/mounts-slots.md §2.3.
+        Reader r(e->data);
+        for (auto& n : m.nodes) {
+            if (r.remaining() < 4) break;
+            const std::uint32_t len = r.u32();
+            if (len == 0) continue;
+            if (r.remaining() < len + 1) break;
+            n.name.assign(reinterpret_cast<const char*>(e->data.data()) + r.pos(), len);
+            r.bytes(len + 1);
+        }
     }
     return m;
 }

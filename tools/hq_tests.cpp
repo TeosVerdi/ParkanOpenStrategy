@@ -6,6 +6,8 @@
 #include "economy/economy.hpp"
 #include "game/mission_runtime.hpp"
 #include "res/textres.hpp"
+#include "mission/research_tree.hpp"
+#include "ui/designer.hpp"
 #include "ui/hq.hpp"
 #include "ui/hud_resources.hpp"
 
@@ -314,6 +316,88 @@ void test_draw() {
     CHECK(bars == 2);
 }
 
+void test_designer_helpers() {
+    // OverlayMountNameOnModel 10090a10 / StrPrefixMatchWildcardNoCase 10090b50 (designer.md §3.2, §3.5).
+    CHECK(overlay_mount_name("e_tur_tt_01", "e_tur_tb") == "e_tur_tb_01");
+    CHECK(prefix_match("R_T_02", "r_t") && prefix_match("r", "r_l") && !prefix_match("r_l_01", "r_t"));
+    CHECK(prefix_match("e_gun_?c_01", "e_gun_tc"));
+    mission::ResearchItem it;
+    it.kind = 9u << 24, it.extra = 0x20;
+    CHECK(part_kind(it) == 0);
+    it.extra = 0x21, it.kind = (9u << 24) | (4u << 16);
+    CHECK(part_kind(it) == 1 && part_type_mask(it) == 0x1004000);
+    it.kind = 8u << 24, it.extra = 0x5111;
+    CHECK(part_kind(it) == 5);
+    it.extra = (2u << 16) | 0x11;
+    CHECK(part_type_mask(it) == 0x80020000);
+    it.kind = 0xau << 24;
+    CHECK(part_kind(it) == 4);
+}
+
+// The designer on full.trf: the chassis list of a class-4 plant, a design built by clicks and the shipped
+// prebuild scheme loaded back (same tree, same stats as unit-stats.md §9).
+void test_designer_corpus(const std::filesystem::path& game) {
+    AssetLibrary lib(game);
+    auto trf = resolve_path(game, "MISSIONS/SCRIPTS/full.trf");
+    economy::SchemeCache sc(game);
+    const mission::Scheme* pre = sc.get("UNITS\\UNITS\\PREBLD\\scr_pre1.dat");
+    CHECK(trf && pre);
+    if (!trf || !pre) return;
+    game::World world;
+    economy::Economy eco(world, game, nullptr);
+    eco.set_research(0, economy::Research(mission::load_research_tree(*trf)));
+    HqHost h;
+    h.text = [](std::uint32_t id) { return "T" + std::to_string(id); };
+    h.library = &lib;
+    h.described = [&](const std::string& m) { return lib.find("objects.dlb", m) != nullptr; };
+    h.design_stats = [&](const mission::Scheme& s) { return economy::design_stats(lib, s); };
+    h.full_research_tree = true;
+    HqController hq(world, &eco, 0, h);
+    Designer& d = *hq.designer();
+    d.open_for_plant(4);
+    d.update(0);
+    const auto& chassis = d.parts().cats[Designer::kChassis].rows;
+    CHECK(!chassis.empty());
+    for (const auto& r : chassis) CHECK(r.slot == "r");
+    // Chassis → turret → weapon by the model operations.
+    CHECK(!d.has_model());
+    std::int32_t first = -1;
+    for (const auto& r : chassis)
+        if (r.item >= 0) {
+            first = r.item;
+            break;
+        }
+    d.add_part(first);
+    CHECK(d.has_model() && !d.model().cats[Designer::kTurret].rows.empty());
+    // The prebuild scheme loaded back gives the same tree and stats.
+    d.load_scheme(*pre);
+    bool ok = false;
+    const auto back = d.build_scheme(&ok);
+    CHECK(back.has_value());
+    if (!back) return;
+    std::function<bool(const mission::SchemeNode&, const mission::SchemeNode&)> same = [&](const auto& a, const auto& b) {
+        auto lower = [](std::string s) {
+            for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+            return s;
+        };
+        if (lower(a.entry) != lower(b.entry) || a.children.size() != b.children.size()) return false;
+        for (const auto& ca : a.children) {
+            bool found = false;
+            for (const auto& cb : b.children) found = found || (ca.category == cb.category && same(ca, cb));
+            if (!found) return false;
+        }
+        return true;
+    };
+    CHECK(same(back->root, pre->root));
+    CHECK(back->flags == pre->flags);
+    const auto st = economy::design_stats(lib, *back);
+    CHECK(st && std::fabs(st->mass - 5556.4f) < 0.5f && std::fabs(st->offence - 600.f) < 0.5f);
+    if (st) std::printf("  designer: scr_pre1 reloaded: mass %.1f offence %.1f header %08x\n", st->mass, st->offence, back->flags);
+    // Removing the chassis resets the design.
+    d.remove_part(Designer::kChassis, 0);
+    CHECK(!d.has_model());
+}
+
 void test_corpus(const std::filesystem::path& game) {
     AssetLibrary lib(game);
     const HudResources r = load_hud_resources(lib);
@@ -334,6 +418,12 @@ void test_corpus(const std::filesystem::path& game) {
     } else {
         CHECK(!"iron3d.dll missing");
     }
+    // The placement ghosts' frame objects (GetBuildingFrameName 100339f0) resolve to a mesh.
+    for (const char* frame : {"fr_l_mine", "fr_l_store", "fr_l_plant", "fr_l_angar", "fr_l_inst", "fr_l_towL", "fr_l_towH"}) {
+        const auto proto = economy::load_prototype(lib, frame);
+        CHECK(proto && !proto->mesh.empty());
+        if (!proto) std::printf("  ghost %s does not resolve\n", frame);
+    }
     // Single.01's prebuild projects exist as schemes (CConstructor_LoadPrebuildProjects).
     economy::SchemeCache sc(game);
     CHECK(sc.get("UNITS\\UNITS\\PREBLD\\scr_pre1.dat") && sc.get("UNITS\\UNITS\\PREBLD\\scr_pre2.dat"));
@@ -350,6 +440,7 @@ int hq_unit_tests() {
     test_placement();
     test_sidebar_animation();
     test_draw();
+    test_designer_helpers();
     return g_fail;
 }
 
@@ -357,5 +448,6 @@ int hq_corpus_tests(const std::filesystem::path& game) {
     g_fail = 0;
     std::printf("hq\n");
     test_corpus(game);
+    test_designer_corpus(game);
     return g_fail;
 }

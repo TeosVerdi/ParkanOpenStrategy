@@ -1,5 +1,7 @@
 #include "app/scene_viewer.hpp"
 
+#include <map>
+
 #include "app/fx_draw.hpp"
 
 #include <algorithm>
@@ -113,6 +115,14 @@ struct Gpu {
     SDL_GPUTexture* depth = nullptr;
     Uint32 depth_w = 0, depth_h = 0;
     std::vector<SDL_GPUTexture*> textures;
+    // Overlay insets (OverlayInset): GPU copies of their meshes, kept while in use.
+    struct InsetMesh {
+        std::shared_ptr<const RenderMesh> mesh;
+        SDL_GPUBuffer *vbuf = nullptr, *ibuf = nullptr;
+        std::vector<SDL_GPUTexture*> textures;
+        int idle_frames = 0;
+    };
+    std::map<const RenderMesh*, InsetMesh> insets;
 };
 
 [[noreturn]] void fail(const char* what) { throw std::runtime_error(std::string(what) + ": " + SDL_GetError()); }
@@ -204,6 +214,12 @@ void reupload_mesh(Gpu& g, const RenderMesh& m) {
     upload(g.device, m.indices.data(), isize, g.ibuf, nullptr);
     for (std::size_t i = g.textures.size(); i < m.textures.size(); ++i)
         g.textures.push_back(make_texture(g.device, m.textures[i].width, m.textures[i].height, m.textures[i].rgba.data()));
+}
+
+void release_inset(Gpu& g, Gpu::InsetMesh& m) {
+    if (m.vbuf) SDL_ReleaseGPUBuffer(g.device, m.vbuf);
+    if (m.ibuf) SDL_ReleaseGPUBuffer(g.device, m.ibuf);
+    for (auto* t : m.textures) SDL_ReleaseGPUTexture(g.device, t);
 }
 
 void release_mesh(Gpu& g) {
@@ -394,6 +410,7 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
         // The overlay's vertices go up before the render pass (like the dome's).
         OverlayFrame overlay;
         std::vector<std::pair<std::int32_t, Uint32>> overlay_runs; // (texture, vertex count)
+        std::vector<std::size_t> run_quads;                        // quads before each run starts
         if (opt.overlay) {
             overlay.width = w, overlay.height = h;
             int ww = 0;
@@ -401,6 +418,7 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
             overlay.scale = ww > 0 ? float(w) / float(ww) : 1.f;
             opt.overlay(overlay);
             std::vector<RenderVertex> verts;
+            std::size_t qi = 0, next_inset = 0;
             for (const auto& q : overlay.quads) {
                 auto v = [&](float x, float y, float u, float vv) {
                     RenderVertex r{};
@@ -416,8 +434,12 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
                     v(q.x0, q.y0, q.u0, q.v0), v(q.x1, q.y0, q.u1, q.v0), v(q.x1, q.y1, q.u1, q.v1);
                     v(q.x0, q.y0, q.u0, q.v0), v(q.x1, q.y1, q.u1, q.v1), v(q.x0, q.y1, q.u0, q.v1);
                 }
-                if (!overlay_runs.empty() && overlay_runs.back().first == q.texture) overlay_runs.back().second += 6;
-                else overlay_runs.push_back({q.texture, 6});
+                // A new run where an inset comes in between, so the inset can be drawn at that point.
+                bool split = false;
+                while (next_inset < overlay.insets.size() && overlay.insets[next_inset].after_quads <= qi) split = true, ++next_inset;
+                if (!split && !overlay_runs.empty() && overlay_runs.back().first == q.texture) overlay_runs.back().second += 6;
+                else overlay_runs.push_back({q.texture, 6}), run_quads.push_back(qi);
+                ++qi;
             }
             if (!verts.empty()) {
                 if (verts.size() > g.overlay_capacity) {
@@ -430,6 +452,27 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
                 upload(g.device, verts.data(), Uint32(verts.size() * sizeof(RenderVertex)), g.overlay_vbuf, nullptr);
             }
         }
+        // Inset meshes go up before the pass; unused ones are dropped after a while.
+        for (auto& [k, m] : g.insets) ++m.idle_frames;
+        for (const auto& in : overlay.insets) {
+            if (!in.mesh || in.mesh->indices.empty()) continue;
+            auto [it, fresh] = g.insets.try_emplace(in.mesh.get());
+            it->second.idle_frames = 0;
+            if (!fresh) continue;
+            Gpu::InsetMesh& m = it->second;
+            m.mesh = in.mesh;
+            const Uint32 vsize = Uint32(in.mesh->vertices.size() * sizeof(RenderVertex)), isize = Uint32(in.mesh->indices.size() * 4);
+            SDL_GPUBufferCreateInfo vb{SDL_GPU_BUFFERUSAGE_VERTEX, vsize, 0}, ib{SDL_GPU_BUFFERUSAGE_INDEX, isize, 0};
+            m.vbuf = SDL_CreateGPUBuffer(g.device, &vb);
+            m.ibuf = SDL_CreateGPUBuffer(g.device, &ib);
+            if (!m.vbuf || !m.ibuf) fail("SDL_CreateGPUBuffer (inset)");
+            upload(g.device, in.mesh->vertices.data(), vsize, m.vbuf, nullptr);
+            upload(g.device, in.mesh->indices.data(), isize, m.ibuf, nullptr);
+            for (const auto& t : in.mesh->textures) m.textures.push_back(make_texture(g.device, t.width, t.height, t.rgba.data()));
+        }
+        for (auto it = g.insets.begin(); it != g.insets.end();)
+            if (it->second.idle_frames > 120) release_inset(g, it->second), it = g.insets.erase(it);
+            else ++it;
         if (fx_renderer) {
             fx_frame.clear();
             opt.effects(eye, fx_frame);
@@ -515,6 +558,49 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
             }
         }
         if (fx_renderer) fx_renderer->draw(cb, rp, vp); // effects: after the opaque and vertex-alpha scene
+        // An inset: its own camera and viewport, in front of the world (depth range [0, 0.001], so no clear is
+        // needed), lit like the scene, unfogged.
+        auto draw_inset = [&](const OverlayInset& in) {
+            auto it = g.insets.find(in.mesh.get());
+            if (it == g.insets.end() || in.x1 <= in.x0 || in.y1 <= in.y0) return;
+            const Gpu::InsetMesh& m = it->second;
+            SDL_GPUViewport vpv{in.x0, in.y0, in.x1 - in.x0, in.y1 - in.y0, 0.f, in.world ? 1.f : 0.001f};
+            SDL_SetGPUViewport(rp, &vpv);
+            SDL_Rect sc{int(in.x0), int(in.y0), int(in.x1 - in.x0), int(in.y1 - in.y0)};
+            SDL_SetGPUScissor(rp, &sc);
+            const float ia = (in.x1 - in.x0) / std::max(1.f, in.y1 - in.y0);
+            const Mat4 ivp = Mat4::perspective(2 * std::atan(std::tan(in.fov_x / 2) / ia), ia, in.znear, in.zfar) *
+                             Mat4::look_at(in.eye, in.eye + in.forward, in.up);
+            SceneLighting il = L;
+            il.fog_end = 0;
+            const std::vector<Mat4>& tr = in.transforms.empty() ? m.mesh->transforms : in.transforms;
+            SDL_GPUBufferBinding ivb{m.vbuf, 0}, iib{m.ibuf, 0};
+            for (int pass = 0; pass < 2; ++pass) {
+                SDL_BindGPUGraphicsPipeline(rp, pass == 0 ? g.pipeline : g.pipeline_blend);
+                SDL_BindGPUVertexBuffers(rp, 0, &ivb, 1);
+                SDL_BindGPUIndexBuffer(rp, &iib, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+                for (const auto& d : m.mesh->draws) {
+                    if (((d.flags & kDrawVertexAlpha) != 0) != (pass == 1) || d.transform >= tr.size()) continue;
+                    const DrawUniforms vu = vertex_uniforms(ivp, tr[d.transform], il, in.eye);
+                    SDL_PushGPUVertexUniformData(cb, 0, &vu, sizeof vu);
+                    const FragUniforms fu{{d.flags & kDrawAlphaTest ? 1.f : 0.f, d.flags & kDrawDetail ? 1.f : 0.f, d.tex0 >= 0 ? 1.f : 0.f,
+                                           d.flags & kDrawVertexAlpha ? 1.f : 0.f},
+                                          {0, 0, 0, 0},
+                                          {in.tint[0] / 255.f, in.tint[1] / 255.f, in.tint[2] / 255.f, in.tint[3] / 255.f},
+                                          {0, 0, 0, 1}};
+                    SDL_PushGPUFragmentUniformData(cb, 0, &fu, sizeof fu);
+                    auto tex = [&](std::int32_t i) { return i >= 0 && std::size_t(i) < m.textures.size() ? m.textures[std::size_t(i)] : g.white; };
+                    SDL_GPUTextureSamplerBinding tb[2] = {{tex(d.tex0), g.sampler}, {tex(d.tex1), g.sampler}};
+                    SDL_BindGPUFragmentSamplers(rp, 0, tb, 2);
+                    SDL_DrawGPUIndexedPrimitives(rp, d.index_count, 1, d.index_start, d.base_vertex, 0);
+                }
+            }
+            SDL_GPUViewport full{0, 0, float(w), float(h), 0.f, 1.f};
+            SDL_SetGPUViewport(rp, &full);
+            SDL_Rect all{0, 0, int(w), int(h)};
+            SDL_SetGPUScissor(rp, &all);
+        };
+        std::size_t inset_done = 0;
         if (!overlay_runs.empty() && g.overlay_vbuf) {
             // Pixels → clip space, y down; unlit, unfogged, vertex colour × texture.
             Mat4 ortho = Mat4::identity();
@@ -525,11 +611,13 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
             flat.ambient = {1, 1, 1};
             flat.fog_end = 0;
             const DrawUniforms vu = vertex_uniforms(ortho, Mat4::identity(), flat, {});
-            SDL_BindGPUGraphicsPipeline(rp, g.pipeline_sky_blend);
             SDL_GPUBufferBinding ob{g.overlay_vbuf, 0};
-            SDL_BindGPUVertexBuffers(rp, 0, &ob, 1);
             Uint32 first = 0;
-            for (auto [tex, count] : overlay_runs) {
+            for (std::size_t r = 0; r < overlay_runs.size(); ++r) {
+                const auto [tex, count] = overlay_runs[r];
+                while (inset_done < overlay.insets.size() && overlay.insets[inset_done].after_quads <= run_quads[r]) draw_inset(overlay.insets[inset_done++]);
+                SDL_BindGPUGraphicsPipeline(rp, g.pipeline_sky_blend);
+                SDL_BindGPUVertexBuffers(rp, 0, &ob, 1);
                 SDL_PushGPUVertexUniformData(cb, 0, &vu, sizeof vu);
                 const FragUniforms fu{{0, 0, 1, 0}, {1, 0, 0, 0}, {1, 1, 1, 1}, {0, 0, 0, 1}};
                 SDL_PushGPUFragmentUniformData(cb, 0, &fu, sizeof fu);
@@ -540,6 +628,7 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
                 first += count;
             }
         }
+        while (inset_done < overlay.insets.size()) draw_inset(overlay.insets[inset_done++]);
         SDL_EndGPURenderPass(rp);
     };
 
@@ -641,6 +730,7 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
     }
 
     release_mesh(g);
+    for (auto& [k, m] : g.insets) release_inset(g, m);
     if (g.depth) SDL_ReleaseGPUTexture(g.device, g.depth);
     SDL_ReleaseGPUTexture(g.device, g.white);
     SDL_ReleaseGPUSampler(g.device, g.sampler);
