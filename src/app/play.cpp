@@ -31,6 +31,7 @@
 #include "ui/mission_end.hpp"
 #include "ui/campaign.hpp"
 #include "ui/hq.hpp"
+#include "ui/help_screen.hpp"
 #include "ui/designer.hpp"
 #include "shell/briefing.hpp"
 #include "shell/ini.hpp"
@@ -739,7 +740,15 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     std::size_t leaving_frames = 0;
     bool quit = false;
     std::optional<PlayOutcome::Exit> menu_exit; // the in-game menu's Exit / Load (CGame_LeaveWithLaunchMode 1 / 3)
-    std::optional<ui::PagerMessage> pager;
+    // The pager panel and its F2 toggle (CMD_PAGER), the help screen (F1) whose third tab logs the pager messages.
+    ui::PagerPanel pager;
+    ui::HelpScreen help;
+    // PushPagerHistory 1007f480: a message shows in the pager and, when `log`, goes to the help screen's message
+    // history. PostComputerPagerText always logs; PostScriptMessageToPager only the first showing of a message.
+    auto post_pager = [&](ui::PagerMessage m, bool log = true) {
+        if (log) help.log_message(m.header, m.body);
+        pager.post(std::move(m));
+    };
     std::set<std::uint32_t> messages_seen;
     bool objectives_visible = false;
     double objectives_shown_ms = 0;
@@ -748,6 +757,46 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     const input::GameBindings bindings = input::load_game_bindings(lib.game_dir(), opt.user_dir, opt.layout);
     const input::UiKeys& ui_keys = bindings.ui;
     const std::string help_key = key_label("CMD_HELP", ui_keys), objectives_key = key_label("CMD_JAMES_MISSION_OBJ", ui_keys);
+    // The help screen's pages (CHelpScreen ctor 10067700): the strings, mistips.mis, and the four key lists
+    // (FUN_10068da0: ui_hero / ui_bots / ui_hq / ui_other.man, the player's copies when the options menu saved them).
+    const ui::HelpStrings help_strings = ui::load_help_strings(ui_strings);
+    ui::TooltipState help_tooltip;
+    double help_cursor_tick = 0; // real-clock ms (the game clock is frozen while the screen is open)
+    {
+        help.set_strings(help_strings);
+        if (auto p = resolve_path(*dir, "mistips.mis")) {
+            const Bytes b = read_file(*p);
+            help.set_mission_tips(std::string(b.begin(), b.end()));
+        }
+        auto man_text = [&](const char* name) {
+            std::error_code ec;
+            std::optional<std::filesystem::path> p;
+            if (!opt.user_dir.empty() && std::filesystem::exists(opt.user_dir / name, ec)) p = opt.user_dir / name;
+            else p = resolve_path(lib.game_dir(), name);
+            if (!p) return std::string();
+            const Bytes b = read_file(*p);
+            return std::string(b.begin(), b.end());
+        };
+        auto dsc_text = [&](const char* name) {
+            const auto p = resolve_path(lib.game_dir(), name);
+            if (!p) return std::string();
+            const Bytes b = read_file(*p);
+            return std::string(b.begin(), b.end());
+        };
+        ui::ControlsSource cs;
+        static constexpr const char* kFiles[4] = {"ui_hero.man", "ui_bots.man", "ui_hq.man", "ui_other.man"};
+        // The lists show the keys the mission really uses: the same step load_game_bindings makes (saved bindings: only
+        // the MacBook remap; else the layout), then the interface commands' keys from addition.man.
+        for (std::size_t i = 0; i < 4; ++i) {
+            cs.tables[i] = input::parse_man(man_text(kFiles[i]), false);
+            if (bindings.custom) input::apply_mac_defaults(cs.tables[i]);
+            else input::apply_layout(cs.tables[i], opt.layout);
+            for (auto& r : cs.tables[i])
+                if (const auto k = ui_keys.key(input::man_command_name(r.cmd))) r.key = k->key;
+        }
+        cs.commands = input::parse_dsc(dsc_text("Command.dsc")), cs.scans = input::parse_dsc(dsc_text("ScanCode.dsc"));
+        help.set_controls(ui::build_controls_help(cs, help_strings));
+    }
     double sim_ms = 0;
     if (runtime) {
         runtime->set_event_sink([&](const game::MissionEvent& e) {
@@ -761,7 +810,8 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 ui::PagerMessage m;
                 m.header = ui_text(info_messages.count(e.id) ? 6214 : 3057);
                 m.more_footer = with_key(ui_text(6208), help_key);
-                if (messages_seen.insert(e.id).second) {
+                const bool first_showing = messages_seen.insert(e.id).second;
+                if (first_showing) {
                     m.body = it != msgs.end() ? utf8_to_cp1251(texts.get(std::string_view(it->second.text_resource))) : std::string();
                     // PostScriptMessageToPager (10095600): its voice through QueueUnitVoice.
                     if (it != msgs.end())
@@ -770,10 +820,10 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                     m.body = ui_text(6170) + "\n" + with_key(ui_text(6223), help_key);
                 }
                 m.shown_ms = sim_ms;
-                pager = std::move(m);
+                post_pager(std::move(m), first_showing); // the "already received" repeat is not logged again
             } else if (e.type == T::ObjectiveComplete || e.type == T::ObjectiveFailed) {
                 // PostComputerPagerText: "from: the central computer" with 5040 / 5041.
-                pager = ui::PagerMessage{ui_text(1541), ui_text(e.type == T::ObjectiveComplete ? 5040 : 5041), {}, sim_ms};
+                post_pager({ui_text(1541), ui_text(e.type == T::ObjectiveComplete ? 5040 : 5041), {}, sim_ms});
             } else if (e.type == T::MissionComplete || e.type == T::MissionFailed) {
                 play_end_voice(e.type == T::MissionComplete ? end_ctl.mission_complete() : end_ctl.mission_failed());
             }
@@ -1074,7 +1124,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         play_voice(k);
     };
     say_voice = play_voice;
-    computer_pager = [&](std::uint32_t id) { pager = ui::PagerMessage{ui_text(1541), ui_text(id), {}, sim_ms}; }; // PostComputerPagerText
+    computer_pager = [&](std::uint32_t id) { post_pager({ui_text(1541), ui_text(id), {}, sim_ms}); }; // PostComputerPagerText
     // The HQ interface and the view-state stack (notes/hq-ui.md; created once the HUD strings exist, below).
     std::unique_ptr<ui::HqController> hq;
     ctl_mode = [&]() -> int {
@@ -1120,7 +1170,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (runtime)
                 if (game::SuperAI* ai = runtime->super_ai(old_clan)) relation = ai->relation(hero_clan);
             const bool neutral = old_clan < tma.clans.size() && tma.clans[old_clan].mode == 3;
-            pager = ui::PagerMessage{ui_text(1541), ui_text(5039), {}, sim_ms};
+            post_pager({ui_text(1541), ui_text(5039), {}, sim_ms});
             play_voice(neutral || relation == 1 ? "VOICE_NBUILD_CAPTURE" : relation == 0 ? "VOICE_EBUILD_CAPTURE" : "VOICE_BUILD_CAPTURE");
         } else if (old_clan == hero_clan) {
             play_voice("VOICE_BUILD_CAPTURE");
@@ -1290,7 +1340,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 if (e.clan == hero_clan && eco) {
                     const economy::Research* r = eco->research(e.clan);
                     const mission::ResearchItem* it = r ? r->item(e.item) : nullptr;
-                    pager = ui::PagerMessage{ui_text(1541), ui_text(2010) + " (" + (it ? it->name : std::string()) + ")", {}, sim_ms};
+                    post_pager({ui_text(1541), ui_text(2010) + " (" + (it ? it->name : std::string()) + ")", {}, sim_ms});
                     play_voice("VOICE_RSRCH_COMPLETE");
                 }
                 break;
@@ -1347,6 +1397,52 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat && ev.key.scancode == SDL_SCANCODE_ESCAPE) briefing_skip = true;
             return;
         }
+        if (help.visible()) {
+            // The help screen is a key listener ahead of the rest (window procedure 100a0dd0): it takes Tab, the arrows,
+            // the wheel and the pointer; F1 (OnUICommandDown 0x2ED) and Esc (OnGameKeyDown link 3) close it. Other keys do
+            // nothing [inferred: the commands behind them are guarded by the screen or draw nothing under it]; releases still
+            // reach the hero's tables.
+            int ww = 640, wh = 480;
+            SDL_GetWindowSize(window, &ww, &wh);
+            const auto virt = [&](float x, float y) {
+                return std::pair{std::round(x * 640.f / float(std::max(ww, 1))), std::round(y * 480.f / float(std::max(wh, 1)))};
+            };
+            if (ev.type == SDL_EVENT_KEY_DOWN) {
+                const auto scan = input::scan_from_hid(int(ev.key.scancode));
+                using K = ui::HelpScreen::Key;
+                switch (ev.key.scancode) { // the repeats scroll and switch as WM_KEYDOWN's do
+                case SDL_SCANCODE_TAB: help.key_down(K::Tab); break;
+                case SDL_SCANCODE_RIGHT: help.key_down(K::Right); break;
+                case SDL_SCANCODE_LEFT: help.key_down(K::Left); break;
+                case SDL_SCANCODE_UP: help.key_down(K::Up); break;
+                case SDL_SCANCODE_DOWN: help.key_down(K::Down); break;
+                default:
+                    if (ev.key.repeat) break;
+                    if (ev.key.scancode == SDL_SCANCODE_ESCAPE || ui_keys.is(scan, "CMD_HELP")) help.close();
+                    else if (ui_keys.is(scan, "CMD_PAGER")) pager.toggle(); // no guards on 0x2D9
+                    break;
+                }
+            } else if (ev.type == SDL_EVENT_KEY_UP) {
+                if (const auto scan = input::scan_from_hid(int(ev.key.scancode))) events.push_back({false, scan});
+            } else if (ev.type == SDL_EVENT_MOUSE_MOTION) {
+                const auto [vx, vy] = virt(ev.motion.x, ev.motion.y);
+                help.mouse_move(vx, vy);
+                if (hq) hq->mouse_move(vx, vy); // keep the HQ cursor current for when the screen closes
+            } else if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
+                const auto [vx, vy] = virt(ev.button.x, ev.button.y);
+                help.mouse_move(vx, vy);
+                if (hq) hq->mouse_move(vx, vy);
+                help.lbutton_down(vx, vy);
+            } else if (ev.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                if (ev.button.button == SDL_BUTTON_LEFT) help.lbutton_up();
+                events.push_back({false, ev.button.button == SDL_BUTTON_LEFT    ? input::kScanMouseLeft
+                                         : ev.button.button == SDL_BUTTON_RIGHT ? input::kScanMouseRight
+                                                                                : input::kScanMouseMiddle});
+            } else if (ev.type == SDL_EVENT_MOUSE_WHEEL && ev.wheel.y != 0) {
+                help.wheel(ev.wheel.y < 0 ? -1 : 1);
+            }
+            return;
+        }
         if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat) {
             if (end_ctl.message_visible()) {
                 // OnGameKeyDown / OnGameCharKey: Esc leaves; after a failure R restarts and L loads. Read
@@ -1356,6 +1452,15 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 else if (ev.key.scancode == SDL_SCANCODE_L) end_ctl.on_char('l');
                 return;
             }
+            // HELP (F1, OnUICommandDown case 0xb): opens the help screen (no view-state test; not over the in-game menu or
+            // the unit designer [inferred: the "other overlay" guard *(game+0xc)+0x20 is not decoded]). PAGER (F2, 0x2D9)
+            // shows or hides the transient pager panel; it has no guards and takes no key from the commands below.
+            const auto cmd_scan = input::scan_from_hid(int(ev.key.scancode));
+            if (ui_keys.is(cmd_scan, "CMD_PAGER")) pager.toggle();
+            if (ui_keys.is(cmd_scan, "CMD_HELP") && !(hq && (hq->menu_open() || hq->designer_open()))) {
+                help.open();
+                return;
+            }
             // GAME_MENU (F3, OnUICommandDown case 0xa): the in-game menu (view state 7) opens, or closes when open;
             // not while placing a building.
             if (hq && ui_keys.is(input::scan_from_hid(int(ev.key.scancode)), "CMD_GAME_MENU") && hq->mode() != ui::kModePlaceBuilding && hq->mode() != ui::kModePlaceMine) {
@@ -1363,15 +1468,21 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 else hq->open_menu();
                 return;
             }
-            // Esc first goes through the key listeners (OnGameKeyDown 10071240, in its order; the port has no help or
-            // message-log screen): open objectives close, the wingman menu takes it (OnUICommandDown 0x2e4), on foot
+            // Esc first goes through the key listeners (OnGameKeyDown 10071240, in its order; the help screen, link 3, took
+            // it above): open objectives close (link 5), a visible pager hides (link 7, OnUICommandDown 0x2d9), the
+            // wingman menu takes it (OnUICommandDown 0x2e4), on foot
             // the game menu opens (0x2ec), then the HQ part. A key nothing took goes on to the UI bindings
             // (window procedure 100a0dd0 → DispatchUIKeyMessage): ROLLBACK_STATE pops the view state
             // (CViewStateQueue::ProcessTransitions).
             bool key_taken = false;
+            if (ev.key.scancode == SDL_SCANCODE_ESCAPE && !hq && pager.visible()) { // link 7 needs no HQ
+                pager.hide();
+                return;
+            }
             if (ev.key.scancode == SDL_SCANCODE_ESCAPE && hq) {
                 key_taken = true;
                 if (objectives_visible && hq->state() != ui::kStateMenu) objectives_visible = false;
+                else if (pager.visible() && hq->state() != ui::kStateMenu) pager.hide();
                 else if (hq->wingman.state != 0 && hq->state() != ui::kStateMenu)
                     hq->wingman_command(wingman_list(), false);
                 else if (hq->state() == ui::kStateHero) hq->open_menu();
@@ -1893,10 +2004,11 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         if (sound && !briefing && sound->music_finished()) sound->play_random_music(false);
     };
 
-    // CGame_SetPaused 1005fb10 (single player): the in-game menu (view state 7) freezes the game time.
+    // CGame_SetPaused 1005fb10 (single player): the in-game menu (view state 7) and the help screen (FUN_10067c60)
+    // freeze the game time.
     double paused_ms = 0, last_frame_ms = -1;
     vo.animate = [&](double seconds, std::vector<Mat4>& transforms) {
-        if (last_frame_ms >= 0 && hq && hq->menu_open()) paused_ms += seconds * 1000.0 - last_frame_ms;
+        if (last_frame_ms >= 0 && ((hq && hq->menu_open()) || help.visible())) paused_ms += seconds * 1000.0 - last_frame_ms;
         last_frame_ms = seconds * 1000.0;
         const double now = seconds * 1000.0 - paused_ms;
         voices.update(); // CSoundServer::UpdateQueue, every MainLoop frame
@@ -1979,7 +2091,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             return true;
         }
         // The HQ states show the system pointer (cursors .ani not decoded) instead of the captured mouse.
-        if (const bool rel = !hq || hq->unit_controlled(); opt.shot_path.empty() && rel != relative_mouse_on) {
+        if (const bool rel = (!hq || hq->unit_controlled()) && !help.visible(); opt.shot_path.empty() && rel != relative_mouse_on) {
             SDL_SetWindowRelativeMouseMode(window, rel), relative_mouse_on = rel;
             // The HQ shows the engine's software cursor (FORCE_SOFTWARE_CURSOR, the shipped default) or the system one.
             if (!rel && opt.software_cursor) SDL_HideCursor();
@@ -2380,7 +2492,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         host.library = &lib;
         host.described = [&](const std::string& model) { return lib.find("objects.dlb", model) != nullptr; };
         host.voice = [&](const std::string& key, std::uint32_t lid) { play_unit_voice(key, lid); };
-        host.pager = [&](const std::string& h, const std::string& b) { pager = ui::PagerMessage{h, b, {}, sim_ms}; };
+        host.pager = [&](const std::string& h, const std::string& b) { post_pager({h, b, {}, sim_ms}); };
         host.sound = [&](const char* key) {
             if (auto v = ui_sounds.find(key); sound && v != ui_sounds.end()) sound->play({"sounds.lib", v->second});
         };
@@ -2612,12 +2724,19 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         return pk;
     };
     // Port debug aids (src/app/main.cpp usage): --enter puts the hero into an own building as the lift does,
-    // --hq-screen opens a screen once the interface is up, --click clicks the virtual screen at a time.
+    // --hq-screen opens a screen once the interface is up, --click clicks the virtual screen at a time, --help-tab opens
+    // the help screen on a tab.
     bool hq_entered = false, hq_screen_done = false;
     std::size_t hq_clicks_done = 0;
     bool pilot_done = false;
     std::function<void()> hq_debug_tick;
+    bool help_tab_done = false;
     hq_debug_tick = [&] {
+        if (opt.help_tab >= 0 && !help_tab_done) { // --help-tab <n>: the help screen on tab n from the start
+            help_tab_done = true;
+            help.set_tab(opt.help_tab);
+            help.open();
+        }
         if (!hq) return;
         if (opt.hq_enter && !hq_entered) {
             hq_entered = true;
@@ -2703,7 +2822,26 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             }
             return;
         }
-        if (pager && sim_ms - pager->shown_ms >= ui::kPagerLifetimeMs) pager.reset();
+        pager.update(sim_ms); // UpdateDrawPagerTimeout
+        if (help.visible()) {
+            // CHud_Draw 1008d680: with the help screen visible only it is drawn (FUN_10068000), no HUD and no pager.
+            // The game clock is frozen (CGame_SetPaused), so the blink and the repeat run on the real clock.
+            const double now = double(SDL_GetTicks());
+            const ui::HudContext hc{vs, game_font, hud_tex, hud_strings};
+            const ui::HelpFrame hf = help.frame({&vs, game_font.font}, now);
+            ui::draw_help_screen(f, hc, hq_sprites, hf);
+            const float px = help.mouse_x() * vs.sx(), py = help.mouse_y() * vs.sy();
+            if (hf.close_hover) { // the tooltip 6169 (the slot of 1009bb60)
+                if (!opt.shot_path.empty()) help_tooltip = {px, py, -1e9}; // port debug aid: --shot renders one frame (rested)
+                ui::draw_tooltip(f, vs, tool_font, help_tooltip, help_strings.close, px, py, now, opt.software_cursor);
+            }
+            if (opt.software_cursor)
+                if (auto c = hq_cursors.find(ui::cursor_name(ui::kCurArrow)); c != hq_cursors.end()) {
+                    if (now - help_cursor_tick > c->second.phase_s * 1000) help_cursor_tick = now, hq_cursor_frame = (hq_cursor_frame + 1) & 3;
+                    ui::draw_cursor(f, vs, hud_tex, c->second, hq_cursor_frame, help.mouse_x(), help.mouse_y());
+                }
+            return;
+        }
         if (objectives_visible && objectives_auto_hide && sim_ms - objectives_shown_ms >= ui::kObjectivesAutoHideMs)
             objectives_visible = false;
         // CHud_Draw: with the objectives screen up only it is drawn; otherwise the cockpit, the satellite
@@ -2772,7 +2910,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 }
                 ui::draw_hud(f, hc, hs);
             }
-            if (pager && !objectives_visible) ui::draw_pager(f, vs, game_font, *pager, true);
+            if (const auto* pm = pager.shown(); pm && !objectives_visible) ui::draw_pager(f, vs, game_font, *pm, true);
             // The tooltip (HqTooltip_UpdateAndDraw, unless the objectives screen is up), then the software cursor
             // (Cursor_UpdateAndDrawInGame 10058bb0; mode 8 is the placement ghost, no sprite).
             const float px = hq->mouse_x * vs.sx(), py = hq->mouse_y * vs.sy();
@@ -2844,7 +2982,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 targeter_view(ctl_ci, 503, 315, 631, 443);
             }
             cockpit_sounds(hs);
-            if (pager) ui::draw_pager(f, vs, game_font, *pager);
+            if (const auto* pm = pager.shown()) ui::draw_pager(f, vs, game_font, *pm);
         }
         if (objectives_visible && runtime) {
             ui::ObjectivesScreen o;

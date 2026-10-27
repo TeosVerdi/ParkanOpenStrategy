@@ -62,6 +62,9 @@ int economy_corpus_tests(const std::filesystem::path& game);
 // tools/hq_tests.cpp: the HQ interface (view states, camera, selection, orders, screens).
 int hq_unit_tests();
 int hq_corpus_tests(const std::filesystem::path& game);
+// tools/help_tests.cpp: the help screen (tabs, scrolling, message history, the controls page).
+int help_unit_tests();
+int help_corpus_tests(const std::filesystem::path& game);
 
 namespace {
 
@@ -766,6 +769,7 @@ void test_corpus(const std::filesystem::path& game) {
     g_failures += shell_corpus_tests(game);    // tools/shell_tests.cpp
     g_failures += economy_corpus_tests(game);  // tools/economy_tests.cpp
     g_failures += hq_corpus_tests(game);       // tools/hq_tests.cpp
+    g_failures += help_corpus_tests(game);     // tools/help_tests.cpp
     test_audio_corpus(game);
 
     // Tut_2's sky at 07:00 (notes/atmosphere-render.md §10): the clock starts at 01:30 and a day lasts
@@ -840,6 +844,7 @@ int main(int argc, char** argv) {
     g_failures += install_unit_tests();
     g_failures += economy_unit_tests();
     g_failures += hq_unit_tests();
+    g_failures += help_unit_tests();
     if (argc > 1) test_corpus(argv[1]);
     std::printf(g_failures ? "%d FAILURES\n" : "all passed\n", g_failures);
     return g_failures ? 1 : 0;

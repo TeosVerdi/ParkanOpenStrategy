@@ -78,6 +78,18 @@ void apply_layout(std::vector<Binding>& table, KeyLayout layout) {
     table.insert(table.end(), sprint.begin(), sprint.end());
 }
 
+void apply_layout(ManTable& rows, KeyLayout layout) {
+    apply_mac_defaults(rows);
+    if (layout == KeyLayout::Classic) return;
+    for (const auto& r : rows) // idempotence, as above
+        if (r.key == sc("SCAN_W") || r.key == sc("SCAN_A")) return;
+    const auto& m = modern_vehicle_map();
+    for (auto& r : rows) {
+        if (auto it = m.find(r.key); it != m.end()) r.key = it->second;
+        if (auto it = m.find(r.modifier); it != m.end()) r.modifier = it->second;
+    }
+}
+
 std::optional<UiKey> UiKeys::key(std::string_view command) const {
     const auto id = man_command(command);
     if (!id) return std::nullopt;

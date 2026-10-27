@@ -22,6 +22,10 @@ enum class KeyLayout {
 // already carry the MacBook remap; idempotent.
 void apply_layout(std::vector<Binding>& table, KeyLayout layout);
 
+// The same for a binding list (.man rows, e.g. the options menu's ui_hero / ui_bots / ui_hq): the key substitution
+// only, so the Modern layout's sprint twins are not made and each command lists its base key.
+void apply_layout(ManTable& rows, KeyLayout layout);
+
 // The interface commands' keys (iron3d CKeyBindings table 3, addition.man), looked up as DispatchUIKeyMessage
 // (10072060) does: a key press gives the command of the first row bound to that key without a modifier.
 struct UiKey {

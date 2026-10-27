@@ -12,6 +12,7 @@
 //   parkan --play <mission dir> [--classic-keys] [--time <s>] [--no-fog] [--walk] [--fire] [--aim] [--shot <out.bmp>] [<game dir>]
 //        [--goto x,y[,heading°]] [--target <hex LogicID>] [--damage-mult k]   port debug aids (buildings)
 //        [--pilot <hex LogicID> [t [t_exit]]]            the hero boards that own unit at game time t (view state 1)
+//        [--help-tab <n>]                                the help screen (F1) open on tab n (0 mission, 1 controls, 2 messages)
 //        [--enter <hex LogicID>] [--hq-screen <n>] [--click x,y[,t][,r|m]]... port debug aids (HQ screens): the
 //                                                   hero enters that own building, screen n opens, virtual
 //                                                   640×480 clicks at game time t (r = right button, m = move)
@@ -162,6 +163,8 @@ int main(int argc, char** argv) {
             debug_play.hq_enter = std::uint32_t(std::strtoul(argv[++i], nullptr, 16));
         } else if (a == "--hq-screen" && i + 1 < argc) {
             debug_play.hq_screen = std::atoi(argv[++i]);
+        } else if (a == "--help-tab" && i + 1 < argc) {
+            debug_play.help_tab = std::atoi(argv[++i]);
         } else if (a == "--click" && i + 1 < argc) {
             parkan::PlayOptions::VirtualClick c;
             char r = 0;

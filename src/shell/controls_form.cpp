@@ -33,28 +33,6 @@ const char* kFiles[8] = {"ui_other.man", "ui_hq.man", "ui_bots.man", "ui_hero.ma
 
 bool is_axis(const std::string& k) { return k == "SCAN_MOUSE_X" || k == "SCAN_MOUSE_Y" || k == "SCAN_JOY_X" || k == "SCAN_JOY_Y"; }
 
-// `NAME <whitespace> text` lines (command.dsc / scancode.dsc).
-std::map<std::string, std::string> parse_dsc(const std::string& text) {
-    std::map<std::string, std::string> out;
-    std::istringstream in(text);
-    std::string line;
-    while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        const std::size_t a = line.find_first_not_of(" \t");
-        if (a == std::string::npos) continue;
-        const std::size_t b = line.find_first_of(" \t", a);
-        const std::string name = line.substr(a, b == std::string::npos ? std::string::npos : b - a);
-        std::string desc;
-        if (b != std::string::npos) {
-            const std::size_t c = line.find_first_not_of(" \t", b);
-            if (c != std::string::npos) desc = line.substr(c);
-            while (!desc.empty() && (desc.back() == ' ' || desc.back() == '\t')) desc.pop_back();
-        }
-        out[name] = desc;
-    }
-    return out;
-}
-
 Table parse_man(const std::string& text) {
     Table t;
     std::istringstream in(text);
@@ -188,8 +166,8 @@ public:
             auto p = resolve_path(game, name);
             return p ? read_text(*p) : std::string();
         };
-        commands_ = parse_dsc(game_text("Command.dsc"));
-        scans_ = parse_dsc(game_text("ScanCode.dsc"));
+        commands_ = input::parse_dsc(game_text("Command.dsc"));
+        scans_ = input::parse_dsc(game_text("ScanCode.dsc"));
         for (int i = 0; i < 8; ++i) {
             const auto& dir = shell_.config().user_dir;
             std::error_code ec;

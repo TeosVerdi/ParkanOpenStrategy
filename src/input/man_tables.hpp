@@ -13,6 +13,7 @@
 #include "input/translate_table.hpp"
 
 #include <array>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -38,6 +39,9 @@ std::string_view man_command_name(std::uint32_t cmd);
 ManTable parse_man(std::string_view text, bool joystick);
 // SaveManAndBuildTable's file: "CMD MODIFIER KEY\n" per row.
 std::string write_man(const ManTable& rows);
+
+// `NAME <whitespace> text` lines of command.dsc / scancode.dsc: the display text of a CMD_ / SCAN_ name (cp1251).
+std::map<std::string, std::string> parse_dsc(std::string_view text);
 
 // World3D CreateTranslateTable: the .tbl text for a .man text (`hero`: the target is HERO.TBL, which has its
 // own strafe-release and turn templates).

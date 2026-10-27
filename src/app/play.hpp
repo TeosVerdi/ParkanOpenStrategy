@@ -67,6 +67,7 @@ struct PlayOptions {
     std::optional<std::uint32_t> pilot;
     double pilot_time = 0, pilot_exit = -1;
     int hq_screen = -1;
+    int help_tab = -1; // --help-tab <n>: open the help screen on tab n (0 mission, 1 controls, 2 messages) at the start
     struct VirtualClick {
         float x = 0, y = 0;
         double t = 0;

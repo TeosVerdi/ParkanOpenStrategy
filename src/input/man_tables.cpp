@@ -119,6 +119,27 @@ std::string_view man_command_name(std::uint32_t cmd) {
     return {};
 }
 
+std::map<std::string, std::string> parse_dsc(std::string_view text) {
+    std::map<std::string, std::string> out;
+    std::istringstream in{std::string(text)};
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const std::size_t a = line.find_first_not_of(" \t");
+        if (a == std::string::npos) continue;
+        const std::size_t b = line.find_first_of(" \t", a);
+        const std::string name = line.substr(a, b == std::string::npos ? std::string::npos : b - a);
+        std::string desc;
+        if (b != std::string::npos) {
+            const std::size_t c = line.find_first_not_of(" \t", b);
+            if (c != std::string::npos) desc = line.substr(c);
+            while (!desc.empty() && (desc.back() == ' ' || desc.back() == '\t')) desc.pop_back();
+        }
+        out[name] = desc;
+    }
+    return out;
+}
+
 ManTable parse_man(std::string_view text, bool joystick) {
     ManTable out;
     std::istringstream in{std::string(text)};
