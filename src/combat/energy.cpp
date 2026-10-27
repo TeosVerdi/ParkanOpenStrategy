@@ -262,7 +262,29 @@ std::optional<float> EnergyBudget::battery_capacity() const {
 
 void EnergyBudget::set_battery_fraction(float f) {
     for (auto& d : devices)
-        if (d.type == 0x13) d.ratio = f;
+        if (d.type == 0x13 && d.param[0] > 0) d.ratio = f; // GetParam(0) > 0: "endless" batteries are left alone
+}
+
+std::optional<float> EnergyBudget::shield_mean() const {
+    if (shield < 0) return std::nullopt;
+    float mean = 0;
+    for (const float c : devices[std::size_t(shield)].sides) mean += c;
+    return mean * (1.f / 6);
+}
+
+void EnergyBudget::set_shield_mean(float v) {
+    if (const auto m = shield_mean()) spread_charge(devices[std::size_t(shield)], v - *m);
+}
+
+float EnergyBudget::signature_factor(std::size_t i, const EnergyHost& host) const {
+    float f = 1;
+    for (const auto& d : devices) {
+        if (d.type != 0xa) continue;
+        float x = std::min(1.f, get_param(d, 0x300 + std::uint32_t(i), host));
+        if (d.state == 0x1000) x *= std::min(1.f, get_param(d, 3, host));
+        f *= x;
+    }
+    return f;
 }
 
 void EnergyBudget::set_power_usage(float u) {

@@ -138,6 +138,7 @@ std::optional<UnitModel> load_unit_model(AssetLibrary& lib, const mission::Schem
         if (!ref) return false;
         UnitPart part;
         part.model = load_model(lib, ref->archive, ref->mesh);
+        part.mesh_archive = ref->archive, part.mesh_entry = ref->mesh;
         part.parent = parent;
         part.mount = node.mount;
         // Prototype pairs: 0 mesh, 1 WEAR, 2 CTPT, 3 NDPR, 4 CTLD (STAT/BTLU/EXTO records).

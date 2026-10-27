@@ -81,6 +81,43 @@ EnergyHost Combatant::energy_host() const {
     return host;
 }
 
+void Combatant::recharge(float a, float now_ms) {
+    // 0x204 GetProperty(1) → SetProperty(1, min(1, f + a)); a unit without a battery has no property.
+    if (const auto f = energy.battery_fraction()) energy.set_battery_fraction(std::min(1.f, *f + a));
+    // Room_RechargeLifeAndShield: life property 0x31 → ApplyDamageTotal(maxHP·v − hp) (CControlBase::SetProperty).
+    if (damage.initial > 0 && !damage.killed) {
+        const float v = std::min(1.f, damage.hp_ratio() + a);
+        const float amount = damage.initial * v - damage.total;
+        if (amount != 0) damage.apply_damage_total(amount, true, false, now_ms);
+    }
+    if (const auto m = energy.shield_mean()) energy.set_shield_mean(std::min(1.f, *m + a));
+    // Room_RechargeGuns: every gun device of type 2 (not the building guns, 0x1e).
+    for (auto& g : guns) {
+        if (g.spec().type != 2) continue;
+        if (const auto n = std::int32_t(std::lround(g.param(0))); n > 0) g.set_ammo(recharged_ammo(g.ammo(), n, a));
+        g.set_energy_ratio(std::min(1.f, g.energy_ratio() + a));
+    }
+}
+
+std::optional<Combatant::Signature> Combatant::signature() const {
+    if (!mass) return std::nullopt;
+    const EnergyHost host = energy_host();
+    return Signature{mass->area * energy.drain_a * energy.signature_factor(1, host),
+                     mass->volume * energy.drain_b * energy.signature_factor(2, host),
+                     mass->mass * energy.signature_factor(0, host)};
+}
+
+bool Combatant::radar_detects(float d, const Signature& s) const {
+    if (energy.radar < 0) return false;
+    const PowerDevice& r = energy.devices[std::size_t(energy.radar)];
+    const EnergyHost host = energy_host();
+    const float range = r.param[3];
+    if (r.state == 0 || part_ratio(r.part) == 0 || !(d < range)) return false;
+    const float f = 1 - d * d / (range * range);
+    return EnergyBudget::get_param(r, 0x300, host) * s.p45 * f >= 1 || EnergyBudget::get_param(r, 0x301, host) * s.p43 * f >= 1 ||
+           EnergyBudget::get_param(r, 0x302, host) * s.p44 * f >= 1;
+}
+
 std::optional<float> Combatant::radar_param(std::size_t i) const {
     if (energy.radar < 0 || i >= 16) return std::nullopt;
     return energy.devices[std::size_t(energy.radar)].param[i];
@@ -1040,6 +1077,35 @@ void CombatWorld::update_energy(Combatant& c, float dt_s, float now) {
     c.energy.update(dt_s, c.guns, host);
 }
 
+void CombatWorld::set_rooms(std::size_t unit, std::vector<Room> rooms) {
+    std::erase_if(room_sets_, [&](const RoomSet& s) { return s.building == unit; });
+    if (!rooms.empty()) room_sets_.push_back({unit, std::move(rooms), std::nullopt});
+}
+
+// MRoomManager_Takt (10018ac0) for every building's rooms: a = 0.1 · dt over the occupants of each reload room.
+void CombatWorld::update_rooms(float now) {
+    for (RoomSet& set : room_sets_) {
+        const Combatant& b = *units_[set.building];
+        if (!set.last_ms) set.last_ms = now;
+        if (now - *set.last_ms < kRoomPeriodMs) continue;
+        const float a = kRoomRate * (now - *set.last_ms) * 0.001f;
+        set.last_ms = now;
+        if (b.removed || !b.alive()) continue;
+        for (const Room& r : set.rooms) {
+            if (!r.reloads()) continue;
+            const Vec3 at = b.unit->frame.matrix.transform_point(r.pos);
+            for (std::size_t u = 0; u < units_.size(); ++u) {
+                Combatant& c = *units_[u];
+                // [inferred] mobile units only; allied = the same clan; behaviour property 0x208 taken as 0.
+                if (u == set.building || c.removed || !c.alive() || c.building() || c.damage.clan != b.damage.clan) continue;
+                const Vec3 v = c.unit->motion->world_velocity();
+                if (std::sqrt(dot(v, v)) >= r.speed_limit || !room_contains(r, at, c.unit->position())) continue;
+                c.recharge(a, now);
+            }
+        }
+    }
+}
+
 void CombatWorld::update(float now) {
     const float dt = now - last_ms_;
     last_ms_ = now;
@@ -1068,6 +1134,7 @@ void CombatWorld::update(float now) {
     }
     std::erase_if(bullets_, [](const Bullet& b) { return !b.alive; });
     process_records(now);
+    update_rooms(now);
     // Slow damage tick and removal.
     for (std::size_t u = 0; u < units_.size(); ++u) {
         Combatant& c = *units_[u];

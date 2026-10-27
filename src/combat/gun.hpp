@@ -82,6 +82,12 @@ public:
     // AddEnergy (10029a90): energy += −deficit·ratio (− power·dt while firing) when param1 > 0, then
     // dev+0x4c = energy / param1. Not clamped: an under-supplied firing gun can lose energy.
     void add_energy(float dt_s, float ratio, bool broken);
+    // The reload room's setters (Room_RechargeGuns 100181e0): device property 0x700 (ammo) and
+    // CGunDevice::SetEnergyRatio (10029b10): dev+0x4c = r, energy = param1 · r, only when param1 > 0.
+    void set_ammo(std::int32_t a) { ammo_ = a; }
+    void set_energy_ratio(float r) {
+        if (param_[1] > 0) ratio_ = r, energy_ = param_[1] * r;
+    }
     std::size_t barrel() const { return cur_; }
     std::size_t barrel_count() const { return channels_.size(); }
     std::uint32_t barrel_joint(std::size_t b) const { return channels_[b].joint; }

@@ -301,8 +301,14 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     combat::CombatWorld combat(lib, ground, &trace_statics);
     for (std::size_t i = 0; i < live.size(); ++i)
         combat.add_unit(*live[i], live[i]->placement->identity, live[i]->placement->ai_index, i == hero_slot);
+    // The reload rooms of a building: its model's hallway vertices (notes/energy.md §3.1).
+    auto add_rooms = [&](std::size_t ci, const LiveUnit& body) {
+        const UnitPart& root = body.model.parts.front();
+        combat.set_rooms(ci, combat::build_rooms(combat::load_hallway(lib, root.mesh_archive, root.mesh_entry)));
+    };
     for (auto& b : buildings) {
         const std::size_t ci = combat.add_unit(b->body(), b->body().placement->identity, b->body().placement->ai_index, false);
+        add_rooms(ci, b->body());
         SDL_Log("play: building %08x %s: %.0f HP, %zu doors, capture door %s", b->body().placement->identity, b->body().placement->resource.c_str(),
                 combat.unit(ci).damage.initial, b->items().size() - (b->can_be_captured() ? 1 : 0), b->can_be_captured() ? "yes" : "no");
     }
@@ -961,6 +967,30 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                tma.clans[c].mode != 0 && perception.hostile(hero_clan, c);
     };
     auto is_friend = [&](std::int32_t i) { return !combat.unit(std::size_t(i)).building() && clan_of(std::size_t(i)) == hero_clan; };
+    // A unit's signatures for the radar (unit properties 0x43 / 0x44 / 0x45): the assembled design's mass, area and
+    // volume (economy::design_stats of its scheme, cached by resource); none for buildings and unknown designs.
+    std::map<std::string, std::optional<combat::Combatant::Mass>> mass_cache;
+    auto signature_of = [&](std::size_t ci) -> std::optional<combat::Combatant::Signature> {
+        combat::Combatant& c = combat.unit(ci);
+        if (c.building()) return std::nullopt;
+        if (!c.mass) {
+            const std::string& res = placement_of(ci).resource;
+            auto [it, fresh] = mass_cache.try_emplace(res);
+            if (fresh) try {
+                    economy::Economy* e = runtime ? runtime->economy() : nullptr;
+                    const mission::Scheme* sc = e ? e->schemes().get(res) : nullptr;
+                    std::optional<mission::Scheme> read;
+                    if (!sc)
+                        if (auto path = resolve_path(lib.game_dir(), res)) sc = &read.emplace(mission::decode_scheme(read_file(*path)));
+                    if (sc)
+                        if (const auto st = economy::design_stats(lib, *sc); st && st->mass > 0)
+                            it->second = combat::Combatant::Mass{st->mass, st->area, st->volume};
+                } catch (const std::exception&) {
+                }
+            c.mass = it->second;
+        }
+        return c.signature();
+    };
     // CTargeting's detected list (10091de0 over the sensor's objects; port: the living units and buildings
     // within the radar range): the local hero, bridges and ruins are left out.
     std::function<std::vector<std::uint32_t>()> wingman_list; // set below, after the detected list
@@ -976,7 +1006,16 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                                                     brains[std::size_t(li)]->current_order() == 0x13 && is_enemy(std::int32_t(i)))
                 continue;
             const Vec3 d = c.unit->position() - cu->position();
-            if (d.x * d.x + d.y * d.y <= radar_range() * radar_range()) out.push_back(std::int32_t(i));
+            // CRadarDevice_Detects (10024620, notes/energy.md §4.2): the radar's strength (part HP, energy share) against
+            // the target's signatures 0x43 / 0x44 / 0x45; a target whose design is unknown (no signatures) keeps the
+            // range-only test. The rescan interval (dev+0xa4 = now + GetParam(4)) is not kept: its operand is only partly
+            // decoded (energy.md §4.2), so the list is evaluated on every call [inferred].
+            if (cc->energy.radar >= 0)
+                if (const auto sig = signature_of(i)) {
+                    if (cc->radar_detects(std::sqrt(dot(d, d)), *sig)) out.push_back(std::int32_t(i));
+                    continue;
+                }
+            if (dot(d, d) <= radar_range() * radar_range()) out.push_back(std::int32_t(i)); // |target − radar|, 3-D
         }
         return out;
     };
@@ -1329,6 +1368,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         buildings.push_back(std::make_unique<Building>(std::move(body), w->type));
         const std::size_t ci = combat.add_unit(buildings[k]->body(), lid, w->clan, false);
         bld_ci.push_back(ci), ci_live.push_back(-1), ci_bld.push_back(std::int32_t(k));
+        add_rooms(ci, buildings[k]->body());
         bind_power(ci);
         unit_of[lid] = ci, tma_clans[lid] = w->clan, tma_types[lid] = w->type;
         perception.add_unit(lid, ci, w->clan, w->type);

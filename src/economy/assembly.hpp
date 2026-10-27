@@ -31,6 +31,7 @@ std::optional<std::int32_t> read_sheet_int(AssetLibrary& lib, std::string_view s
 
 struct UnitStats {
     float mass = 0;            // 0x7c, kg
+    float area = 0, volume = 0; // ctl+0x530 / +0x534: ΣA, ΣV over the parts (the signatures 0x43 / 0x44, unit-stats.md §3)
     float payload = 0;         // 0x88 = the chassis CTLD body[26] (capacity, kg)
     float payload_free = 0;    // 0x89 = max(0, body[26] + Σ chassis ρ·V − mass)
     float speed_nominal = 0;   // 0x90 = body[7], m/s

@@ -77,6 +77,14 @@ public:
     std::optional<float> battery_capacity() const;
     // SetProperty(1, f) (1002ba30): every battery's charge := f (the economy distributor's refill).
     void set_battery_fraction(float f);
+    // 0x204 GetProperty(7) / SetProperty(7, v) (the room's shield recharge, Room_RechargeLifeAndShield 10018100): the
+    // mean side charge; the setter spreads the difference over the sides (FUN_10025a90). nullopt without a shield.
+    std::optional<float> shield_mean() const;
+    void set_shield_mean(float v);
+    // The i_dsh signature factors of unit properties 0x45 / 0x43 / 0x44 (unit-stats.md §3), i = 0 / 1 / 2: the
+    // product over the type-0xa devices of min(1, GetParam(0x300 + i)), × min(1, GetParam(3)) in state 0x1000
+    // [the second factor: inferred reading]; 1 without such a device.
+    float signature_factor(std::size_t i, const EnergyHost& host) const;
     // SetPowerUsage (Behavior 10019880): device property 0x500 := u on every type-0x1a device.
     void set_power_usage(float u);
     // GetPowerFactor (Behavior 100198e0): Σ device property 0xe00 over the type-0x1a devices =

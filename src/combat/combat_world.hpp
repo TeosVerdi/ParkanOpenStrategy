@@ -31,6 +31,7 @@
 #include "combat/damage.hpp"
 #include "combat/energy.hpp"
 #include "combat/gun.hpp"
+#include "combat/rooms.hpp"
 #include "world/collision.hpp"
 #include "world/ground.hpp"
 #include "world/live_unit.hpp"
@@ -74,6 +75,26 @@ public:
     // Unit properties 0x50 / 0xa9 (CUnitControl GetProperty 1000e6c0 → 0x204 GetProperty(8 / 9), 1002b410): the
     // radar's (class 8) GetParam(3) (range) / GetParam(4) (the HUD sweep's); nullopt without a radar.
     std::optional<float> radar_param(std::size_t i) const;
+    // A reload room's step on this unit (Room_RechargeLifeAndShield 10018100, Room_RechargeGuns 100181e0, and the
+    // battery, MRoomManager_Takt 10018ac0): battery, HP, shield mean and every type-2 gun's energy ratio rise by
+    // `a` (clamped to 1), its ammo by max(1, round(N·a)); `now_ms` stamps the healing.
+    void recharge(float a, float now_ms);
+    // The unit's detection signatures (unit properties 0x43 / 0x44 / 0x45, unit-stats.md §3):
+    // ΣA · ctl+0x5dc · Π0xc00, ΣV · ctl+0x5e0 · Π0xd00, M · Π0xb00.
+    struct Signature {
+        float p43 = 0, p44 = 0, p45 = 0;
+    };
+    // The assembled design's mass, area and volume sums (economy::UnitStats), set by the app; nullopt = unknown
+    // (the unit is then detected by range alone, as before the radar depended on energy).
+    struct Mass {
+        float mass = 0, area = 0, volume = 0;
+    };
+    std::optional<Mass> mass;
+    std::optional<Signature> signature() const;
+    // CRadarDevice_Detects (10024620) of this unit's radar (class 8) for a target at distance `d` with
+    // signature `s`: on (dev+0x50 ≠ 0), not broken, d < R = GetParam(3), f = 1 − d²/R²,
+    // GetParam(0x300)·p45·f ≥ 1 or GetParam(0x301)·p43·f ≥ 1 or GetParam(0x302)·p44·f ≥ 1.
+    bool radar_detects(float d, const Signature& s) const;
     // Device property 0x300 of gun `g`'s device (GetDevicePropertyById 1002bb40 → CDevice slot 2): broken, its
     // part's HP ratio is 0.
     bool gun_broken(std::size_t g) const;
@@ -246,6 +267,9 @@ public:
 
     // MatrixFromDir (1002b0f0): y = dir, x = dir × up(0,0,1), at `pos`.
     static Mat4 bullet_matrix(Vec3 pos, Vec3 dir);
+    // Reload rooms (combat/rooms.hpp, notes/energy.md §3): the hallway of building `unit`. Every kRoomPeriodMs the
+    // living, standing (< the room's speed limit) units of the building's clan on a reload vertex are recharged.
+    void set_rooms(std::size_t unit, std::vector<Room> rooms);
     // Statistics.
     std::size_t shots = 0, hits = 0;
 
@@ -266,6 +290,7 @@ private:
     void drain_explosions(std::size_t unit);
     void note_death(std::size_t unit, bool was_killed, float now);
     void update_energy(Combatant& c, float dt_s, float now);
+    void update_rooms(float now);
     Vec3 part_centre(const Combatant& c, std::size_t part, float& radius) const;
 
     AssetLibrary& lib_;
@@ -280,6 +305,12 @@ private:
     std::map<std::string, std::unique_ptr<BulletProto>> protos_;
     std::map<std::string, std::optional<Expl>> expl_cache_;
     float last_ms_ = 0;
+    struct RoomSet {
+        std::size_t building = 0;
+        std::vector<Room> rooms;
+        std::optional<float> last_ms; // MB+0x400
+    };
+    std::vector<RoomSet> room_sets_;
     std::uint32_t next_bullet_ = 1;
 };
 

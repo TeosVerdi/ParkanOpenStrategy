@@ -31,6 +31,7 @@ struct UnitPart {
     int parent = -1;  // index into UnitModel::parts; -1 for the chassis
     int mount = -1;   // node of the parent part
     std::uint32_t transform_base = 0; // first transform of this part in UnitModel::mesh
+    std::string mesh_archive, mesh_entry;      // the part's .msh (a building's holds its hallway, combat/rooms.hpp)
     std::string archive, ctl_entry, cpt_entry; // the prototype's motion graph / marker points (may be empty)
     std::string ndp_archive, ndp_entry;        // the prototype's damage parts (NDPR, pair 3)
     std::vector<float> node_frames;  // components: keyframe time per node (-1 = static), e.g. turret joints

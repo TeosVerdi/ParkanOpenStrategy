@@ -538,6 +538,44 @@ int building_unit_tests() {
     return g_fail;
 }
 
+// DropToGround at load sees the object faces (ProbeGroundFace → FindNearestFace10 over the landscape and
+// every object): a unit placed inside a bunker or hangar stays on its floor instead of being lifted onto
+// the terrain or the roof (the landscape-only drop).
+void test_load_on_building_floor(AssetLibrary& lib, const std::filesystem::path& game) {
+    std::printf("buildings corpus: units placed at load stand on building floors (DropToGround, object faces)\n");
+    std::size_t on_floor = 0, lifted_without = 0;
+    for (const auto& m : all_missions(game)) {
+        const mission::Tma tma = mission::decode_tma(read_file(*resolve_path(*resolve_path(game, m), "data.tma")));
+        std::unique_ptr<Terrain> terrain;
+        const TerrainGround ground = load_ground(game, tma, terrain);
+        combat::CombatWorld world(lib, ground, nullptr);
+        std::vector<std::unique_ptr<LiveUnit>> bodies;
+        for (const auto& o : tma.objects) {
+            if (o.kind != 0) continue;
+            if (auto b = LiveUnit::load_building(lib, o)) bodies.push_back(std::move(b));
+        }
+        for (auto& b : bodies) b->pose_parts(), world.add_unit(*b, b->placement->identity, b->placement->ai_index, false);
+        const LiveUnit::FloorProbe probe = [&](Vec3 a, Vec3 b) -> std::optional<GroundHit> {
+            const auto h = world.trace_floor(a, b);
+            return h ? std::optional<GroundHit>(GroundHit{h->point.z, h->face_normal}) : std::nullopt;
+        };
+        for (const auto& o : tma.objects) {
+            const std::string r = o.resource;
+            if (r.find("\\UNITS\\") == std::string::npos || r.find(".dat") == std::string::npos) continue;
+            auto u = LiveUnit::load(lib, o, ground);
+            if (!u) continue;
+            const float terrain_z = u->position().z, want = tma_placement(o).at(2, 3);
+            u->place(0, ground, probe);
+            const float z = u->position().z;
+            if (std::abs(z - terrain_z) > 0.5f) std::printf("  %s %s: placement %.2f, landscape drop %.2f, with objects %.2f\n", m.c_str(), r.c_str(), want, terrain_z, z);
+            if (std::abs(z - terrain_z) > 0.5f && std::abs(z - want) < 0.5f) ++on_floor;
+            lifted_without += std::abs(terrain_z - want) > 0.5f && std::abs(z - want) < 0.5f;
+        }
+    }
+    std::printf("  %zu units start on an object floor (%zu would be lifted by the landscape-only drop)\n", on_floor, lifted_without);
+    CHECK(on_floor > 0);
+}
+
 int building_corpus_tests(const std::filesystem::path& game) {
     g_fail = 0;
     AssetLibrary lib(game);
@@ -551,5 +589,6 @@ int building_corpus_tests(const std::filesystem::path& game) {
     test_tut2_capture(lib, game);
     test_tut2_destroy(lib, game);
     test_bunker_fire(lib, game);
+    test_load_on_building_floor(lib, game);
     return g_fail;
 }

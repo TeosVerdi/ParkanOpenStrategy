@@ -227,6 +227,7 @@ UnitStats Assembly::stats() const {
         if (p.component == 0) payload += m; // the chassis' own bare mass is free
         if (armour) m += arm_m * p.area;
         mass += m;
+        s.area += p.area, s.volume += p.volume;
     }
     for (const auto& d : devices_) mass += mass_of(d.dev);
     s.mass = mass;

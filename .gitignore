@@ -3,3 +3,4 @@ build*/
 *.app
 compile_commands.json
 .omc/
+.claude/worktrees/

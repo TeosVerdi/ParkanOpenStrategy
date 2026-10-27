@@ -3,6 +3,8 @@
 // per-hit damage (spec §0) and a scripted fight in Tut_2 (a gun shoots an animal until it dies, its
 // removal reaches the mission runtime). Linked into parkan-tests.
 #include "combat/combat_world.hpp"
+#include "combat/rooms.hpp"
+#include "economy/assembly.hpp"
 #include "core/paths.hpp"
 #include "game/mission_runtime.hpp"
 #include "mission/tma.hpp"
@@ -13,6 +15,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <memory>
+#include <set>
 
 using namespace parkan;
 using namespace parkan::combat;
@@ -242,6 +245,13 @@ void test_energy_budget() {
     endless.devices[0].param[0] = -1;
     endless.update(1, guns, host);
     CHECK(near(*endless.battery_fraction(), 1) && near(*endless.battery_capacity(), -1));
+    // CDeviceSet::SetProperty(1) (1002ba30) leaves a battery with capacity ≤ 0 alone (notes/energy.md §1).
+    endless.devices[0].ratio = 0.25f;
+    endless.set_battery_fraction(0.75f);
+    CHECK(near(endless.devices[0].ratio, 0.25f));
+    EnergyBudget normal = make(10);
+    normal.set_battery_fraction(0.75f);
+    CHECK(near(normal.devices[0].ratio, 0.75f));
     // Category table 1003ccc8.
     CHECK(energy_category(5) == 3 && energy_category(0x13) == 1 && energy_category(2) == 4 && energy_category(0x1e) == 4 &&
           energy_category(9) == 5 && energy_category(8) == 2 && energy_category(0xf) == 0 && energy_category(0x1a) == 3);
@@ -301,6 +311,226 @@ void test_shield_budget() {
     CHECK(!none.shield_active(host) && none.side_strength(0, host) == 0 && !none.shield_charges(host));
 }
 
+// Reload rooms (notes/energy.md §3): the recharge step on a unit, the room records, the box test.
+void test_rooms() {
+    std::printf("combat: reload rooms\n");
+    // Room records (MRoomManager_Init 100186b0): kept for flags & 0xf8 or & 0xc600; reload on & 0x20 / & 0x600.
+    std::vector<HallwayVertex> v(6);
+    v[0].flags = 0, v[1].flags = 0x620, v[2].flags = 0x10000620, v[3].flags = 0x4000, v[4].flags = 0x400, v[5].flags = 0x10;
+    for (std::size_t i = 0; i < v.size(); ++i) v[i].pos = {float(i), 0, 0};
+    const auto rooms = build_rooms(v);
+    CHECK(rooms.size() == 5 && rooms[0].vertex == 1 && rooms[1].vertex == 2 && rooms[2].vertex == 3 && rooms[3].vertex == 4 && rooms[4].vertex == 5);
+    CHECK(rooms[0].reloads() && rooms[1].reloads() && !rooms[2].reloads() && rooms[3].reloads() && !rooms[4].reloads());
+    CHECK(near(rooms[0].radius, 5) && near(rooms[0].height, 3) && near(rooms[0].speed_limit, 2));
+    CHECK(near(rooms[1].radius, 10) && near(rooms[1].height, 12));
+    CHECK(build_rooms({{{}, 0x20000, 0}}).empty()); // no 0xf8 / 0xc600 bit: no room
+    CHECK(near(build_rooms({{{}, 0x24020, 0}})[0].speed_limit, 1000));
+    // Room_UpdateOccupants' box: z from −0.7h to +h (−h with flags & 0x4040), horizontally within the radius.
+    const Room r = rooms[0];
+    CHECK(room_contains(r, {10, 10, 0}, {13, 14, 0}) && !room_contains(r, {10, 10, 0}, {13, 14.1f, 0}));
+    CHECK(room_contains(r, {0, 0, 0}, {0, 0, -2.1f}) && !room_contains(r, {0, 0, 0}, {0, 0, -2.2f}));
+    CHECK(room_contains(r, {0, 0, 0}, {0, 0, 3}) && !room_contains(r, {0, 0, 0}, {0, 0, 3.1f}));
+    Room low = r;
+    low.flags |= 0x40;
+    CHECK(room_contains(low, {0, 0, 0}, {0, 0, -3}) && !room_contains(low, {0, 0, 0}, {0, 0, -3.1f}));
+    // Ammo step: max 200 → +2 per 0.1 s step; max 5 → +1; never above the maximum; unlimited (−1) untouched.
+    CHECK(recharged_ammo(0, 200, kRoomRate * 0.1f) == 2 && recharged_ammo(0, 5, kRoomRate * 0.1f) == 1);
+    CHECK(recharged_ammo(199, 200, 0.01f) == 200 && recharged_ammo(-1, -1, 0.01f) == -1);
+
+    // The step on a unit: battery 0.30 + 5 s of 0.1 s steps = 0.80, clamped at 1 after 7 s.
+    BulletProto b;
+    GunDeviceSpec spec;
+    spec.type = 2, spec.param[0] = 200, spec.param[1] = 200, spec.param[2] = 10;
+    spec.barrels = {0};
+    CtldJoint j;
+    Combatant c;
+    PowerDevice bat;
+    bat.cls = bat.type = 0x13, bat.param[0] = 100, bat.ratio = 0.3f, bat.state = PowerDevice::initial_state(0x13, -1);
+    PowerDevice sh;
+    sh.cls = sh.type = 9, sh.param[0] = 1850, sh.sides = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f};
+    c.energy.devices = {bat, sh};
+    c.energy.shield = 1;
+    c.damage = make_state({100, 100}, {-1, 0});
+    c.damage.apply_damage_total(-100, false, false, 0); // 100 of 200 HP left
+    c.guns.emplace_back(spec, std::vector<CtldJoint>{j}, &b);
+    c.guns[0].set_ammo(0);
+    c.guns[0].set_energy_ratio(0.5f);
+    CHECK(near(c.guns[0].energy(), 100) && near(c.guns[0].energy_ratio(), 0.5f));
+    for (int i = 0; i < 50; ++i) c.recharge(kRoomRate * 0.1f, 0);
+    CHECK(near(c.battery_fraction(), 0.8f, 1e-3f));
+    CHECK(near(c.damage.hp_ratio(), 1.f, 1e-3f)); // 0.5 + 50 steps of 0.01
+    CHECK(near(*c.energy.shield_mean(), 1.f, 1e-3f));
+    CHECK(c.guns[0].ammo() == 100 && near(c.guns[0].energy_ratio(), 1) && near(c.guns[0].energy(), 200));
+    for (int i = 0; i < 20; ++i) c.recharge(kRoomRate * 0.1f, 0);
+    CHECK(near(c.battery_fraction(), 1) && c.guns[0].ammo() == 140 && near(c.damage.hp_ratio(), 1));
+    // Gun energy: param1 200, ratio 0.5 → after 1 s the ratio is 0.6 and the energy 120.
+    c.guns[0].set_energy_ratio(0.5f);
+    for (int i = 0; i < 10; ++i) c.recharge(kRoomRate * 0.1f, 0);
+    CHECK(near(c.guns[0].energy_ratio(), 0.6f) && near(c.guns[0].energy(), 120));
+    // A gun of type 0x1e (a building's) and an unlimited one keep their ammo; an endless battery stays.
+    Combatant d;
+    spec.type = 0x1e, spec.param[0] = -1;
+    d.guns.emplace_back(spec, std::vector<CtldJoint>{j}, &b);
+    d.guns[0].set_energy_ratio(0.5f);
+    PowerDevice endless = bat;
+    endless.param[0] = -1, endless.ratio = 0.25f;
+    d.energy.devices = {endless};
+    d.recharge(0.1f, 0);
+    CHECK(d.guns[0].ammo() == -1 && near(d.guns[0].energy_ratio(), 0.5f) && near(d.energy.devices[0].ratio, 0.25f));
+}
+
+// Radar detection with the target's signatures (notes/energy.md §4.2).
+void test_radar() {
+    std::printf("combat: radar detection\n");
+    Combatant radar;
+    PowerDevice r;
+    r.cls = r.type = 8, r.param[0] = 0.01f, r.param[3] = 300, r.state = PowerDevice::initial_state(8, -1);
+    radar.energy.devices = {r};
+    radar.energy.radar = 0;
+    // R = 300, d = 150 (f = 0.75), param0 0.01, target mass 200 (property 0x45): 0.01·200·0.75 = 1.5 ≥ 1.
+    Combatant target;
+    target.mass = Combatant::Mass{200, 5, 5};
+    const auto sig = target.signature();
+    CHECK(sig && near(sig->p45, 200) && near(sig->p43, 0) && near(sig->p44, 0)); // no drain yet
+    CHECK(radar.radar_detects(150, *sig) && !radar.radar_detects(300, *sig));
+    radar.energy.devices[0].ratio = 0.5f; // half the energy: 0.75 → not detected
+    CHECK(!radar.radar_detects(150, *sig));
+    radar.energy.devices[0].ratio = 0; // no energy detects nothing
+    CHECK(!radar.radar_detects(1, *sig));
+    // The other two signatures: area × the sensor / shield draw (0x43), volume × the weapon / engine draw (0x44).
+    radar.energy.devices[0].ratio = 1;
+    radar.energy.devices[0].param[0] = 0, radar.energy.devices[0].param[1] = 0.02f, radar.energy.devices[0].param[2] = 0.02f;
+    target.energy.drain_a = 4, target.energy.drain_b = 0;
+    CHECK(radar.radar_detects(150, *target.signature()) == (0.02f * 5 * 4 * 0.75f >= 1)); // 1.5
+    target.energy.drain_a = 0.5f; // 0.02·5·0.5·0.75 = 0.0375
+    CHECK(!radar.radar_detects(150, *target.signature()));
+    target.energy.drain_b = 40; // 0.02·5·40·0.75 = 3
+    CHECK(radar.radar_detects(150, *target.signature()));
+    // A radar that is off, or without a radar device, sees nothing; a target without a design has no signature.
+    radar.energy.devices[0].state = 0;
+    CHECK(!radar.radar_detects(1, *sig));
+    CHECK(!Combatant().radar_detects(1, *sig) && !Combatant().signature());
+    // i_dsh (type 0xa) scales the signatures: min(1, GetParam(0x300 + i)).
+    PowerDevice dsh;
+    dsh.cls = dsh.type = 0xa, dsh.param[0] = 0.5f, dsh.param[1] = 2, dsh.param[2] = 0.25f, dsh.state = 0x2000;
+    target.energy.devices = {dsh};
+    target.energy.drain_a = target.energy.drain_b = 1;
+    const auto s2 = target.signature();
+    CHECK(s2 && near(s2->p45, 100) && near(s2->p43, 5) && near(s2->p44, 1.25f));
+}
+
+// Reload rooms on the game's buildings (notes/energy.md §3.3), and a hero recharging in a plant's room.
+void test_rooms_corpus(AssetLibrary& lib, const std::filesystem::path& game) {
+    std::printf("combat corpus: reload rooms\n");
+    auto flags_of = [&](const char* msh) {
+        std::set<std::uint32_t> f;
+        for (const auto& v : load_hallway(lib, "fortif.rlb", msh))
+            if (v.flags & 0x620) f.insert(v.flags);
+        return f;
+    };
+    using S = std::set<std::uint32_t>;
+    for (const char* n : {"fr_b_bunker.msh", "fr_m_bunker.msh", "fr_l_bunker.msh", "fr_b_tower.msh", "fr_m_tower.msh", "fr_b_ruin.msh"})
+        CHECK(flags_of(n) == S{0x620});
+    CHECK(flags_of("fr_l_gener.msh") == S({0x620, 0x10000620, 0x10000020}));
+    CHECK(flags_of("fr_l_angar.msh") == S{0x10000620});
+    for (const char* n : {"fr_b_plant.msh", "fr_m_plant.msh", "fr_l_plant.msh"}) {
+        const S f = flags_of(n);
+        CHECK(f.count(0x600) && f.count(0x10000400));
+        const auto rooms = build_rooms(load_hallway(lib, "fortif.rlb", n));
+        CHECK(std::any_of(rooms.begin(), rooms.end(), [](const Room& r) { return r.reloads() && r.flags == 0x600; }));
+    }
+
+    // Tut_2: the hero stands in the Large Factory's reload room.
+    const std::string mission = "MISSIONS/CAMPAIGN/CAMPAIGN.00/Mission.02";
+    const mission::Tma tma = mission::decode_tma(read_file(*resolve_path(*resolve_path(game, mission), "data.tma")));
+    std::string map_dir = tma.land_path;
+    map_dir.resize(map_dir.find_last_of("\\/"));
+    const Terrain terrain = decode_terrain(read_file(*resolve_path(game, map_dir + "/Land.msh")));
+    const TerrainGround ground(terrain);
+    const mission::TmaObject *hero_o = nullptr, *plant_o = nullptr;
+    for (const auto& o : tma.objects) {
+        if (o.identity == 1) hero_o = &o;
+        if (o.identity == 0x80000001) plant_o = &o;
+    }
+    CHECK(hero_o && plant_o);
+    if (!hero_o || !plant_o) return;
+    auto hero = LiveUnit::load(lib, *hero_o, ground);
+    auto plant = LiveUnit::load_building(lib, *plant_o);
+    CHECK(hero && plant);
+    if (!hero || !plant) return;
+    const UnitPart& root = plant->model.parts.front();
+    const auto rooms = build_rooms(load_hallway(lib, root.mesh_archive, root.mesh_entry));
+    const Room* reload = nullptr;
+    for (const auto& r : rooms)
+        if (r.reloads() && !reload) reload = &r;
+    CHECK(reload != nullptr);
+    if (!reload) return;
+    const Vec3 at = plant->frame.matrix.transform_point(reload->pos);
+    std::printf("  %s: %zu rooms, reload vertex %u (flags %x) at (%.1f, %.1f, %.1f)\n", root.mesh_entry.c_str(), rooms.size(), reload->vertex,
+                reload->flags, at.x, at.y, at.z);
+    CombatWorld world(lib, ground, nullptr);
+    const std::size_t hi = world.add_unit(*hero, hero->placement->identity, hero->placement->ai_index, true);
+    const std::size_t pi = world.add_unit(*plant, plant->placement->identity, plant->placement->ai_index, false);
+    world.set_rooms(pi, rooms);
+    Combatant& h = world.unit(hi);
+    h.energy.set_battery_fraction(0.3f);
+    CHECK(near(h.battery_fraction(), 0.3f, 1e-3f));
+    auto stand = [&](Vec3 p, bool walk) {
+        Mat4 m = Mat4::translation(p);
+        hero->motion->start(0, m);
+        hero->motion->set_throttle({0, walk ? 1.f : 0.f, 0});
+        hero->frame = hero->motion->interpolate(0);
+    };
+    // The hero's radar against a unit of the hero's own design (full energy, 100 m): detected by its mass signature.
+    if (auto path = resolve_path(game, hero_o->resource))
+        if (const auto st = economy::design_stats(lib, mission::decode_scheme(read_file(*path)))) {
+            h.mass = Combatant::Mass{st->mass, st->area, st->volume};
+            const auto sig = h.signature();
+            std::printf("  hero: mass %.0f area %.1f volume %.1f; radar R %.0f, param0 %.4f; signature p45 %.0f\n", st->mass, st->area,
+                        st->volume, *h.radar_param(3), *h.radar_param(0), sig ? sig->p45 : -1.f);
+            CHECK(sig && h.radar_detects(100, *sig) && !h.radar_detects(*h.radar_param(3), *sig));
+        }
+    float now = 0;
+    auto run = [&](float ms, bool walk) {
+        for (float t = 0; t < ms; t += 25) {
+            now += 25;
+            if (walk) { // keep the hero at the vertex while it walks in place
+                hero->motion->update(now);
+                hero->frame.matrix = Mat4::translation(at);
+            }
+            hero->pose_parts();
+            plant->pose_parts();
+            world.update(now);
+        }
+    };
+    h.damage.clan = plant->placement->ai_index;
+    // The energy budget's own slow tick also drains the battery a little; compare against an unrecharged twin.
+    stand(at, false);
+    run(5000, false);
+    const float after5 = h.battery_fraction();
+    std::printf("  battery after 5 s in the room: %.3f\n", after5);
+    // Spec: a = 0.1·dt per step, 49 steps of 0.1 s fall in 5 s (the first update only starts the room's clock):
+    // 0.3 + 0.1·4.9 = 0.79, less the ≈ 0.003 the energy budget drains meanwhile.
+    CHECK(near(after5, 0.79f, 0.005f));
+    run(7000, false);
+    CHECK(near(h.battery_fraction(), 1.f, 1e-3f) || h.battery_fraction() > 0.98f);
+    // An enemy clan, or a hero outside the room, is not recharged.
+    h.energy.set_battery_fraction(0.3f);
+    h.damage.clan = plant->placement->ai_index + 1;
+    run(3000, false);
+    CHECK(h.battery_fraction() < 0.3f + 1e-3f);
+    h.damage.clan = plant->placement->ai_index;
+    stand(at + Vec3{100, 0, 0}, false);
+    run(3000, false);
+    CHECK(h.battery_fraction() < 0.3f + 1e-3f);
+    // Walking through the room (|v| ≥ 2 m/s) does not recharge.
+    stand(at, true);
+    run(1000, true);
+    const float speed = std::sqrt(dot(hero->motion->world_velocity(), hero->motion->world_velocity()));
+    std::printf("  walking hero: %.1f m/s, battery %.3f\n", speed, h.battery_fraction());
+    CHECK(speed >= 2 && h.battery_fraction() < 0.3f + 1e-3f);
+}
+
 } // namespace
 
 int combat_unit_tests() {
@@ -310,6 +540,8 @@ int combat_unit_tests() {
     test_gun_device();
     test_energy_budget();
     test_shield_budget();
+    test_rooms();
+    test_radar();
     return g_fail;
 }
 
@@ -328,6 +560,7 @@ int combat_corpus_tests(const std::filesystem::path& game) {
         CHECK(!"weapon corpus");
         std::printf("  %s\n", ex.what());
     }
+    test_rooms_corpus(lib, game);
     // Spec §0 / §1.4: the hero's guns.
     const BulletProto mg = load_bullet(lib, "bb_h_01"), laser = load_bullet(lib, "bl_h_01"), missile = load_bullet(lib, "bm_h_01");
     CHECK(near(mg.hit_damage(), 60) && near(laser.hit_damage(), 250));
