@@ -32,6 +32,26 @@ std::uint32_t unit_size_class(std::string_view entry) {
     }
 }
 
+std::uint32_t building_size_class(std::string_view entry) {
+    if (entry.size() < 4) return 0;
+    switch (std::tolower((unsigned char)entry[3])) {
+    case 'b': return 4;
+    case 'e': return 5;
+    case 'l': return 2;
+    case 'm': return 3;
+    default: return 0;
+    }
+}
+
+std::uint32_t level_from_size_class(std::uint32_t size_class) {
+    switch (size_class) {
+    case 3: return 1;
+    case 4: return 2;
+    case 5: return 3;
+    default: return 0;
+    }
+}
+
 bool TacticalAreal::contains(float x, float y) const {
     bool in = false;
     const std::size_t n = poly.size();
@@ -137,10 +157,11 @@ World World::from_tma(const mission::Tma& tma, const std::filesystem::path* game
         if (wo.building()) wo.type |= kBuildingBit;
         wo.armour = kPlaceholderArmour;
         wo.weapon = (wo.type & kClassRobot) ? kPlaceholderWeapon : 0.f;
-        if (game_dir && !wo.building()) {
+        if (game_dir) {
             if (auto p = resolve_path(*game_dir, o.resource)) {
                 try {
-                    wo.size_class = unit_size_class(mission::decode_scheme(read_file(*p)).root.entry);
+                    const std::string entry = mission::decode_scheme(read_file(*p)).root.entry;
+                    wo.size_class = wo.building() ? building_size_class(entry) : unit_size_class(entry);
                 } catch (const std::exception&) {
                 }
             }

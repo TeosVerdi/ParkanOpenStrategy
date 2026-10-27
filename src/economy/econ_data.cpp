@@ -175,6 +175,8 @@ std::uint32_t robot_size(const mission::Scheme& s) {
     }
 }
 
+std::uint32_t building_size_class(const mission::Scheme& s) { return game::building_size_class(s.root.entry); }
+
 const mission::Scheme* SchemeCache::get(std::string_view path) {
     const std::string key = normalize_path(path);
     auto it = cache_.find(key);

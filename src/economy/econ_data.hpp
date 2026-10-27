@@ -85,10 +85,9 @@ std::vector<Lode> lodes_from_tma(const mission::Tma& tma);
 // l/h → 2, m → 3, b/e → 4; buildings `entry[3]` t 1, l 2, m 3, b/e 4; else 0. Case-insensitive.
 std::uint32_t robot_size(const mission::Scheme& s);
 
-// A building's size class (property 0x201, MB+0x960: the plant limit). [inferred] The writer of MB+0x960
-// was not traced; the FORT root's size letter is used (fr_l_plant 2, fr_m_plant 3, fr_b_plant 4), which
-// matches the plant sizes 2..4 of the free-bot time table and "buildings: 2..5" of property 0x201.
-inline std::uint32_t building_size_class(const mission::Scheme& s) { return robot_size(s); }
+// A building's size class (property 0x201, MB+0x960: the plant limit): MBehaviour 1000cee0 for control class 3,
+// root entry[3] b 4, e 5, l 2, m 3, else 0 (buildings.md section 8.2). Not robot_size.
+std::uint32_t building_size_class(const mission::Scheme& s);
 
 // Loads and caches scheme files by game-relative path (case-insensitive lookup through resolve_path).
 class SchemeCache {

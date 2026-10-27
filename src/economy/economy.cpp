@@ -949,11 +949,9 @@ void Economy::init_object(WorldObject& o) {
             w.st.has_devices = w.power != nullptr;
             if (w.power) sync_power(w);
         }
-        if (o.building()) { // [inferred] level = the scheme's place in BuildDat.lst
-            if (auto it = data_.build_table.levels.find(o.type); it != data_.build_table.levels.end())
-                for (std::size_t i = 0; i < it->second.size(); ++i)
-                    if (normalize_path(it->second[i]) == normalize_path(o.resource)) w.level = std::uint32_t(i);
-        }
+        // The initial upgrade level (property 0x209) from the size class (MB slot 0xfc 10005e60); an upgrade
+        // overwrites it afterwards (the BuildingUpgraded task sets nw.level).
+        if (o.building()) w.level = game::level_from_size_class(w.size_class);
     }
     if (o.building() && w.size_class == 0) w.size_class = o.size_class;
 }

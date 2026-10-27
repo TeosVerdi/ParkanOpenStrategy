@@ -632,6 +632,8 @@ void test_corpus_ai(const std::filesystem::path& game) {
 
 } // namespace
 
+void test_building_size_class();
+
 int economy_unit_tests() {
     g_fail = 0;
     test_distributor();
@@ -639,6 +641,7 @@ int economy_unit_tests() {
     test_research();
     test_construct();
     test_builder();
+    test_building_size_class();
     return g_fail;
 }
 
@@ -675,9 +678,40 @@ void test_assembly(const std::filesystem::path& game) {
     CHECK(unit_debug_code(st->size_class, st->chassis_type, s.flags) == "SWW");
 }
 
+// Control class 3 size class and upgrade level (buildings.md section 8.2, 1000cee0 / 10005e60).
+void test_building_size_class() {
+    std::printf("economy: building size class\n");
+    const auto sc = [](const char* r) { return building_size_class(scheme(game::kTypePlant, r)); };
+    CHECK(sc("fr_e_inst") == 5 && sc("fr_e_brige") == 5 && sc("fr_l_plant") == 2 && sc("fr_m_plant") == 3);
+    CHECK(sc("fr_b_plant") == 4 && sc("fr_b_towH") == 4 && sc("FR_B_PLANT") == 4);
+    CHECK(sc("fr_t_x") == 0 && sc("fr_") == 0 && sc("") == 0); // t is 0 for a building
+    CHECK(robot_size(scheme(game::kTypePlant | game::kBuildingBit, "fr_t_x")) == 1); // robot_size unchanged
+    CHECK(robot_size(scheme(game::kTypePlant | game::kBuildingBit, "fr_e_inst")) == 4);
+    CHECK(game::level_from_size_class(2) == 0 && game::level_from_size_class(3) == 1 && game::level_from_size_class(4) == 2 &&
+          game::level_from_size_class(5) == 3 && game::level_from_size_class(0) == 0);
+}
+
+// Every FORT record of objects.rlb: size class by the letter at entry[3], level from it.
+void test_corpus_building_classes(const std::filesystem::path& game) {
+    std::printf("economy: FORT size classes (corpus)\n");
+    AssetLibrary lib(game);
+    int forts = 0;
+    for (const auto& e : lib.archive("objects.rlb").entries()) {
+        if (e.type != fourcc("FORT")) continue;
+        ++forts;
+        const std::uint32_t sz = game::building_size_class(e.name), lv = game::level_from_size_class(sz);
+        const char c = char(std::tolower((unsigned char)e.name[3]));
+        const std::uint32_t want_sz = c == 'l' ? 2 : c == 'm' ? 3 : c == 'b' ? 4 : c == 'e' ? 5 : 0;
+        CHECK(sz == want_sz && sz >= 2); // no t building exists
+        CHECK(lv == (c == 'l' ? 0u : c == 'm' ? 1u : c == 'b' ? 2u : 3u));
+    }
+    CHECK(forts == 34);
+}
+
 int economy_corpus_tests(const std::filesystem::path& game) {
     g_fail = 0;
     test_assembly(game);
+    test_corpus_building_classes(game);
     test_real_costs(game);
     test_corpus_ai(game);
     return g_fail;

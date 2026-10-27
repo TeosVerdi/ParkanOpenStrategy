@@ -140,6 +140,14 @@ std::uint32_t type_code_for_resource(std::string_view resource);
 // (the hero's R_H_02 is 2). Not M_Task_Construct's table (economy::robot_size, where e is 4 as well).
 std::uint32_t unit_size_class(std::string_view root_entry);
 
+// A building's size class (control class 3, same function 1000cee0): the 4th letter of its root part's name,
+// case-insensitive: b 4, e 5, l 2, m 3, else 0 (buildings.md section 8.2). [inferred] the FORT root entry
+// stands for the part-0 bu_* record (the letter matches in all 34 records).
+std::uint32_t building_size_class(std::string_view root_entry);
+
+// The upgrade level (property 0x209) MBehaviour slot 0xfc (10005e60) derives from the size class: 3 1, 4 2, 5 3, else 0.
+std::uint32_t level_from_size_class(std::uint32_t size_class);
+
 class World {
 public:
     // Every non-static data.tma object becomes a world object (LogicID = identity, clan = ai_index).
