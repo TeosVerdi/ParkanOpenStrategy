@@ -49,7 +49,8 @@ std::optional<TurretRig> TurretRig::from_ctld(const Ctld& c) {
     for (auto j : turret->joints)
         if (j < r.joints_.size()) r.channels_.push_back(j);
     if (r.channels_.size() >= 2)
-        r.sight_origin_point = r.joints_[r.channels_[0]].point_a, r.sight_dir_point = r.joints_[r.channels_[1]].point_b;
+        r.sight_origin_point = r.joints_[r.channels_[0]].point_a, r.sight_dir_point = r.joints_[r.channels_[1]].point_b,
+        r.yaw_dir_point = r.joints_[r.channels_[0]].point_b;
     // LoadControlData appends the gun joints (flag 8) as further channels of the turret device.
     for (std::uint32_t j = 0; j < r.joints_.size(); ++j)
         if (r.joints_[j].flags & 8) r.channels_.push_back(j);
@@ -68,6 +69,48 @@ std::pair<float, float> TurretRig::inputs_for_angles(float yaw, float pitch) con
         t[k] = (j.flags & 1) ? wrap01(t[k]) : std::clamp(t[k], 0.f, 1.f);
     }
     return invert_inputs_ ? std::pair{1 - t[0], 1 - t[1]} : std::pair{t[0], t[1]};
+}
+
+namespace {
+// AngleAboutAxis 10026e20: u, v = the directions from `c` to `r` and `p` projected onto the plane through c
+// normal to n; acos of their dot (acos and normalize inferred), negative when (u x v) . n < 0.
+float angle_about_axis(Vec3 n, Vec3 c, Vec3 r, Vec3 p) {
+    const float nn = dot(n, n);
+    if (nn <= 0) return 0;
+    auto flat = [&](Vec3 x) {
+        const Vec3 d = x - c;
+        const Vec3 q = d - n * (dot(d, n) / nn);
+        const float len = std::sqrt(dot(q, q));
+        return len > 0 ? q * (1 / len) : q;
+    };
+    const Vec3 u = flat(r), v = flat(p);
+    const float a = std::acos(std::clamp(dot(u, v), -1.f, 1.f));
+    return dot(cross(u, v), n) < 0 ? -a : a;
+}
+} // namespace
+
+std::pair<float, float> TurretRig::ai_point_inputs(Vec3 c, Vec3 n, Vec3 r, Vec3 p) const {
+    if (channels_.size() < 2) return {kManualX, kManualY};
+    const CtldJoint& j0 = joints_[channels_[0]];
+    const CtldJoint& j1 = joints_[channels_[1]];
+    const float yaw = angle_about_axis(n, c, r, p);
+    const Vec3 d = p - c;
+    const float nn = dot(n, n);
+    const Vec3 n2 = cross(d, n);
+    const Vec3 r2 = nn > 0 ? p - n * (dot(d, n) / nn) : p;
+    const float pitch = angle_about_axis(n2, c, r2, p);
+    float t0 = j0.default_t + (j0.range != 0 ? yaw / j0.range : 0.f);
+    float t1 = j1.default_t + (j1.range != 0 ? pitch / j1.range : 0.f);
+    t0 = (j0.flags & 1) ? wrap01(t0) : std::clamp(t0, 0.f, 1.f);
+    t1 = std::clamp(t1, 0.f, 1.f);
+    return invert_inputs_ ? std::pair{1 - t0, 1 - t1} : std::pair{t0, t1};
+}
+
+float TurretRig::gun_offset_input(float angle, float p5) const {
+    if (channels_.size() < 2) return 0.f;
+    const float range = joints_[channels_[1]].range;
+    const float off = range != 0 ? angle / range * p5 : 0.f;
+    return invert_inputs_ ? -off : off;
 }
 
 void TurretRig::slew(float& x, float& y, float tx, float ty, float dt_s) const {

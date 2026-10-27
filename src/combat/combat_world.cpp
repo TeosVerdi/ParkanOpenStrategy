@@ -566,11 +566,12 @@ void CombatWorld::ai_aim(std::size_t u, Vec3 aim, float dt_s) {
     // The angles are taken about the turret's centre (AngleAboutAxis 10026e20 on the TurretCenter /
     // TurretDirect points: the yaw joint's point A, the sight origin the guns converge from), else from
     // the first gun's muzzle. p5 of AimGunChannel: the world z of that point's vector (1 for a level turret).
-    Vec3 mount = body.position() + Vec3{0, 0, 2}, axis{0, 0, 1};
+    Vec3 mount = body.position() + Vec3{0, 0, 2}, axis{0, 0, 1}, yaw_ref{};
     bool centred = false;
     for (const auto& gm : c.mounts)
         if (gm.on_turret() && part_point(c, gm.sight_part, gm.sight_points, gm.sight_origin, mount, &axis)) {
-            centred = true;
+            // TurretDirect: the yaw joint's point B on the same part.
+            centred = part_point(c, gm.sight_part, gm.sight_points, body.rig->yaw_dir_point, yaw_ref, nullptr);
             break;
         }
     for (std::size_t g = 0; g < c.guns.size() && !centred; ++g)
@@ -579,14 +580,21 @@ void CombatWorld::ai_aim(std::size_t u, Vec3 aim, float dt_s) {
             break;
         }
     const float up_z = axis.z;
-    // The angles in the body frame (yaw > 0 right, pitch > 0 up; ai::aim_angles).
-    const Mat4& m = body.frame.matrix;
-    const Vec3 fwd{m.at(0, 1), m.at(1, 1), m.at(2, 1)}, right{m.at(0, 0), m.at(1, 0), m.at(2, 0)}, up{m.at(0, 2), m.at(1, 2), m.at(2, 2)};
-    const Vec3 d = aim - mount;
-    const float x = dot(d, right), y = dot(d, fwd), z = dot(d, up);
-    const float yaw = std::atan2(x, y), pitch = std::atan2(z, std::hypot(x, y));
-    const auto [tx, ty] = body.rig->inputs_for_angles(yaw, pitch);
-    body.rig->slew(body.aim_x, body.aim_y, tx, ty, dt_s);
+    std::pair<float, float> t;
+    if (centred) {
+        // CTurretDevice::Update state 0x400 (10027470, turret-camera.md §1.3a): both angles right-handed
+        // about point A's vector, so a turret hung under a flyer (axis down) flips their signs.
+        t = body.rig->ai_point_inputs(mount, axis, yaw_ref, aim);
+    } else {
+        // No turret sight ([inferred] fallback): the angles in the body frame (yaw > 0 right, pitch > 0 up;
+        // ai::aim_angles) from the first gun's muzzle.
+        const Mat4& m = body.frame.matrix;
+        const Vec3 fwd{m.at(0, 1), m.at(1, 1), m.at(2, 1)}, right{m.at(0, 0), m.at(1, 0), m.at(2, 0)}, up{m.at(0, 2), m.at(1, 2), m.at(2, 2)};
+        const Vec3 d = aim - mount;
+        const float x = dot(d, right), y = dot(d, fwd), z = dot(d, up);
+        t = body.rig->inputs_for_angles(std::atan2(x, y), std::atan2(z, std::hypot(x, y)));
+    }
+    body.rig->slew(body.aim_x, body.aim_y, t.first, t.second, dt_s);
     float elev = 0;
     bool found = false;
     for (std::size_t g = 0; g < c.guns.size(); ++g) {
@@ -597,7 +605,8 @@ void CombatWorld::ai_aim(std::size_t u, Vec3 aim, float dt_s) {
         c.guns[g].enabled = e.has_value();
         if (e && b->physics == 3 && !found) elev = *e, found = true;
     }
-    body.gun_aim_y = found ? body.rig->inputs_for_angles(yaw, pitch + kGunElevation * elev * up_z).second - ty : 0.f;
+    // AimGunChannel: to += angle * 0.83 / range * p5, in the pitch channel's t space.
+    body.gun_aim_y = found ? body.rig->gun_offset_input(kGunElevation * elev, up_z) : 0.f;
 }
 
 float CombatWorld::ai_aim_error(std::size_t u, std::size_t g, Vec3 aim) const {

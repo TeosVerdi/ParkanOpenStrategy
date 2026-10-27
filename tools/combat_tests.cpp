@@ -560,6 +560,97 @@ int combat_unit_tests() {
     return g_fail;
 }
 
+// Bug U1 (turret-camera.md §1.3a): CTurretDevice::Update state 0x400 takes both angles right-handed about
+// the yaw joint's point A vector, so the turrets hung under Tut_1's flyers (tut1_mf1 0xd, helic 0x8; n points
+// down) must still end on target when the point is to the right / left, below and above.
+void test_flyer_turret_aim(AssetLibrary& lib, const std::filesystem::path& game) {
+    std::printf("combat corpus: under-slung turrets (Tut_1 flyers)\n");
+    const auto dir = resolve_path(game, "MISSIONS/CAMPAIGN/CAMPAIGN.00/Mission.01");
+    if (!dir) return;
+    const mission::Tma tma = mission::decode_tma(read_file(*resolve_path(*dir, "data.tma")));
+    std::string map_dir = tma.land_path;
+    map_dir.resize(map_dir.find_last_of("\\/"));
+    const Terrain terrain = decode_terrain(read_file(*resolve_path(game, map_dir + "/Land.msh")));
+    const TerrainGround ground(terrain);
+    for (const std::uint32_t id : {0xdu, 0x8u}) {
+        const mission::TmaObject* o = nullptr;
+        for (const auto& t : tma.objects)
+            if (t.identity == id) o = &t;
+        CHECK(o != nullptr);
+        if (!o) continue;
+        auto unit = LiveUnit::load(lib, *o, ground);
+        CHECK(unit && unit->rig);
+        if (!unit || !unit->rig) continue;
+        CombatWorld w(lib, ground, nullptr);
+        const std::size_t ui = w.add_unit(*unit, id, 0, false);
+        unit->pose_parts();
+        const Mat4& m = unit->frame.matrix;
+        const Vec3 fwd{m.at(0, 1), m.at(1, 1), m.at(2, 1)}, right{m.at(0, 0), m.at(1, 0), m.at(2, 0)}, up{m.at(0, 2), m.at(1, 2), m.at(2, 2)};
+        std::size_t g = 0;
+        while (g < w.unit(ui).guns.size() && !w.unit(ui).mounts[g].on_turret()) ++g;
+        CHECK(g < w.unit(ui).guns.size());
+        if (g == w.unit(ui).guns.size()) continue;
+        const Vec3 base = *w.muzzle(ui, g);
+        float worst = 0;
+        for (const Vec3 off : {Vec3{60, 120, -60}, Vec3{-60, 120, -60}, Vec3{80, 40, -50}, Vec3{-100, -40, -30}, Vec3{0, 150, 10}}) {
+            const Vec3 aim = base + right * off.x + fwd * off.y + up * off.z;
+            for (int i = 0; i < 40; ++i) { // slew to completion
+                w.ai_aim(ui, aim, 1.f);
+                unit->pose_parts();
+            }
+            const float err = w.ai_aim_error(ui, g, aim);
+            worst = std::max(worst, err);
+            CHECK(err < 0.01f);
+        }
+        std::printf("  object %#x: worst aim error %.4f rad\n", id, worst);
+        // Fight (the harness behind bug U1, without the brains): the captured flyer tracks tut1_e1 (0x7), the fire
+        // control's loop (shoot when the barrel is within 0.05 rad) kills it within 25 s (at 40 m: the 0.83 elevation
+        // rule makes shells fall short farther out). Before the fix 0 shots.
+        const mission::TmaObject* eo = nullptr;
+        for (const auto& t : tma.objects)
+            if (t.identity == 7) eo = &t;
+        CHECK(eo != nullptr);
+        if (!eo) continue;
+        auto enemy = LiveUnit::load(lib, *eo, ground);
+        CHECK(enemy != nullptr);
+        if (!enemy) continue;
+        {
+            Vec3 at = unit->position() + fwd * 40.f + right * 10.f;
+            if (auto gr = ground.probe(at + Vec3{0, 0, 500}, 1000)) at.z = gr->z;
+            enemy->motion->start(0, Mat4::translation(at));
+            enemy->frame = enemy->motion->interpolate(0);
+        }
+        const std::size_t ei = w.add_unit(*enemy, 7, 1, false);
+        w.unit(ui).target = std::int32_t(ei);
+        std::size_t shots = 0, dmg = 0, hits = 0;
+        float killed_at = -1, hp = 0;
+        for (float now = 33; now < 25000; now += 33) {
+            unit->pose_parts();
+            enemy->pose_parts();
+            const Vec3 aim = w.unit(ei).aim_centre();
+            for (std::size_t k = 0; k < w.unit(ui).guns.size(); ++k)
+                if (w.unit(ui).mounts[k].on_turret() && w.ai_aim_error(ui, k, aim) < 0.05f) w.unit(ui).set_gun_state(k, kFireSingle);
+            w.ai_aim(ui, aim, 0.033f);
+            w.update(now);
+            for (const auto& ev : w.take_events())
+            {
+                if (ev.type == CombatEvent::Type::Shot && ev.unit == std::int32_t(ui)) ++shots;
+                if (ev.type == CombatEvent::Type::Damaged && ev.unit == std::int32_t(ei)) hp += ev.amount, ++dmg;
+                if (ev.type == CombatEvent::Type::Hit && ev.unit == std::int32_t(ei)) ++hits;
+            }
+            if (!w.unit(ei).alive()) {
+                killed_at = now;
+                break;
+            }
+        }
+        std::printf("  object %#x: %zu shots, %zu hits, %zu damage records (%.0f HP, target has %.0f), target %s at %.1f s\n", id, shots, hits, dmg, hp,
+                    w.unit(ei).damage.initial, killed_at >= 0 ? "dead" : "alive", killed_at / 1000);
+        // helic's guns only chip the target's shield within the time (damage records of 0 HP); mf1 kills it.
+        CHECK(shots > 0 && dmg > 0);
+        if (id == 0xd) CHECK(killed_at > 0);
+    }
+}
+
 int combat_corpus_tests(const std::filesystem::path& game) {
     g_fail = 0;
     AssetLibrary lib(game);
@@ -576,6 +667,7 @@ int combat_corpus_tests(const std::filesystem::path& game) {
         std::printf("  %s\n", ex.what());
     }
     test_rooms_corpus(lib, game);
+    test_flyer_turret_aim(lib, game);
     // Spec §0 / §1.4: the hero's guns.
     const BulletProto mg = load_bullet(lib, "bb_h_01"), laser = load_bullet(lib, "bl_h_01"), missile = load_bullet(lib, "bm_h_01");
     CHECK(near(mg.hit_damage(), 60) && near(laser.hit_damage(), 250));
@@ -703,6 +795,19 @@ int combat_corpus_tests(const std::filesystem::path& game) {
             const float err = w2.aim_error(ri, g, aim);
             std::printf(" %.3f", err);
             CHECK(err < (off.y > 0 ? 0.08f : 0.2f)); // behind and aside: 21bwlk1 ends 0.135 rad off (not investigated)
+        }
+        std::printf("\n");
+        // The same marks through ai_aim (AngleAboutAxis, §1.3a; bug U1): the upright turret ends on target.
+        std::printf("  %s ai_aim:", design);
+        for (const Vec3 off : {Vec3{0, 60, 0}, Vec3{30, 60, 0}, Vec3{-30, 60, 10}, Vec3{40, -20, 5}}) {
+            const Vec3 aim = mount + right * off.x + fwd * off.y + up * off.z;
+            for (int i = 0; i < 40; ++i) {
+                w2.ai_aim(ri, aim, 1.f);
+                r->pose_parts();
+            }
+            const float err = w2.ai_aim_error(ri, g, aim);
+            std::printf(" %.3f", err);
+            CHECK(err < 0.01f);
         }
         std::printf("\n");
     }

@@ -40,6 +40,8 @@ public:
     // The sight the guns converge on (CGunDevice +0x114 / +0x110): the yaw joint's CTPT point A
     // (origin) and the pitch joint's point B (direction); -1 when the rig has no such joints.
     std::int32_t sight_origin_point = -1, sight_dir_point = -1;
+    // The yaw joint's CTPT point B (TurretDirect, the yaw reference of AngleAboutAxis); -1 without one.
+    std::int32_t yaw_dir_point = -1;
 
     // Gun components mounted on the turret (o_gun_* on o_tur_*): LoadControlData merges their CTLD
     // joints into the unit's, so their gun joints (flag 8) are further channels of the turret device and
@@ -51,6 +53,16 @@ public:
     // result is in node_frames' input space (target_x, target_y). The angle's sign flips on a joint with
     // inverted output (flag 2): inferred, checked on o_tur_ht_02 by tools/combat_tests.cpp.
     std::pair<float, float> inputs_for_angles(float yaw, float pitch) const;
+    // CTurretDevice::Update state 0x400, exact (10027470 + AngleAboutAxis 10026e20; turret-camera.md §1.3a):
+    // `c`, `n` = the yaw joint's point A (position, vector), `r` = its point B (position), `p` = the target
+    // point, all in world space. Returns the channel times (t0 yaw, t1 pitch) = angle / range + default,
+    // with the angle right-handed about `n` (so an under-slung turret, n down, flips both signs), in
+    // node_frames' input space (the device flag 0x4000000 `1 - x` applied, since the original stores t
+    // straight into the channel). No flag-2 sign on this path.
+    std::pair<float, float> ai_point_inputs(Vec3 c, Vec3 n, Vec3 r, Vec3 p) const;
+    // AimGunChannel's elevation offset `angle / range * p5` (the pitch joint's range; p5 = n.z) in the
+    // input space of ai_point_inputs' pitch (added to the pitch input).
+    float gun_offset_input(float angle, float p5) const;
     // Moves (x, y) toward (tx, ty) at the yaw / pitch joint rates (t per second) for `dt_s` seconds,
     // the short way round on a wrapping joint (SlewChannel 100289f0).
     void slew(float& x, float& y, float tx, float ty, float dt_s) const;
