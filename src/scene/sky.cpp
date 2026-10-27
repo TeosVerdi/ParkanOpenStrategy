@@ -2,6 +2,7 @@
 
 #include "core/paths.hpp"
 #include "res/material.hpp"
+#include "scene/night_vision.hpp"
 
 #include <cmath>
 #include <numbers>
@@ -67,6 +68,19 @@ void colour_sky_dome(SkyDome& dome, const mission::AtmosphereState& a, std::uint
         const std::uint32_t ring[SkyDome::kRings] = {a.zenith, around(a.high), around(a.mid), around(a.low), rim};
         for (int r = 0; r < SkyDome::kRings; ++r) set_argb(dome.vertices[1 + s * SkyDome::kRings + r], ring[r]);
     }
+}
+
+void night_vision_dome(SkyDome& dome) {
+    for (RenderVertex& v : dome.vertices) {
+        const std::uint32_t argb = std::uint32_t(v.color[3]) << 24 | std::uint32_t(v.color[0]) << 16 | std::uint32_t(v.color[1]) << 8 | v.color[2];
+        set_argb(v, night_vision_color(argb));
+    }
+}
+
+void night_vision_lighting(SceneLighting& l) {
+    l.fog_color = night_vision_rgb(l.fog_color);
+    l.clear_color = l.fog_color;
+    l.night_vision = true;
 }
 
 std::uint32_t horizon_colour(const mission::AtmosphereState& a, Vec3 forward) {

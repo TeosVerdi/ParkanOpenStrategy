@@ -51,6 +51,7 @@ add_library(parkan_core STATIC
   src/scene/render_mesh.cpp
   src/scene/mission_scene.cpp
   src/scene/sky.cpp
+  src/scene/night_vision.cpp
   src/world/ground.cpp
   src/world/collision.cpp
   src/world/live_unit.cpp
@@ -175,3 +176,6 @@ target_sources(parkan-tests PRIVATE tools/economy_tests.cpp)
 # The HQ interface (src/ui/hq*: view states, HQ camera, selection and orders, sidebar, screens; notes/hq-ui.md).
 target_sources(parkan-tests PRIVATE tools/hq_tests.cpp)
 target_sources(parkan-tests PRIVATE tools/help_tests.cpp)
+
+# Infrared / night-vision camera (src/scene/night_vision, notes/infrared-camera.md).
+target_sources(parkan-tests PRIVATE tools/night_vision_tests.cpp)

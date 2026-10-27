@@ -22,7 +22,8 @@ public:
     FxRenderer& operator=(const FxRenderer&) = delete;
 
     // Before the render pass: uploads textures added since the last call and this frame's vertices.
-    void prepare(const fx::FxFrame& frame, Vec3 eye, const std::vector<ModelTexture>& textures);
+    // `night_vision`: sprite colours go through ConvertToNightVisionColor (1002f230, notes/infrared-camera.md §4.2).
+    void prepare(const fx::FxFrame& frame, Vec3 eye, const std::vector<ModelTexture>& textures, bool night_vision = false);
     // Inside the render pass, after the opaque scene.
     void draw(SDL_GPUCommandBuffer* cb, SDL_GPURenderPass* rp, const Mat4& view_proj);
 

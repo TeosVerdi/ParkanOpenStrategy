@@ -3,6 +3,7 @@
 #include <map>
 
 #include "app/fx_draw.hpp"
+#include "scene/night_vision.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -67,6 +68,9 @@ vertex VOut vs_main(VIn in [[stage_in]], constant VUniforms& u [[buffer(0)]]) {
     o.pos = u.mvp * float4(in.pos, 1.0);
     float3 n = normalize((u.model * float4(in.nrm.xyz, 0.0)).xyz);
     float3 acc = max(0.0, -dot(n, u.sun_dir.xyz)) * u.sun_col.rgb + max(0.0, -dot(n, u.fill_dir.xyz)) * u.fill_col.rgb;
+    // Night vision (fog.z): the material colour is (0, G', 0) (G' = u.fog.w for a white one [inferred: every material is treated as white]; the ambient arrives
+    // converted), the light colours are not, so only their green counts (infrared-camera.md §4.1).
+    if (u.fog.z > 0.5) acc = float3(0.0, acc.g * u.fog.w, 0.0);
     acc = max(acc, u.ambient.rgb);
     o.light = float3(compress(acc.r), compress(acc.g), compress(acc.b));
     o.uv0 = in.uv0 * u.uv0x.x + u.uv0x.zw;
@@ -374,15 +378,17 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
         float params[4], params2[4], tint[4], fog_col[4];
     };
     auto vertex_uniforms = [](const Mat4& vp, const Mat4& model, const SceneLighting& L, Vec3 eye) {
+        // Night vision: the merged ambient is converted (unclamped); the shader does the material gain.
+        const Vec3 amb = L.night_vision ? night_vision_material(L.ambient) : L.ambient;
         return DrawUniforms{vp * model,
                             model,
                             {L.sun_dir.x, L.sun_dir.y, L.sun_dir.z, 0},
                             {L.sun_color.x, L.sun_color.y, L.sun_color.z, 0},
                             {L.fill_dir.x, L.fill_dir.y, L.fill_dir.z, 0},
                             {L.fill_color.x, L.fill_color.y, L.fill_color.z, 0},
-                            {L.ambient.x, L.ambient.y, L.ambient.z, 0},
+                            {amb.x, amb.y, amb.z, 0},
                             {eye.x, eye.y, eye.z, 0},
-                            {L.fog_start, L.fog_end, 0, 0},
+                            {L.fog_start, L.fog_end, L.night_vision ? 1.f : 0.f, L.night_vision ? night_vision_white_gain() : 0.f},
                             {1, 1, 0, 0},
                             {1, 1, 0, 0}};
     };
@@ -476,7 +482,7 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
         if (fx_renderer) {
             fx_frame.clear();
             opt.effects(eye, fx_frame);
-            fx_renderer->prepare(fx_frame, eye, *opt.effect_textures);
+            fx_renderer->prepare(fx_frame, eye, *opt.effect_textures, lighting.night_vision);
         }
         const SceneLighting& L = lighting;
         SDL_GPUColorTargetInfo color{};
@@ -518,12 +524,16 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
             DrawUniforms vu = vertex_uniforms(sky_vp, Mat4::translation(eye), unlit, eye);
             vu.uv0x[2] = vu.uv0x[3] = nebula;
             vu.uv1x[2] = vu.uv1x[3] = stars;
-            sky_pass(g.pipeline_sky, vu, FragUniforms{{0, 2, 1, 0}, {0, 0, 0, 0}, {1, 1, 1, 1}, {0, 0, 0, 1}},
+            // The nebula's constant colour is 0xFF00FF00 in night vision (sky+0x6c).
+            static constexpr float kWhiteTint[4] = {1, 1, 1, 1};
+            const float* nebula_tint = L.night_vision ? kNightVisionNebulaTint : kWhiteTint;
+            sky_pass(g.pipeline_sky, vu, FragUniforms{{0, 2, 1, 0}, {0, 0, 0, 0}, {nebula_tint[0], nebula_tint[1], nebula_tint[2], nebula_tint[3]}, {0, 0, 0, 1}},
                      g.sky_tex[0], g.sky_tex[1]);
             vu.uv0x[2] = vu.uv0x[3] = vu.uv1x[2] = vu.uv1x[3] = 0;
             sky_pass(g.pipeline_sky_blend, vu, FragUniforms{{0, 0, 1, 0}, {1, 0, 0, 0}, {1, 1, 1, 1}, {0, 0, 0, 1}},
                      g.white, g.white);
             SceneLighting cloud_light = L;
+            cloud_light.night_vision = false; // the cloud layer is not part of the converted shading [inferred]
             cloud_light.fog_start = SkyDome::kCloudDrop;
             cloud_light.fog_end = dome.radius / 3;
             DrawUniforms cu = vertex_uniforms(sky_vp, Mat4::translation(eye - Vec3{0, 0, SkyDome::kCloudDrop}), cloud_light, eye);
@@ -573,6 +583,7 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
                              Mat4::look_at(in.eye, in.eye + in.forward, in.up);
             SceneLighting il = L;
             il.fog_end = 0;
+            il.night_vision = false; // the targeter / model views are not part of the camera's scene [inferred, spec §3]
             const std::vector<Mat4>& tr = in.transforms.empty() ? m.mesh->transforms : in.transforms;
             SDL_GPUBufferBinding ivb{m.vbuf, 0}, iib{m.ibuf, 0};
             for (int pass = 0; pass < 2; ++pass) {

@@ -15,6 +15,7 @@
 #include "res/ctld.hpp"
 #include "res/terrain.hpp"
 #include "scene/mission_scene.hpp"
+#include "scene/night_vision.hpp"
 #include "scene/sky.hpp"
 #include "world/collision.hpp"
 #include "world/building.hpp"
@@ -875,6 +876,10 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     std::optional<std::size_t> manned; // the building index of a manned turret (view state 6)
     std::function<bool(std::size_t)> turret_disabled_fn = [](std::size_t) { return false; }; // set with the HQ host
     std::set<std::uint32_t> infrared;  // units whose turret camera has flag 0x20 (Camera_IsInfrared 10035da0)
+    // Camera flag 0x20 of the other cameras (each CCamera has its own, infrared-camera.md §1): the HQ camera
+    // (mission+0x100) and the outer camera; the briefing camera's comes from the waypoint (NightVisionOn).
+    bool ir_hq = false, ir_outer = false;
+    NightVisionVoice nv_voice; // mission+0xaf4
     bool exit_blocked = false;
     // FUN_100a5600 (mission+0xaec = unit) with the unit's CManManager enabled (CManManager_EnableInput 1000f0b0:
     // throttle and latches cleared, its table claimed).
@@ -996,6 +1001,10 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     };
     // Views 1/3/6 with the hero controlled (mission+0x710, +0xaec): set once the view states exist (below).
     std::function<bool()> piloting = [] { return true; };
+    // mission+0x710 as the port has it (1 cockpit, 2 HQ camera, 3 outer, 5 briefing, 6 manned turret) and the flag
+    // of the camera it shows (mission+0): set once the view states exist (below).
+    std::function<int()> view_mode_now = [] { return 1; };
+    std::function<bool()> active_infrared = [] { return false; };
     // CTargeting::SetTarget (10090cc0): a change plays TARGET_SELECTED while piloting.
     auto set_hud_target = [&](std::int32_t t) {
         if (t != hud_target) {
@@ -1039,15 +1048,16 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     // device in state 0x20) and chameleon (type 0xa in state 0x1000) switching on / off → VOICE_REPAIR_SYS_ON / _OFF,
     // VOICE_CHAMELEON_SYS_ON / _OFF (latches CUnit +0xa0 / +0xa1), and the turret camera's infrared flag
     // (VOICE_INFRA_SYS_ON / _OFF).
-    bool repair_on = false, chameleon_on = false, infra_on = false;
+    bool repair_on = false, chameleon_on = false;
     auto system_voices = [&] {
+        // FUN_100a52b0: the active camera's bit 0x20 against mission+0xaf4; the voice only in view modes 1, 3, 6.
+        if (const int e = nv_voice.update(active_infrared(), view_mode_now()); e != 0 && say_voice)
+            say_voice(e > 0 ? "VOICE_INFRA_SYS_ON" : "VOICE_INFRA_SYS_OFF");
         if (!piloting()) return;
         const bool r = cc->device_state(0xf) == 0x20u, c = cc->device_state(0xa) == 0x1000u;
         if (r != repair_on && say_voice) say_voice(r ? "VOICE_REPAIR_SYS_ON" : "VOICE_REPAIR_SYS_OFF");
         if (c != chameleon_on && say_voice) say_voice(c ? "VOICE_CHAMELEON_SYS_ON" : "VOICE_CHAMELEON_SYS_OFF");
-        const bool ir = infrared.count(cc->logic_id) != 0;
-        if (ir != infra_on && say_voice) say_voice(ir ? "VOICE_INFRA_SYS_ON" : "VOICE_INFRA_SYS_OFF");
-        repair_on = r, chameleon_on = c, infra_on = ir;
+        repair_on = r, chameleon_on = c;
     };
     auto update_targeting = [&] {
         const auto list = detected();
@@ -1133,6 +1143,21 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         return it == hq->drive_mode.end() ? 0 : std::clamp(it->second, 0, 2);
     };
     piloting = [&] { return !briefing && !spectator && (!hq || hq->view_mode() != 2); }; // view 1 / 3 / 6, not 2 / 4 / 5
+    view_mode_now = [&] {
+        if (briefing) return 5;
+        if (spectator) return 0;
+        if (hq && hq->view_mode() == 2) return 2;
+        return camera_mode == 1 ? 3 : hq ? hq->view_mode() : 1;
+    };
+    active_infrared = [&] {
+        switch (view_mode_now()) {
+        case 5: return briefing->night_vision(); // ArriveAtWaypoint 100307c0 sets / clears it at each arrival
+        case 2: return ir_hq;
+        case 3: return ir_outer;
+        case 0: return false;
+        default: return infrared.count(cc->logic_id) != 0; // the turret camera
+        }
+    };
     std::function<void()> hq_frame; // its per-frame part (HqUi_Update and the rest), set below
     std::function<ui::HqPick(float, float)> hq_pick; // what lies under a virtual-screen point, set below
     float hq_aspect = 4.f / 3.f; // drawable width / height of the last frame
@@ -1376,6 +1401,10 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 auto it = std::find(list.begin(), list.end(), hud_target);
                 set_hud_target(it == list.end() || it + 1 == list.end() ? list.front() : *(it + 1));
             }
+        } else if (is("CMD_CAMERA_INFRARED")) {
+            // UI command 0x23 (OnUICommandDown 10072212): view modes 2 / 3 only, the active camera; in the outer view
+            // (3) that is the outer camera (the device binding above toggles the turret one).
+            if (night_vision_command_allowed(view_mode_now()) && view_mode_now() == 3) ir_outer = !ir_outer;
         } else if (is("CMD_JAMES_SELECT_ENEMY")) {
             select_nearest(true);
         } else if (is("CMD_JAMES_SELECT_FRIEND")) {
@@ -1609,6 +1638,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 if (is("CMD_JAMES_BASE_ROTLEFT")) hq->rotate_ghost(1); // [inferred] left = counterclockwise
                 else if (is("CMD_JAMES_BASE_ROTRIGHT")) hq->rotate_ghost(-1);
                 else if (is("CMD_JAMES_ZOOM_MODE") && hq->view_mode() == 2) hq->camera.toggle_zoom();
+                else if (is("CMD_CAMERA_INFRARED") && view_mode_now() == 2) ir_hq = !ir_hq; // 0x23 on the HQ camera
                 else if (is("CMD_JAMES_SATELLITE_MAP")) hq->map_open = !hq->map_open;
                 else if (is("CMD_JAMES_MISSION_OBJ")) objectives_visible = !objectives_visible, objectives_auto_hide = false;
                 // The letters W C B R P (listener slot 8). Port: skipped when the layout binds the key to an HQ
@@ -1642,6 +1672,8 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 events.push_back({ev.type == SDL_EVENT_KEY_DOWN, scan});
             if (ev.type == SDL_EVENT_KEY_DOWN && ui_keys.is(input::scan_from_hid(int(ev.key.scancode)), "CMD_JAMES_OUTER_CAMERA")) {
                 // JAMES_OUTER_CAMERA (C): AdvanceOuterMode; preset 0 blends back into the TURRET view.
+                // CMissionCameras::AdvanceOuterMode 10038ad0: entering the outer view copies the active camera's flag 0x20.
+                if (outer_preset == 0 && camera_mode != 1) ir_outer = active_infrared();
                 outer_preset = (outer_preset + 1) % 5;
                 if (outer_preset != 0) camera_mode = 1;
                 outer_blend_start = sim_ms;
@@ -1740,12 +1772,14 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         // The multigun bindings (ExecuteBinding SELECT / STATE): 1–8 toggle a gun, 0 selects all, LMB
         // sets CIS_CONTINUEFIGHT on the selected guns and its release CIS_SWITCHOFF.
         for (const auto& a : commands.take_actions()) {
-            // CICLS_CAMERA STATE (CCameraDevice::SetState): INFRARED_ON 0x1000 / OFF 0x2000 / INV 0x4000 set the
-            // turret camera's flag 0x20 (Camera_SetInfraredOn 10035dc0; status lamp 1). [port] No render effect.
+            // CICLS_CAMERA STATE (CCameraDevice::SetState 10023a00): INFRARED_ON 0x1000 / OFF 0x2000 / INV 0x4000
+            // set the turret camera's flag 0x20 (Camera_SetInfraredOn 10035dc0; status lamp 1) when the owner
+            // control's replay lock (+0x618) is clear. [port] The port has no replay, so the lock is never set.
             if (a.cls == 4 && a.cmd == kMcmdState && hero_input) {
-                if (a.state == 0x1000) infrared.insert(cc->logic_id);
-                else if (a.state == 0x2000) infrared.erase(cc->logic_id);
-                else if (a.state == 0x4000 && !infrared.erase(cc->logic_id)) infrared.insert(cc->logic_id);
+                if (night_vision_device_allowed(true, false)) {
+                    if (night_vision_apply_state(infrared.count(cc->logic_id) != 0, std::uint32_t(a.state))) infrared.insert(cc->logic_id);
+                    else infrared.erase(cc->logic_id);
+                }
                 continue;
             }
             if (a.cls != 2 || !fire_input) continue;
@@ -2075,8 +2109,8 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         if (briefing) {
             // CreateOuterCamera(…, near 3.0, far 700.0, fov 1.04); CameraCtl_ApplyZoom: fov = lerp(1.04, 0.2, zoom).
             // The original renders into the viewport (0, 75, W, H − 75); with a horizontal fov the full-screen
-            // image under the black bars is the same picture. Night vision (flag 0x20) is unused by the data
-            // and not drawn.
+            // image under the black bars is the same picture. Night vision (flag 0x20, NightVisionOn) is applied
+            // by the sky callback (active_infrared).
             const auto& bc = briefing->camera();
             const float z = std::clamp(briefing->zoom(), 0.f, 1.f);
             cam.eye = bc.eye, cam.forward = bc.forward, cam.up = bc.up;
@@ -2233,7 +2267,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         // CStatusPage_Draw (1003f4b0): lamp 0 lit with the first type-0xf device (repair) in state 0x20, lamp 2 with
         // the first type-0xa one (detection shield / chameleon) in state 0x1000 (FUN_10077260 / 10077290).
         s.lamps[0] = cc->device_state(0xf) == 0x20u ? 1 : 0;
-        s.lamps[1] = infrared.count(cc->logic_id) ? 1 : 0;
+        s.lamps[1] = infrared.count(cc->logic_id) ? 1 : 0; // the turret camera's flag
         s.lamps[2] = cc->device_state(0xa) == 0x1000u ? 1 : 0;
         s.lamps[3] = !hq || hq->state() == ui::kStateHero || hq->state() == ui::kStatePilot ? 1 : 0; // piloted directly
         s.lamps[4] = exit_blocked ? 2 : 0; // CViewStateQueue+0x31: the warbot exit is blocked (red)
@@ -3014,6 +3048,9 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             f.lighting = scene_lighting(a, forward);
             if (opt.no_fog) f.lighting.fog_end = 0;
             colour_sky_dome(dome, a, horizon_colour(a, forward));
+            // The camera's flag 0x20 for this render (CCamera::Render 1004f470 → the shader's night-vision flag):
+            // dome, fog and clear colours converted; the lit shader and the effects read lighting.night_vision.
+            if (active_infrared()) night_vision_dome(dome), night_vision_lighting(f.lighting);
             f.cloud_color = a.cloud;
             f.ms = seconds * 1000;
         };

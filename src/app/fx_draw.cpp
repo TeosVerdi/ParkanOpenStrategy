@@ -1,5 +1,7 @@
 #include "app/fx_draw.hpp"
 
+#include "scene/night_vision.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -158,7 +160,7 @@ FxRenderer::~FxRenderer() {
     for (auto* p : pipes_) SDL_ReleaseGPUGraphicsPipeline(dev_, p);
 }
 
-void FxRenderer::prepare(const FxFrame& f, Vec3 eye, const std::vector<ModelTexture>& textures) {
+void FxRenderer::prepare(const FxFrame& f, Vec3 eye, const std::vector<ModelTexture>& textures, bool night_vision) {
     while (textures_.size() < textures.size()) { // materials load lazily as instances are created
         const auto& t = textures[textures_.size()];
         textures_.push_back(t.rgba.empty() ? white_ : make_texture(dev_, t.width, t.height, t.rgba.data()));
@@ -170,7 +172,14 @@ void FxRenderer::prepare(const FxFrame& f, Vec3 eye, const std::vector<ModelText
             batches_.push_back({pipe, tex, Uint32(verts_.size()), 0});
     };
     auto vert = [&](Vec3 p, const float* uv, const float* c) {
-        verts_.push_back({{p.x, p.y, p.z}, {uv[0], uv[1]}, {c[0], c[1], c[2], c[3]}});
+        float rgb[3] = {c[0], c[1], c[2]};
+        // Packed (clamped) conversion of the vertex colour, alpha kept. [inferred] the colour is the quad's own
+        // (the original builds it from the material's +0x14 quad); debris triangles take the same path.
+        if (night_vision) {
+            const Vec3 n = night_vision_rgb({c[0], c[1], c[2]});
+            rgb[0] = n.x, rgb[1] = n.y, rgb[2] = n.z;
+        }
+        verts_.push_back({{p.x, p.y, p.z}, {uv[0], uv[1]}, {rgb[0], rgb[1], rgb[2], c[3]}});
         ++batches_.back().count;
     };
     // Debris is flat-shaded against a fixed light (inferred; the original lights it with the scene).

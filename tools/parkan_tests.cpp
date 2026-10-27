@@ -65,6 +65,8 @@ int hq_corpus_tests(const std::filesystem::path& game);
 // tools/help_tests.cpp: the help screen (tabs, scrolling, message history, the controls page).
 int help_unit_tests();
 int help_corpus_tests(const std::filesystem::path& game);
+// tools/night_vision_tests.cpp: the infrared camera's colour math and toggle rules.
+int night_vision_unit_tests();
 
 namespace {
 
@@ -845,6 +847,7 @@ int main(int argc, char** argv) {
     g_failures += economy_unit_tests();
     g_failures += hq_unit_tests();
     g_failures += help_unit_tests();
+    g_failures += night_vision_unit_tests();
     if (argc > 1) test_corpus(argv[1]);
     std::printf(g_failures ? "%d FAILURES\n" : "all passed\n", g_failures);
     return g_failures ? 1 : 0;

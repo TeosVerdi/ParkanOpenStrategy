@@ -17,6 +17,9 @@ struct SceneLighting {
     Vec3 fog_color{0.18f, 0.2f, 0.24f};
     float fog_start = 0, fog_end = 0; // fog_end 0 = no fog
     Vec3 clear_color{0.18f, 0.2f, 0.24f};
+    // The camera's flag 0x20 for this scene (notes/infrared-camera.md): the lit shader converts the material and
+    // ambient colours; fog and clear colours are converted by night_vision_lighting.
+    bool night_vision = false;
 };
 
 // BuildSkyDome (10047a90): Z-up spherical cap, h = 10000, cap angle π/4, 5 rings, `slices` slices
@@ -43,6 +46,13 @@ std::uint32_t horizon_colour(const mission::AtmosphereState& a, Vec3 forward);
 // Lighting for terrain and models: sun light A along the body's path, fill light B opposite, the
 // ambient floor and the fog (start/end × 700 from the ske).
 SceneLighting scene_lighting(const mission::AtmosphereState& a, Vec3 forward);
+
+// Night vision (infrared-camera.md §4.3): RenderSkyDome 10048110 passes every dome vertex colour and the fog colour
+// through ConvertToNightVisionColor; the fog colour is also the clear colour. The nebula constant colour becomes
+// 0xFF00FF00 (SkyDome nebula_tint).
+void night_vision_dome(SkyDome& dome);
+void night_vision_lighting(SceneLighting& l);
+constexpr float kNightVisionNebulaTint[4] = {0, 1, 0, 1};
 
 Vec3 argb_to_rgb(std::uint32_t argb);
 
