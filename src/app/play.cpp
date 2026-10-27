@@ -1461,6 +1461,9 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     bool window_closed = false;
     vo.on_event = [&](const SDL_Event& ev) {
         if (ev.type == SDL_EVENT_QUIT) window_closed = true;
+        // stdSetApplicationState 100145f0: losing the application's focus appends a release event for every held key,
+        // after anything already queued, so the releases win. Port: drop the queue, then release.
+        if (ev.type == SDL_EVENT_WINDOW_FOCUS_LOST) events.clear(), man.release_all(commands);
         if (briefing) {
             // DispatchUIKeyMessage ignores everything in view mode 5; OnGameKeyDown: Esc skips the briefing.
             if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat && ev.key.scancode == SDL_SCANCODE_ESCAPE) briefing_skip = true;
@@ -1776,8 +1779,8 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         const bool fire_input = hero_input && ctl_mode() == 0; // the multigun channel follows the turret's
         // ExecuteBinding (vehicle class 0): throttle.y from FORWARD/BACK/WALK_F/WALK_B, the angular
         // command from ROTATE_*; strafing (LEFT/RIGHT heading) is not modelled yet.
-        float forward = commands.get(0, 0, kMcmdForward) + commands.get(0, 0, kMcmdBack) +
-                        commands.get(0, 0, kMcmdWalkF) + commands.get(0, 0, kMcmdWalkB);
+        // FORWARD / BACK / WALK_F / WALK_B are one channel (CommandState), as in the original.
+        float forward = commands.get(0, 0, kMcmdForward);
         if (opt.demo_walk) forward = 1;
         forward = hero_input ? std::clamp(forward, -1.f, 1.f) : 0.f;
         // Strafing (ExecuteBinding LEFT/RIGHT): walk (throttle.y = ±1) with an attitude offset of ±90°,
@@ -2083,6 +2086,11 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     // freeze the game time.
     double paused_ms = 0, last_frame_ms = -1;
     vo.animate = [&](double seconds, std::vector<Mat4>& transforms) {
+        // Every transition into and out of the in-game menu clears the keyboard (ViewTrans_*ToMenu 10064a80/10064ac0/
+        // 10064b20: DisableInput + stdClearKeyboard 10011830; ViewTrans_MenuTo* 10064b50/10064ba0: EnableInput 1000f0b0,
+        // which also clears the throttle, + stdClearKeyboard). The queued events are dropped with it. Checked here, not
+        // in step: the world does not step while the menu is open.
+        if (man.sync_menu(hq && hq->menu_open(), commands)) events.clear();
         if (last_frame_ms >= 0 && ((hq && hq->menu_open()) || help.visible())) paused_ms += seconds * 1000.0 - last_frame_ms;
         last_frame_ms = seconds * 1000.0;
         const double now = seconds * 1000.0 - paused_ms;

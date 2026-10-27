@@ -22,15 +22,23 @@ float wrap01(float v) { return v - std::floor(v); }
 } // namespace
 
 // The vehicle (class 0) has one set of channels: ExecuteBinding ignores INDEX for it (HERO.TBL's
-// strafe-release lines carry index 1).
+// strafe-release lines carry index 1). FORWARD, BACK, WALK_F and WALK_B all read and write the single
+// throttle.y (ExecuteBinding 1000fb40, GetProperty 0x24 / SetThrottle +0xc), so they share one channel: a walk-key
+// release writes 0 and so also cancels a cruise speed.
+static void vehicle_channel(std::uint32_t cls, std::int32_t& index, std::uint32_t& cmd) {
+    if (cls != 0) return;
+    index = 0;
+    if (cmd == kMcmdBack || cmd == kMcmdWalkF || cmd == kMcmdWalkB) cmd = kMcmdForward;
+}
+
 float CommandState::get(std::uint32_t cls, std::int32_t index, std::uint32_t cmd) const {
-    if (cls == 0) index = 0;
+    vehicle_channel(cls, index, cmd);
     auto it = values_.find({cls, index, cmd});
     return it == values_.end() ? (is_angle(cmd) ? 0.5f : 0.f) : it->second;
 }
 
 void CommandState::set(std::uint32_t cls, std::int32_t index, std::uint32_t cmd, float v) {
-    if (cls == 0) index = 0;
+    vehicle_channel(cls, index, cmd);
     values_[{cls, index, cmd}] = v;
 }
 
@@ -40,6 +48,7 @@ ManManager::ManManager(std::vector<Binding> table) { set_table(std::move(table))
 
 void ManManager::set_table(std::vector<Binding> table) {
     live_.clear();
+    walk_held_ = {};
     for (auto& b : table) {
         Live l{std::move(b)};
         // Axes are evaluated whenever their device moves; mouse buttons are edges like keys.
@@ -96,8 +105,16 @@ void ManManager::execute(Live& l, float dt_ms, CommandState& out) {
         return;
     }
     float cur = out.get(b.cls, b.index, b.cmd);
+    float target = b.value;
+    if (b.cls == 0 && (b.cmd == kMcmdWalkF || b.cmd == kMcmdWalkB)) {
+        // WALK_F / WALK_B track which is held (manager +0x20 / +0x24): releasing one while the other is held sends a
+        // hard -1.0 (releasing WALK_F, WALK_B held) or +1.0 (releasing WALK_B), whatever the bindings' values.
+        const int me = b.cmd == kMcmdWalkB, other = 1 - me;
+        walk_held_[me] = b.on_press;
+        if (!b.on_press && walk_held_[other]) target = me == 0 ? -1.f : 1.f;
+    }
     if (b.ramp_ms <= 0) { // one-shot: jump to the value
-        cur = b.value;
+        cur = target;
         l.active = 0;
     } else {
         // ComputeManualValue: move toward VALUE by ACCEL·min(1, elapsed/RAMP_MS) per frame; done within 0.01.
@@ -115,7 +132,43 @@ void ManManager::execute(Live& l, float dt_ms, CommandState& out) {
     out.set(b.cls, b.index, b.cmd, cur);
 }
 
+// stdClearKeyboard 10011830 (and the focus-loss loop of stdSetApplicationState 100145f0): clears every held scan
+// and queues a release event for it. With input enabled the release edges run now and the release bindings execute
+// on the next process(); while input is disabled (+0x32 == 0) ExecuteBinding drops them, so nothing is released.
+void ManManager::release_all(CommandState& out) {
+    for (std::size_t scan = 0; scan < held_.size(); ++scan) {
+        if (!held_[scan]) continue;
+        held_[scan] = false;
+        if (input_enabled_) on_edge(std::uint16_t(scan), false, out);
+    }
+}
+
+// CManManager::DisableInput 1000f0a0: only +0x32 = 0.
+void ManManager::disable_input() { input_enabled_ = false; }
+
+// CManManager::EnableInput 1000f0b0: zeroes the walk-held flags (+0x20/+0x24) and the case-4 latches, then
+// ResetBindings 1000eb70 zeroes the shared turn globals and stops every ramp (active == 1; analog stays), then
+// +0x32 = 1. It does not touch the unit's throttle. [inferred: the ROTATE_Z latches (+0x28/+0x29/+0x2c) and the turn
+// globals have no port counterpart]
+void ManManager::enable_input() {
+    walk_held_ = {};
+    for (auto& l : live_)
+        if (l.active == 1) l.active = 0;
+    input_enabled_ = true;
+}
+
+// Menu transitions (ViewTrans_*ToMenu: DisableInput, stdClearKeyboard; ViewTrans_MenuTo*: EnableInput, stdClearKeyboard).
+bool ManManager::sync_menu(bool open, CommandState& out) {
+    if (open == menu_open_) return false;
+    menu_open_ = open;
+    if (open) disable_input();
+    else enable_input();
+    release_all(out);
+    return true;
+}
+
 void ManManager::process(std::span<const InputEvent> events, float mouse_dx, float mouse_dy, float dt_ms, CommandState& out) {
+    if (!input_enabled_) return; // ExecuteBinding returns at once while +0x32 == 0
     for (const auto& e : events) {
         if (e.scan >= held_.size()) continue;
         if (e.pressed && held_[e.scan]) continue; // auto-repeat is ignored

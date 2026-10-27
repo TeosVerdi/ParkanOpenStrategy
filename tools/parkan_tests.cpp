@@ -547,6 +547,91 @@ void test_man_manager() {
     CHECK(c.get(0, 0, kMcmdRotateZ) == 0.f);
 }
 
+// Bug U2 (notes/input-system.md): one throttle.y for FORWARD/BACK/WALK_F/WALK_B, stdClearKeyboard on menu transitions.
+void test_man_manager_throttle() {
+    using namespace parkan::input;
+    auto table = parse_translate_table(
+        "KEY SCAN_NULL SCAN_W 1 CICLS_UNKNOWN MCMD_WALK_F 1.0 0 0 0.0 0\n"
+        "KEY SCAN_NULL SCAN_W 0 CICLS_UNKNOWN MCMD_WALK_F 0.0 0 0 0.0 0\n"
+        "KEY SCAN_NULL SCAN_S 1 CICLS_UNKNOWN MCMD_WALK_B -1.0 0 0 0.0 0\n"
+        "KEY SCAN_NULL SCAN_S 0 CICLS_UNKNOWN MCMD_WALK_B 0.0 0 0 0.0 0\n"
+        "KEY SCAN_NULL SCAN_C 1 CICLS_UNKNOWN MCMD_FORWARD 1.0 0 0 0.0 0\n");
+    const std::uint16_t w = *scan_from_name("SCAN_W"), s = *scan_from_name("SCAN_S"), cc = *scan_from_name("SCAN_C");
+    // Menu transitions, as the frame loop drives them (sync_menu once per frame, steps only while the menu is
+    // closed): DisableInput + stdClearKeyboard drop the releases, EnableInput leaves the throttle, so the original
+    // keeps walking after hold W, open menu, release W, close menu.
+    {
+        ManManager m(table);
+        CommandState c;
+        InputEvent down[] = {{true, w}};
+        m.process(down, 0, 0, 16, c);
+        CHECK(!m.sync_menu(false, c));
+        CHECK(m.sync_menu(true, c)); // open
+        CHECK(!m.sync_menu(true, c));
+        CHECK(!m.held(w));
+        InputEvent up[] = {{false, w}};
+        m.process(up, 0, 0, 16, c); // input disabled: dropped
+        CHECK(m.sync_menu(false, c)); // close
+        m.process({}, 0, 0, 16, c);
+        CHECK(c.get(0, 0, kMcmdForward) == 1.f);
+        m.process(up, 0, 0, 16, c); // a later release of W stops it
+        CHECK(c.get(0, 0, kMcmdForward) == 0.f);
+        m.process(down, 0, 0, 16, c); // and a fresh press is not taken for an auto-repeat
+        CHECK(c.get(0, 0, kMcmdForward) == 1.f);
+    }
+    // EnableInput stops running ramps but keeps the throttle.
+    {
+        auto t2 = parse_translate_table("KEY SCAN_NULL SCAN_C 1 CICLS_UNKNOWN MCMD_FORWARD 1.0 0 0 0.05 1000\n"
+                                        "KEY SCAN_NULL SCAN_A 1 CICLS_UNKNOWN MCMD_LEFT 1.0 0 0 0.0 0\n");
+        ManManager m(t2);
+        CommandState c;
+        InputEvent d[] = {{true, cc}, {true, *scan_from_name("SCAN_A")}};
+        m.process(d, 0, 0, 500, c);
+        m.process({}, 0, 0, 500, c);
+        const float v = c.get(0, 0, kMcmdForward);
+        CHECK(std::abs(v - 0.075f) < 1e-6f); // the 0.05 ramp over 1000 ms
+        m.sync_menu(true, c);
+        m.sync_menu(false, c);
+        m.process({}, 0, 0, 500, c);
+        CHECK(c.get(0, 0, kMcmdForward) == v && c.get(0, 0, kMcmdLeft) == 1.f);
+    }
+    // Window focus loss (stdSetApplicationState 100145f0): every held key is released.
+    {
+        ManManager m(table);
+        CommandState c;
+        InputEvent down[] = {{true, w}};
+        m.process(down, 0, 0, 16, c);
+        m.release_all(c);
+        CHECK(!m.held(w));
+        m.process({}, 0, 0, 16, c);
+        CHECK(c.get(0, 0, kMcmdForward) == 0.f);
+    }
+
+    // SPEED_MAX (C), then press and release W: the walk-key release writes 0 over the cruise speed.
+    {
+        ManManager m(table);
+        CommandState c;
+        InputEvent cruise[] = {{true, cc}}, wd[] = {{true, w}}, wu[] = {{false, w}};
+        m.process(cruise, 0, 0, 16, c);
+        m.process(wd, 0, 0, 16, c);
+        m.process(wu, 0, 0, 16, c);
+        CHECK(c.get(0, 0, kMcmdForward) == 0.f);
+    }
+    // WALK_F and WALK_B: releasing one while the other is held sends the other's direction instead of 0.
+    {
+        ManManager m(table);
+        CommandState c;
+        InputEvent wd[] = {{true, w}}, sd[] = {{true, s}}, wu[] = {{false, w}}, su[] = {{false, s}};
+        m.process(wd, 0, 0, 16, c);
+        m.process(sd, 0, 0, 16, c);
+        CHECK(c.get(0, 0, kMcmdForward) == -1.f);
+        m.process(wu, 0, 0, 16, c);
+        CHECK(c.get(0, 0, kMcmdForward) == -1.f);
+        m.process(su, 0, 0, 16, c);
+        CHECK(c.get(0, 0, kMcmdForward) == 0.f);
+    }
+}
+
 void test_collision() {
     // Head-on spheres: centres 10 apart closing at 8 per tick, radii 1 + 1 → contact at t = 1.
     auto t = swept_sphere_toi({0, 0, 0}, {4, 0, 0}, 1, {10, 0, 0}, {6, 0, 0}, 1);
@@ -832,6 +917,7 @@ int main(int argc, char** argv) {
     test_input();
     test_man_tables();
     test_man_manager();
+    test_man_manager_throttle();
     test_collision();
     test_audio();
     test_text();
