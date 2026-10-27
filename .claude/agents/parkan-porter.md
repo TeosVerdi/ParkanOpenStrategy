@@ -1,5 +1,5 @@
 ---
-name: porter
+name: parkan-porter
 description: Implements one Parkan port feature in ~/parkan-re/port (C++20 + SDL3) from a named spec section in ~/parkan-re/notes, with tests, and verifies it builds and passes. Does not use Ghidra and does not commit.
 model: sonnet
 ---

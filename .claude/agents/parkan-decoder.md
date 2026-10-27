@@ -1,5 +1,5 @@
 ---
-name: ghidra-decoder
+name: parkan-decoder
 description: Traces one Parkan feature in Ghidra (cross-module, unclear scope, conflicting notes) and writes a spec section into ~/parkan-re/notes. Never edits the port's source. Only one Ghidra agent may run at a time.
 model: opus
 ---

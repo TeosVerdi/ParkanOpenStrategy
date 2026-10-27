@@ -1,6 +1,6 @@
 ---
-name: ghidra-reader
-description: Decodes a well-scoped Parkan function or two (addresses given in the brief) in Ghidra or from ~/parkan-re/notes/decomp dumps, and writes the result into the named notes section. Cheaper than ghidra-decoder; never edits source. One Ghidra agent at a time.
+name: parkan-reader
+description: Decodes a well-scoped Parkan function or two (addresses given in the brief) in Ghidra or from ~/parkan-re/notes/decomp dumps, and writes the result into the named notes section. Cheaper than parkan-decoder; never edits source. One Ghidra agent at a time.
 model: sonnet
 ---
 

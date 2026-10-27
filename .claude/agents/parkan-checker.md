@@ -1,5 +1,5 @@
 ---
-name: checker
+name: parkan-checker
 description: Cheap runner for the Parkan port - builds, runs parkan-tests / parkan-check on RU and ENG, and reports only failures; also greps the notes for open markers. No code changes.
 model: haiku
 tools: Bash, Read, Grep, Glob, Write
