@@ -1,0 +1,11 @@
+{
+  // Model routing for this project (OMC per-agent overrides; the session model does not propagate to agents).
+  "agents": {
+    "explore": { "model": "haiku" },
+    "writer": { "model": "haiku" },
+    "executor": { "model": "sonnet" },
+    "verifier": { "model": "sonnet" },
+    "debugger": { "model": "sonnet" }
+  },
+  "routing": { "forceInherit": false }
+}
