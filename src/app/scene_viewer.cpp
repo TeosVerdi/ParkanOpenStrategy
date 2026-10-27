@@ -257,6 +257,10 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
         };
         SDL_GPUColorTargetDescription ct{};
         ct.format = color_format;
+        // Frame alpha stays at the cleared 1 (atmosphere-render.md §11): the original's frame has no alpha channel.
+        // Blending still reads the fragment's source alpha.
+        ct.blend_state.enable_color_write_mask = true;
+        ct.blend_state.color_write_mask = SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G | SDL_GPU_COLORCOMPONENT_B;
         SDL_GPUGraphicsPipelineCreateInfo pi{};
         pi.vertex_shader = vs;
         pi.fragment_shader = fs;
@@ -291,6 +295,8 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
         pi.depth_stencil_state.enable_depth_write = false;
         g.pipeline_sky_blend = SDL_CreateGPUGraphicsPipeline(g.device, &pi);
         ct.blend_state = {};
+        ct.blend_state.enable_color_write_mask = true;
+        ct.blend_state.color_write_mask = SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G | SDL_GPU_COLORCOMPONENT_B;
         g.pipeline_sky = SDL_CreateGPUGraphicsPipeline(g.device, &pi);
         if (!g.pipeline_sky || !g.pipeline_sky_blend) fail("SDL_CreateGPUGraphicsPipeline (sky)");
         SDL_ReleaseGPUShader(g.device, vs);
@@ -669,7 +675,7 @@ int run_scene_viewer(SDL_Window* window, RenderMesh mesh, const ViewerOptions& o
         void* px = SDL_MapGPUTransferBuffer(g.device, tb, false);
         const bool bgra = color_format == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
         SDL_Surface* surf =
-            SDL_CreateSurfaceFrom(int(w), int(h), bgra ? SDL_PIXELFORMAT_ARGB8888 : SDL_PIXELFORMAT_ABGR8888, px, int(w * 4));
+            SDL_CreateSurfaceFrom(int(w), int(h), (SDL_getenv("PARKAN_SHOT_KEEP_ALPHA") ? (bgra ? SDL_PIXELFORMAT_ARGB8888 : SDL_PIXELFORMAT_ABGR8888) : (bgra ? SDL_PIXELFORMAT_XRGB8888 : SDL_PIXELFORMAT_XBGR8888)), px, int(w * 4)); // no alpha, like the screen
         const bool ok = surf && SDL_SaveBMP(surf, opt.shot_path.c_str());
         SDL_DestroySurface(surf);
         SDL_UnmapGPUTransferBuffer(g.device, tb);

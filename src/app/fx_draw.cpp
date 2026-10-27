@@ -110,6 +110,8 @@ FxRenderer::FxRenderer(SDL_GPUDevice* dev, SDL_GPUTextureFormat color_format, SD
         SDL_GPUColorTargetDescription ct{};
         ct.format = color_format;
         auto& b = ct.blend_state;
+        b.enable_color_write_mask = true; // alpha stays 1 (atmosphere-render.md §11)
+        b.color_write_mask = SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G | SDL_GPU_COLORCOMPONENT_B;
         b.color_blend_op = b.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
         b.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO, b.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
         // Ngi32 blend presets (notes/ngi32-platform.md): 4 alpha, 2 additive, 3 multiply, 5 2× multiply.

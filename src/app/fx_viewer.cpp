@@ -200,7 +200,7 @@ int run_effect_viewer(SDL_Window* window, AssetLibrary& lib, const EffectViewerO
         SDL_ReleaseGPUFence(dev, fence);
         void* px = SDL_MapGPUTransferBuffer(dev, tb, false);
         const bool bgra = color_format == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
-        SDL_Surface* surf = SDL_CreateSurfaceFrom(int(w), int(h), bgra ? SDL_PIXELFORMAT_ARGB8888 : SDL_PIXELFORMAT_ABGR8888, px, int(w * 4));
+        SDL_Surface* surf = SDL_CreateSurfaceFrom(int(w), int(h), (SDL_getenv("PARKAN_SHOT_KEEP_ALPHA") ? (bgra ? SDL_PIXELFORMAT_ARGB8888 : SDL_PIXELFORMAT_ABGR8888) : (bgra ? SDL_PIXELFORMAT_XRGB8888 : SDL_PIXELFORMAT_XBGR8888)), px, int(w * 4));
         const bool ok = surf && SDL_SaveBMP(surf, opt.shot_path.c_str());
         SDL_DestroySurface(surf);
         SDL_UnmapGPUTransferBuffer(dev, tb);
