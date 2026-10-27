@@ -1049,10 +1049,11 @@ bool HqController::hotkey(char letter) {
 }
 
 bool HqController::escape() {
-    // OnGameKeyDown 10071240: placement → cancel; view mode 2: the satellite map, else the open screen.
-    // [inferred] With nothing open, ROLLBACK_STATE (the same key) pops the view state.
+    // OnGameKeyDown 10071240 (VK_ESCAPE), the HQ part: placement → cancel; view mode 2: the satellite map, else the
+    // open screen. False when nothing took the key: the window procedure (100a0dd0) then hands it to
+    // DispatchUIKeyMessage, where Esc is ROLLBACK_STATE in the shipped bindings.
     if (state() == kStateHero) return false;
-    if (state() == kStateMenu) { // ROLLBACK_STATE pops the menu
+    if (state() == kStateMenu) { // [inferred] the menu's own key listener (CGameMenu) closes it
         pop_state();
         return true;
     }
@@ -1073,8 +1074,7 @@ bool HqController::escape() {
         if (state() == kStateInBuilding) pop_state();
         return true;
     }
-    pop_state();
-    return true;
+    return false;
 }
 
 // --- screens ---

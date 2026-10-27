@@ -254,7 +254,7 @@ public:
     void lbutton_up(float vx, float vy, const HqPick& pick);   // HqInput_OnLButtonUp 10071ab0
     void rbutton_down();                                       // HqUi_OnRButtonDown 1008fd50
     bool hotkey(char letter);                                  // HqInput_OnHotkey 10071bb0 (W C B R P)
-    bool escape();                                             // OnGameKeyDown 10071240 / ROLLBACK_STATE
+    bool escape();                                             // OnGameKeyDown 10071240 (Esc, HQ part)
     void rotate_ghost(int dir);                                // BASE_ROTLEFT / ROTRIGHT: ±0.05 rad
     // Per frame: HqUi_Update 10084040 (sidebar animation, lists), PlantList_Update 100878c0,
     // ResearchUI_PollCompleted 10089e60, HqPending_Tick 10079b50, Placement_Update 100584c0, the strip.

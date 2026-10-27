@@ -1357,13 +1357,32 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 return;
             }
             // GAME_MENU (F3, OnUICommandDown case 0xa): the in-game menu (view state 7) opens, or closes when open;
-            // not while placing a building. Esc: ROLLBACK_STATE (the HQ's own handling; on foot nothing to pop).
+            // not while placing a building.
             if (hq && ui_keys.is(input::scan_from_hid(int(ev.key.scancode)), "CMD_GAME_MENU") && hq->mode() != ui::kModePlaceBuilding && hq->mode() != ui::kModePlaceMine) {
                 if (hq->menu_open()) hq->pop_state();
                 else hq->open_menu();
                 return;
             }
-            if (ev.key.scancode == SDL_SCANCODE_ESCAPE && hq) hq->escape();
+            // Esc first goes through the key listeners (OnGameKeyDown 10071240, in its order; the port has no help or
+            // message-log screen): open objectives close, the wingman menu takes it (OnUICommandDown 0x2e4), on foot
+            // the game menu opens (0x2ec), then the HQ part. A key nothing took goes on to the UI bindings
+            // (window procedure 100a0dd0 → DispatchUIKeyMessage): ROLLBACK_STATE pops the view state
+            // (CViewStateQueue::ProcessTransitions).
+            bool key_taken = false;
+            if (ev.key.scancode == SDL_SCANCODE_ESCAPE && hq) {
+                key_taken = true;
+                if (objectives_visible && hq->state() != ui::kStateMenu) objectives_visible = false;
+                else if (hq->wingman.state != 0 && hq->state() != ui::kStateMenu)
+                    hq->wingman_command(wingman_list(), false);
+                else if (hq->state() == ui::kStateHero) hq->open_menu();
+                else key_taken = hq->escape();
+            }
+            if (!key_taken && hq && hq->state() != ui::kStateHero &&
+                ui_keys.is(input::scan_from_hid(int(ev.key.scancode)), "CMD_ROLLBACK_STATE")) {
+                hq->pop_state();
+                return;
+            }
+            if (key_taken) return;
             // The wingman menu (hud-leftovers.md §2.3, §7.3): JAMES_WINGMAN_MENU (0x2e4, `~`) in the cockpit views of a
             // player-controlled unit (not a manned turret, objectives closed): CWingmanMenu_OnCommand 1006dfd0 (Shift →
             // pick); while open, the digits go to the menu (OnGameKeyDown 10071590) and not to the weapon selection
@@ -2610,7 +2629,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         }
         if (pilot_done && opt.pilot_exit >= 0 && sim_ms >= opt.pilot_exit * 1000 &&
             (hq->state() == ui::kStatePilot || hq->state() == ui::kStateTurret))
-            hq->escape();
+            hq->pop_state(); // ROLLBACK_STATE
         if (opt.hq_screen >= 0 && !hq_screen_done && hq->interface_up()) {
             hq_screen_done = true;
             hq->expand_now();

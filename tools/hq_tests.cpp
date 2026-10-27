@@ -21,6 +21,12 @@ using game::kNoObject;
 
 namespace {
 
+// Esc in the shipped bindings: the HQ part of OnGameKeyDown, else ROLLBACK_STATE (a vetoed pop still takes the key).
+bool esc_key(parkan::ui::HqController& hq) {
+    if (!hq.escape()) hq.pop_state();
+    return true;
+}
+
 int g_fail = 0;
 #define CHECK(cond)                                                                 \
     do {                                                                            \
@@ -139,7 +145,7 @@ void test_game_menu() {
     hq.camera.pos.x = 777;
     CHECK(hq.open_menu() && hq.view_mode() == 2);
     CHECK(hq.menu_click(320, 272) == HqController::MenuAction::Load && hq.menu_click(320, 297) == HqController::MenuAction::Exit);
-    CHECK(hq.escape() && hq.state() == kStateHqBunker && near(hq.camera.pos.x, 777)); // the HQ view continues
+    CHECK(esc_key(hq) && hq.state() == kStateHqBunker && near(hq.camera.pos.x, 777)); // the HQ view continues
 }
 
 void test_pilot_state() {
@@ -156,13 +162,13 @@ void test_pilot_state() {
     HqController hq(b.world, nullptr, 0, h);
     CHECK(hq.push_state(kStatePilot, 0x11) && hq.state() == kStatePilot && hq.unit_controlled() && hq.view_mode() == 1);
     CHECK(hq.selected_units().size() == 1 && hq.selected_units()[0] == 0x11);
-    CHECK(hq.open_menu() && hq.escape() && hq.state() == kStatePilot); // 7 → 1: no game-side call
+    CHECK(hq.open_menu() && esc_key(hq) && hq.state() == kStatePilot); // 7 → 1: no game-side call
     CHECK(calls.size() == 1);
-    CHECK(hq.escape() && hq.state() == kStatePilot); // vetoed
+    CHECK(esc_key(hq) && hq.state() == kStatePilot); // vetoed
     hq.pop_to_hero();                                // vetoed, no endless loop
     CHECK(hq.state() == kStatePilot);
     allow_exit = true;
-    CHECK(hq.escape() && hq.state() == kStateHero && hq.selected_units().empty());
+    CHECK(esc_key(hq) && hq.state() == kStateHero && hq.selected_units().empty());
     CHECK(calls.size() == 4 && calls.back() == std::make_pair(int(kStatePilot), int(kStateHero)));
 }
 
@@ -174,7 +180,7 @@ void test_remote_state() {
     hq.camera.pos.x = 640;
     CHECK(hq.push_state(kStateRemote, 0x12) && hq.state() == kStateRemote && hq.view_mode() == 1 && hq.unit_controlled());
     CHECK(!hq.interface_up() && hq.selected_units().size() == 1 && hq.selected_units()[0] == 0x12);
-    CHECK(hq.escape() && hq.state() == kStateHqBunker && near(hq.camera.pos.x, 640) && hq.selected_units().empty());
+    CHECK(esc_key(hq) && hq.state() == kStateHqBunker && near(hq.camera.pos.x, 640) && hq.selected_units().empty());
     CHECK(!hq.push_state(kStateRemote, 0x12) || hq.state() == kStateRemote);
 }
 
@@ -204,7 +210,7 @@ void test_hq_unit_state() {
     const float dd = std::sin(hq.camera.tilt) * hq.camera.follow_dist;
     CHECK(std::fabs(hq.camera.pos.x - (700 - std::cos(hq.camera.yaw) * dd)) <= 3.01f);
     CHECK(!hq.push_state(kStateHqUnit, 0x14) && hq.state() == kStateHqUnit); // already the top: nothing
-    CHECK(hq.escape() && hq.state() == kStateHqBunker && !hq.camera.follow_pos);
+    CHECK(esc_key(hq) && hq.state() == kStateHqBunker && !hq.camera.follow_pos);
 }
 
 void test_turret_state() {
@@ -212,11 +218,11 @@ void test_turret_state() {
     Base b;
     HqController hq(b.world, nullptr, 0, b.host());
     CHECK(hq.push_state(kStateTurret, 0x80000001) && hq.view_mode() == 6 && hq.unit_controlled() && !hq.interface_up());
-    CHECK(hq.escape() && hq.state() == kStateHero);
+    CHECK(esc_key(hq) && hq.state() == kStateHero);
     hq.hero_enters_building(0x10, 0x80000001);
     hq.camera.pos.x = 610;
     CHECK(hq.push_state(kStateTurret, 0x80000001) && hq.state() == kStateTurret);
-    CHECK(hq.escape() && hq.state() == kStateHqBunker && near(hq.camera.pos.x, 610));
+    CHECK(esc_key(hq) && hq.state() == kStateHqBunker && near(hq.camera.pos.x, 610));
 }
 
 void test_wingman_menu() {
