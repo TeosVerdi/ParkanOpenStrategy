@@ -77,7 +77,7 @@ public:
     float mult = 1;                              // ctl+0x660 (property 0xb4)
     std::uint32_t clan = 0;                      // ctl+0x550
     bool invulnerable = false;                   // ctl+0x5b0 (property 0xa2)
-    bool player = false;                         // class 3 (the hero): no removal, no debris, part 0 kept
+    bool building = false;                       // control class 3: no removal, no debris, part 0 kept (the hero is class 4)
     std::int32_t removal_delay_ms = 0;           // body[18]
     std::optional<float> removal_at;             // ctl+0x59c
     bool killed = false;                         // part 0 / a vital part reached 0 (clan := 0xfffe)
@@ -91,7 +91,7 @@ public:
     void finish_init();
 
     // AddPartHP (10010f30): clamp to [0, max], update the total; at 0 the part is destroyed, and part 0
-    // (`root`) or a vital (flag 1) part kills the object: clan 0xfffe; then, except for the player (class 3:
+    // (`root`) or a vital (flag 1) part kills the object: clan 0xfffe; then, except for a building (class 3:
     // nothing more), removal at now + body[18], part 0 emptied and its stage updated (the death explosion).
     void add_part_hp(std::size_t part, float delta, float now_ms);
     // ApplyDamageTotal (10010ba0): damage spread over the parts by their HP (healing by their missing

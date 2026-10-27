@@ -74,12 +74,27 @@ void test_damage_state() {
         CHECK(near(d.parts[0].hp, 0));
     }
     {
-        // A vital part (runtime flag 1, mesh node flag 0x200) kills as well; the player is never removed.
+        // A vital part (runtime flag 1, mesh node flag 0x200) kills as well. The hero is class 4 like any
+        // robot: removal at now + body[18], part 0 emptied (AddPartHP 100110ab).
         DamageState d = make_state({100, 50}, {-1, 0});
         d.parts[1].flags |= 1;
-        d.player = true;
         d.add_part_hp(1, -50, 5);
-        CHECK(d.killed && !d.removal_at);
+        CHECK(d.killed && d.removal_at && near(*d.removal_at, 2005) && near(d.parts[0].hp, 0));
+    }
+    {
+        // A building (class 3) gets only the clan: no removal time, part 0 kept.
+        DamageState d = make_state({100, 50}, {-1, 0});
+        d.parts[1].flags |= 1;
+        d.building = true;
+        d.add_part_hp(1, -50, 5);
+        CHECK(d.killed && d.clan == kKilledClan && !d.removal_at && near(d.parts[0].hp, 100));
+    }
+    {
+        // A destroyed part takes the parts under it (the building exemption is in CombatWorld).
+        DamageState d = make_state({100, 50, 50}, {-1, 0, 1});
+        d.add_part_hp(1, -50, 0);
+        d.propagate_destruction(0);
+        CHECK(d.parts[2].destroyed());
     }
     {
         // ApplyDamageTotal: proportional to HP, or sequential from the last part.
@@ -470,7 +485,7 @@ void test_rooms_corpus(AssetLibrary& lib, const std::filesystem::path& game) {
                 reload->flags, at.x, at.y, at.z);
     CombatWorld world(lib, ground, nullptr);
     const std::size_t hi = world.add_unit(*hero, hero->placement->identity, hero->placement->ai_index, true);
-    const std::size_t pi = world.add_unit(*plant, plant->placement->identity, plant->placement->ai_index, false);
+    const std::size_t pi = world.add_unit(*plant, plant->placement->identity, plant->placement->ai_index, false, true);
     world.set_rooms(pi, rooms);
     Combatant& h = world.unit(hi);
     h.energy.set_battery_fraction(0.3f);

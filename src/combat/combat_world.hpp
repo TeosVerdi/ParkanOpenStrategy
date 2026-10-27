@@ -214,8 +214,9 @@ public:
     CombatWorld(AssetLibrary& lib, const TerrainGround& ground, const TraceMesh* statics);
 
     // Adds a live unit: its gun devices (with their bullets), damage parts, armour and removal delay.
-    // `player`: the hero (class 3: guns selected through the keys, never removed).
-    std::size_t add_unit(LiveUnit& unit, std::uint32_t logic_id, std::uint32_t clan, bool player);
+    // `player`: the hero (guns selected through the keys). `building`: control class 3 (no
+    // removal by Control, no debris; the hero is class 4 like every robot).
+    std::size_t add_unit(LiveUnit& unit, std::uint32_t logic_id, std::uint32_t clan, bool player, bool building = false);
     std::size_t size() const { return units_.size(); }
     Combatant& unit(std::size_t i) { return *units_[i]; }
     const Combatant& unit(std::size_t i) const { return *units_[i]; }

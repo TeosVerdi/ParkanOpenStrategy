@@ -300,14 +300,14 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
     // (combatant index live.size() + building index).
     combat::CombatWorld combat(lib, ground, &trace_statics);
     for (std::size_t i = 0; i < live.size(); ++i)
-        combat.add_unit(*live[i], live[i]->placement->identity, live[i]->placement->ai_index, i == hero_slot);
+        combat.add_unit(*live[i], live[i]->placement->identity, live[i]->placement->ai_index, i == hero_slot, false);
     // The reload rooms of a building: its model's hallway vertices (notes/energy.md §3.1).
     auto add_rooms = [&](std::size_t ci, const LiveUnit& body) {
         const UnitPart& root = body.model.parts.front();
         combat.set_rooms(ci, combat::build_rooms(combat::load_hallway(lib, root.mesh_archive, root.mesh_entry)));
     };
     for (auto& b : buildings) {
-        const std::size_t ci = combat.add_unit(b->body(), b->body().placement->identity, b->body().placement->ai_index, false);
+        const std::size_t ci = combat.add_unit(b->body(), b->body().placement->identity, b->body().placement->ai_index, false, true);
         add_rooms(ci, b->body());
         SDL_Log("play: building %08x %s: %.0f HP, %zu doors, capture door %s", b->body().placement->identity, b->body().placement->resource.c_str(),
                 combat.unit(ci).damage.initial, b->items().size() - (b->can_be_captured() ? 1 : 0), b->can_be_captured() ? "yes" : "no");
@@ -1325,7 +1325,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
         }
         const std::size_t i = live.size();
         live.push_back(std::move(u));
-        const std::size_t ci = combat.add_unit(*live[i], lid, w->clan, false);
+        const std::size_t ci = combat.add_unit(*live[i], lid, w->clan, false, false);
         live_ci.push_back(ci), ci_live.push_back(std::int32_t(i)), ci_bld.push_back(-1);
         unit_of[lid] = ci, tma_clans[lid] = w->clan, tma_types[lid] = w->type;
         perception.add_unit(lid, ci, w->clan, w->type);
@@ -1366,7 +1366,7 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
             }
         const std::size_t k = buildings.size();
         buildings.push_back(std::make_unique<Building>(std::move(body), w->type));
-        const std::size_t ci = combat.add_unit(buildings[k]->body(), lid, w->clan, false);
+        const std::size_t ci = combat.add_unit(buildings[k]->body(), lid, w->clan, false, true);
         bld_ci.push_back(ci), ci_live.push_back(-1), ci_bld.push_back(std::int32_t(k));
         add_rooms(ci, buildings[k]->body());
         bind_power(ci);
@@ -2020,8 +2020,9 @@ int run_play(SDL_Window* window, AssetLibrary& lib, const PlayOptions& opt) {
                 }
                 if (hq && !v.building()) hq->on_unit_removed(v.logic_id, std::size_t(e.unit) == hero_slot, std::size_t(e.unit) == ctl_ci);
                 if (std::size_t(e.unit) == hero_slot) {
-                    // The hero (class 3) stays in the world as it is: no removal, no debris (AddPartHP
-                    // 10010f30, DetachPartDebris 100102a0). iron3d's unit registry (1007daa0, after
+                    // The hero is class 4 like any robot: Control removes it at now + body[18] and it sheds
+                    // debris (AddPartHP 10010f30, DetachPartDebris 100102a0), handled as for any unit below.
+                    // The mission still fails this frame: iron3d's unit registry (1007daa0, after
                     // stdCalculateGame in the same MainLoop frame) sees its clan 0xfffe and drops it (1007d8a0 →
                     // OnUnitRemoved 100755f0): the own unit's VOICE_UNIT_LOST, then CMission_EnterSpectatorAtUnit
                     // (100a4df0) and CGame_SetMissionFailed (VOICE_MISSION_FAIL): the world stops from this frame.

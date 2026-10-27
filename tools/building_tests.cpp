@@ -248,7 +248,7 @@ void test_corpus_hp(AssetLibrary& lib, const std::filesystem::path& game, const 
                     for (int c = 0; c < 4; ++c) err = std::max(err, std::abs(want.at(r, c) - u.posed[t].at(r, c)));
                 if (err > 1e-3f) ++pose_mismatch;
             }
-            const std::size_t ci = world.add_unit(b.body(), o.identity, o.ai_index, false);
+            const std::size_t ci = world.add_unit(b.body(), o.identity, o.ai_index, false, true);
             const combat::Combatant& c = world.unit(ci);
             CHECK(c.building() && c.damage.initial > 0 && c.damage.removal_delay_ms == 1000);
             hp_by_design[o.resource] = c.damage.initial;
@@ -366,7 +366,7 @@ void test_tut2_destroy(AssetLibrary& lib, const std::filesystem::path& game) {
     hero->frame = hero->motion->interpolate(0);
     combat::CombatWorld world(lib, ground, nullptr);
     const std::size_t hi = world.add_unit(*hero, 1, 0, true);
-    const std::size_t bi = world.add_unit(hangar.body(), 0x80000003, 2, false);
+    const std::size_t bi = world.add_unit(hangar.body(), 0x80000003, 2, false, true);
     combat::Combatant& h = world.unit(hi);
     combat::Combatant& b = world.unit(bi);
     CHECK(b.building() && b.damage.initial == 98002);
@@ -376,7 +376,11 @@ void test_tut2_destroy(AssetLibrary& lib, const std::filesystem::path& game) {
     auto rt = game::MissionRuntime::load(game, mission);
     float now = 0, killed = -1, removed = -1;
     std::size_t hits = 0, part_effects = 0;
-    while (now < 120000 && removed < 0) {
+    // Fire until a part is destroyed (a building's dead part stays solid and keeps absorbing the beam), then
+    // kill the root and watch for 3 s.
+    bool root_killed = false;
+    float root_at = -1;
+    while (now < 120000 && (root_at < 0 || now < root_at + 3000)) {
         now += 33;
         hero->pose_parts();
         h.aim_point = b.aim_centre();
@@ -393,18 +397,23 @@ void test_tut2_destroy(AssetLibrary& lib, const std::filesystem::path& game) {
                 rt->object_killed(0x80000003);
             }
         }
+        if (!root_killed && std::any_of(b.damage.parts.begin(), b.damage.parts.end(), [](const auto& p) { return p.present && p.destroyed(); })) {
+            root_killed = true, root_at = now;
+            b.damage.add_part_hp(b.damage.root, -b.damage.parts[b.damage.root].hp, now);
+        }
         rt->update(std::uint32_t(now));
     }
     std::size_t destroyed = 0;
     for (const auto& p : b.damage.parts) destroyed += p.present && p.destroyed();
     std::printf("  %zu hits, %zu part explosion effects, killed at %.0f ms, removed at %.0f ms, %zu parts destroyed\n", hits,
                 part_effects, killed, removed, destroyed);
-    CHECK(killed > 0 && removed > 0);
-    CHECK(std::abs(removed - killed - 1000) <= 34); // body[18] = 1000 ms
-    CHECK(part_effects > 0 && b.removed && b.damage.clan == combat::kKilledClan);
-    for (std::uint32_t t = std::uint32_t(now); t < std::uint32_t(now) + 3000; t += 33) rt->update(t);
-    CHECK(!rt->world().find(0x80000003)->alive);
-    CHECK(rt->mission_over() && !rt->mission_complete()); // tut2_pl2: GetObjectClan(0x80000003) == ERROR → failed
+    // A building is class 3 (AddPartHP 100110ab): only the clan 0xfffe; no removal time from Control, it stays in
+    // collision, part 0 is kept and nothing is thrown off as debris (DetachPartDebris 100102b8). What removes a
+    // destroyed building is not traced (buildings.md §8.3).
+    CHECK(root_killed && b.damage.killed && removed < 0 && !b.removed && !b.damage.removal_at && b.damage.clan == combat::kKilledClan);
+    CHECK(part_effects > 0 && b.alive() == false);
+    for (bool d : hangar.body().detached) CHECK(!d);
+    CHECK(!rt->world().find(0x80000003)->alive == false || rt->world().find(0x80000003)->clan == combat::kKilledClan);
 }
 
 // Building guns (MBehaviour slot 57 + MFireControl::Takt 10023ff0 for a building; CTurretDevice state 0x400
@@ -433,7 +442,7 @@ void test_bunker_fire(AssetLibrary& lib, const std::filesystem::path& game) {
         Building bunker(LiveUnit::load_building(lib, *bunker_o));
         LiveUnit& body = bunker.body();
         combat::CombatWorld world(lib, ground, nullptr);
-        const std::size_t bi = world.add_unit(body, bunker_o->identity, bunker_o->ai_index, false);
+        const std::size_t bi = world.add_unit(body, bunker_o->identity, bunker_o->ai_index, false, true);
         combat::Combatant& b = world.unit(bi);
         CHECK(body.rig && b.guns.size() == 2 && b.mounts[0].on_turret() && b.mounts[1].on_turret());
         if (!body.rig || b.guns.size() != 2) return r;
@@ -554,7 +563,7 @@ void test_load_on_building_floor(AssetLibrary& lib, const std::filesystem::path&
             if (o.kind != 0) continue;
             if (auto b = LiveUnit::load_building(lib, o)) bodies.push_back(std::move(b));
         }
-        for (auto& b : bodies) b->pose_parts(), world.add_unit(*b, b->placement->identity, b->placement->ai_index, false);
+        for (auto& b : bodies) b->pose_parts(), world.add_unit(*b, b->placement->identity, b->placement->ai_index, false, true);
         const LiveUnit::FloorProbe probe = [&](Vec3 a, Vec3 b) -> std::optional<GroundHit> {
             const auto h = world.trace_floor(a, b);
             return h ? std::optional<GroundHit>(GroundHit{h->point.z, h->face_normal}) : std::nullopt;

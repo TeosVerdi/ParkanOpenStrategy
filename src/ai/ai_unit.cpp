@@ -19,8 +19,8 @@ AiUnit::AiUnit(UnitMotion& motion, const LandMap& map, const ArealGraph& graph, 
     walker_.walk_chassis = cfg.walk_chassis;
     walker_.animal = cfg.animal;
     walker_.unit_state = [this] { return state(); };
-    // Control's Update loop: IWizard::Takt(round(clock)) before SelectNextMotion (class 3, the player's
-    // robot, has no such call). The placement is the pose at the motion clock (assumed for
+    // Control's Update loop: IWizard::Takt(round(clock)) before SelectNextMotion (class 3, a building,
+    // has no such call). The placement is the pose at the motion clock (assumed for
     // GetPlacement(2)); the look-ahead is the duration of the step that just ended (ctl+0xf0).
     motion.pilot = [this](UnitMotion& m, float clock) {
         if (auto out = wizard_.takt(std::uint32_t(std::lround(clock)), m.step_duration(), m.end_matrix(), m.body)) {

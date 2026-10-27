@@ -250,13 +250,13 @@ const BulletProto* CombatWorld::bullet(const ResName& name) {
     }
 }
 
-std::size_t CombatWorld::add_unit(LiveUnit& u, std::uint32_t logic_id, std::uint32_t clan, bool player) {
+std::size_t CombatWorld::add_unit(LiveUnit& u, std::uint32_t logic_id, std::uint32_t clan, bool player, bool building) {
     auto c = std::make_unique<Combatant>();
     c->unit = &u;
     c->logic_id = logic_id;
     DamageState& d = c->damage;
     d.clan = clan;
-    d.player = player;
+    d.building = building;
     d.removal_delay_ms = std::bit_cast<std::int32_t>(u.ctld.body[18]);
     const float scale = u.placement ? u.placement->scale[2] : 1.f;
     UnitModel& model = u.model;
@@ -690,8 +690,8 @@ std::optional<WorldHit> CombatWorld::trace(Vec3 a, Vec3 b, std::int32_t skip, bo
             best = WorldHit{WorldHit::Kind::Static, h->t, h->point, h->normal, -1, -1, h->face_normal};
     for (std::size_t i = 0; i < units_.size(); ++i) {
         const Combatant& c = *units_[i];
-        // The dead leave collision (CCollObject message 7), except the player's robot (class 3).
-        if (std::int32_t(i) == skip || c.removed || (!c.alive() && !c.damage.player) || c.unit->posed.empty() ||
+        // The dead leave collision (CCollObject message 7), except a building (class 3; the hero is class 4).
+        if (std::int32_t(i) == skip || c.removed || (!c.alive() && !c.damage.building) || c.unit->posed.empty() ||
             (!everything && !c.building()))
             continue;
         if (!segment_hits_sphere(a, b, c.centre(), c.bound_radius_)) continue;
@@ -701,8 +701,8 @@ std::optional<WorldHit> CombatWorld::trace(Vec3 a, Vec3 b, std::int32_t skip, bo
             const RenderDraw& d = mesh.draws[di];
             if (d.transform >= c.unit->posed.size()) continue;
             const std::size_t part = c.damage.resolve(d.transform);
-            // Thrown off as debris (DetachPartDebris 100102a0; never the player's robot, class 3).
-            if (part < c.damage.parts.size() && c.damage.parts[part].destroyed() && !c.damage.player) continue;
+            // Thrown off as debris (DetachPartDebris 100102a0; never a building, class 3).
+            if (part < c.damage.parts.size() && c.damage.parts[part].destroyed() && !c.damage.building) continue;
             const Mat4& m = c.unit->posed[d.transform];
             if (c.building()) {
                 Combatant::DrawCache& dc = c.draw_cache_[di];
@@ -989,8 +989,8 @@ void CombatWorld::apply_record(std::size_t v, const DamageRecord& rec, float now
             const Vec3 pc = part_centre(c, part, r);
             d.damage_part_from_record(part, std::int32_t(v), rec, pc, r, now);
             // A destroyed part is thrown off with the parts under it (DetachPartDebris; port reading:
-            // they are destroyed with it). DetachPartDebris leaves class 3 (the player's robot) alone.
-            if (d.parts[part].destroyed() && !d.player) d.propagate_destruction(now);
+            // they are destroyed with it). DetachPartDebris leaves class 3 (a building) alone.
+            if (d.parts[part].destroyed() && !d.building) d.propagate_destruction(now);
             d.update_part_stage(part, true);
         }
     } else if (rec.kind == 3 || rec.kind == 4) {
@@ -1164,7 +1164,7 @@ void CombatWorld::update(float now) {
         det.resize(c.damage.parts.size(), false);
         for (std::size_t t = 0; t < det.size(); ++t) {
             const std::size_t p = c.damage.resolve(t);
-            det[t] = !c.damage.player && p != c.damage.root && p < c.damage.parts.size() && c.damage.parts[p].destroyed();
+            det[t] = !c.damage.building && p != c.damage.root && p < c.damage.parts.size() && c.damage.parts[p].destroyed();
         }
     }
 }

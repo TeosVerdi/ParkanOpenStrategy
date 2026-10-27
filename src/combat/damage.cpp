@@ -48,11 +48,11 @@ void DamageState::add_part_hp(std::size_t i, float delta, float now) {
         clan = kKilledClan;
         killed = true;
         killed_at = now;
-        // Class 3 (the player's robot) stops here (10010f30: the rest is under `class != 3`): no removal
-        // time, it stays in collision, part 0 is not emptied nor its stage updated here (the hit's own
-        // UpdatePartStage in OnDamageRecord still runs). State flag 0x10000000 (no auto-removal) is not
-        // modelled.
-        if (player) return;
+        // Class 3 (a building; the hero is class 4) stops here (AddPartHP 10010f30, test at 100110ab: the
+        // rest is under `class != 3`): no removal time, it stays in collision, part 0 is not emptied nor its
+        // stage updated here (the hit's own UpdatePartStage in OnDamageRecord still runs). State flag
+        // 0x10000000 (no auto-removal) is not modelled.
+        if (building) return;
         removal_at = now + float(removal_delay_ms);
         add_part_hp(root, -total, now);
         update_part_stage(root, true);

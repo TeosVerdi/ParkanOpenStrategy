@@ -349,14 +349,17 @@ void test_corpus_hero_death(const std::filesystem::path& game) {
     for (const auto& p : h.damage.parts) with_hp += p.present && p.hp > 0;
     std::printf("  killed at %.2f s, %.0f HP left in %zu parts (of %.0f), %zu removals, %zu hits on it later; state %d\n", killed / 1000,
                 hp_at_kill, with_hp, h.damage.initial, removed, hits_after, int(end.state()));
-    CHECK(killed > 0 && h.damage.clan == combat::kKilledClan && !h.alive() && !h.removed && removed == 0);
-    CHECK(!h.damage.removal_at && hp_at_kill > 0 && with_hp > 0 && h.damage.parts[h.damage.root].destroyed());
-    for (bool d : hero->detached) CHECK(!d); // nothing thrown off
+    // The hero is class 4 like any robot (AddPartHP 100110ab): removal at death + body[18], part 0 emptied,
+    // its destroyed parts thrown off as debris, out of collision. The mission fails the same frame.
+    CHECK(killed > 0 && h.damage.clan == combat::kKilledClan && !h.alive() && h.removed && removed == 1);
+    CHECK(h.damage.removal_at && h.damage.parts[h.damage.root].destroyed() && near(h.damage.parts[h.damage.root].hp, 0));
+    std::size_t shed = 0;
+    for (bool d : hero->detached) shed += d;
+    CHECK(shed > 0);
     CHECK(end.state() == GameState::Failed && !end.simulating());
-    // Still in collision: the foe's shots go on hitting it (in the game the world has stopped by then).
-    CHECK(hits_after > 0);
+    // Removed: out of collision.
     const auto tr = world.trace(foe->position() + Vec3{0, 0, 3}, h.aim_centre(), std::int32_t(fi));
-    CHECK(tr && tr->unit == std::int32_t(hi));
+    CHECK(!tr || tr->unit != std::int32_t(hi));
     // The voices: VOICE_UNIT_LOST (OnUnitRemoved, own unit) then VOICE_MISSION_FAIL, both in voices.lib.
     if (const auto cfg = resolve_path(game, "UI/game_resources.cfg")) {
         const Bytes b = read_file(*cfg);
